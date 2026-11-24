@@ -540,9 +540,9 @@ test('narrow board membership grants only selected access, handles leaving and d
 });
 
 test('direct editors create, edit and move board lists by keyboard and pointer, including stale order recovery', { timeout: 150_000 }, async () => {
-  await workspaceBrowser(async ({ origin, page }) => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
     const editor = await page({ width: 1440, height: 900 });
-    const colleague = await page({ width: 1440, height: 900 });
+    const colleague = await page({ width: 390, height: 844 });
     const viewer = await page({ width: 390, height: 844 });
     const path = board(ids.privateBoard) + '?context=board&view=grid';
     await signIn(editor, origin, 'first-editor');
@@ -600,9 +600,11 @@ test('direct editors create, edit and move board lists by keyboard and pointer, 
     await expect(moveFinished).toBeFocused();
 
     async function drag(from, target, cancel = false) {
-      const handle = await listRow(editor, from).locator('[data-list-drag-handle]').boundingBox();
+      const source = listRow(editor, from).locator('[data-list-drag-handle]');
+      // Wait until the handle is stable and reachable after any dnd-kit drop animation.
+      await source.hover();
+      const handle = await source.boundingBox();
       assert.ok(handle);
-      await editor.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
       await editor.mouse.down();
       await editor.mouse.move(handle.x + handle.width / 2 - 15, handle.y + handle.height / 2, { steps: 4 });
       await expect(target).toBeVisible();
@@ -632,9 +634,12 @@ test('direct editors create, edit and move board lists by keyboard and pointer, 
 
     await colleague.goto(origin + path);
     const stale = colleague.getByRole('button', { name: 'Move Done', exact: true });
-    await stale.click();
+    await stale.focus();
+    await colleague.keyboard.press('Enter');
     const staleDialog = colleague.getByRole('dialog', { name: 'Move list' });
-    await staleDialog.getByLabel('Place list').selectOption({ label: 'Before To do' });
+    const placement = staleDialog.getByLabel('Place list');
+    await expect(placement).toBeFocused();
+    await placement.press('Home');
     await add(editor, 'Concurrent addition', 'active');
     await staleDialog.getByRole('button', { name: 'Move list', exact: true }).click();
     await expect(colleague.getByRole('alert')).toContainText('The list order changed');
@@ -650,6 +655,17 @@ test('direct editors create, edit and move board lists by keyboard and pointer, 
     await expect(listNames(editor)).toHaveText(['Archive']);
     await expect(editor.getByRole('button', { name: 'Edit Archive' })).toHaveCount(0);
     await expect(editor.getByRole('button', { name: 'Add list' })).toHaveCount(0);
+
+    const legacy = 'Imported ' + 'long-list-name'.repeat(14);
+    await fixture.gate.runCommand(() => fixture.db.collection('lists').updateOne({ ...fixture.scope, id: ids.privateActiveList },
+      { $set: { name: legacy } }));
+    await colleague.reload();
+    await expect(listRow(colleague, legacy)).toBeVisible();
+    assert.ok(await colleague.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+    await colleague.getByRole('button', { name: 'Move ' + legacy, exact: true }).click();
+    await expect(staleDialog).toBeVisible();
+    assert.ok(await staleDialog.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth));
+
   });
 });
 
