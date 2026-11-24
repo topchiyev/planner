@@ -36,6 +36,7 @@ interface Records {
   cards: Ordered & {
     boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
     description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
+    dueDateCompleted?: boolean | null; isDueCompleted?: boolean | null; stopwatch?: unknown;
     listChangedAt?: Date | null; historySequence?: Long; coverAttachmentId?: string | null;
   };
   labels: Omit<Ordered, 'name'> & { name?: string | null; boardId: string; color?: string | null };

@@ -91,15 +91,17 @@ export const boardWorkspaceSchema = z.strictObject({
   latestEventSequence: signedInt64TextSchema,
   eventCursor: boardEventCursorSchema,
 });
+export const cardStopwatchSchema = z.strictObject({ startedAt: nullableUtcInstantSchema, total: nonnegative }).nullable();
+export type CardStopwatch = z.infer<typeof cardStopwatchSchema>;
 export const cardSummarySchema = ordered.extend({
   boardId: publicIdSchema, listId: publicIdSchema, kind: workspaceCardContext, type: workspaceCardType,
-  closed: z.boolean(), dueDate: nullableUtcInstantSchema, permissions: cardAccessSchema,
+  closed: z.boolean(), dueDate: nullableUtcInstantSchema, dueDateCompleted: z.boolean().nullable(), permissions: cardAccessSchema,
 });
 const attachmentSchema = named.extend({
   cardId: publicIdSchema, kind: z.enum(['file', 'link']), available: z.boolean(), byteLength: nonnegative.nullable(), url: maybeText,
 });
 export const cardDetailSchema = cardSummarySchema.extend({
-  description: maybeText, previousListId: maybeId, labels: z.array(boardLabelSchema),
+  description: maybeText, stopwatch: cardStopwatchSchema, previousListId: maybeId, labels: z.array(boardLabelSchema),
   assignees: z.array(workspacePersonSchema), attachments: z.array(attachmentSchema), coverAttachmentId: maybeId,
   fields: z.array(fieldGroupSchema),
   values: z.array(z.strictObject({ fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, value: z.string() })),

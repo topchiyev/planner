@@ -79,7 +79,31 @@ export function createRelationshipReads(database: Db, scope: WorkspaceAuthorizat
     };
   }
 
+  async function mentionMembers(input: RelationshipReadInput<'boards.mentionMembers'>) {
+    const { permissions } = await scope.requireBoard(input.id);
+    requireCapability(permissions.canEdit);
+    const search = textQuery(input.q, ['name', 'username']);
+    const paging = page('boards.mentionMembers', input, [search.binding]);
+    const rows = await records.aggregate<Person>('users', {
+      ...search.filter, $expr: { $and: [
+        canonical, { $eq: [{ $type: '$disabledAt' }, 'null'] }, { $in: ['$role', memberRoles] },
+      ] },
+    }, [
+      records.lookup('boardMembers', 'member', { userId: '$id' }, {
+        boardId: input.id, $expr: { $and: [
+          canonical, equal('boardId', input.id), { $eq: ['$userId', '$$userId'] }, directBoardRole,
+        ] },
+      }, [{ $limit: 1 }]),
+      { $match: { 'member.0': { $exists: true } } },
+      ...paging.stages,
+      { $project: personProjection },
+    ]);
+    const result = paging.result(rows, ({ id }) => ({ id }));
+    return { data: result.selected.map(personOf), page: result.page };
+  }
+
   return {
+    'boards.mentionMembers': mentionMembers,
     async 'projects.managers'(input: RelationshipReadInput<'projects.managers'>) {
       const project = await scope.requireProject(input.id);
       requireCapability(!!project.manager || project.sharedAdmin);

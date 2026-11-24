@@ -2,12 +2,13 @@ import { createHash } from 'node:crypto';
 import { safeMediaLink, type WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document, Long } from 'mongodb';
-import { decodeRank, readStoredInstant } from '../../storage/identity.js';
+import { decodeRank } from '../../storage/identity.js';
 import type { BoardEventCursors } from '../board-events/cursor.js';
 import { createBoardEventStore } from '../board-events/store.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
-import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
+import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { cardClosed, cardDto, cardStopwatch } from './card-state.js';
 import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
 import { boardListOrderVersion, listDto } from './list-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
@@ -26,11 +27,6 @@ const entity = ({ id, revision, createdAt, updatedAt }: EntityProjection) =>
 const ordered = (row: EntityProjection & { rank?: Long | null }) => ({ ...entity(row), rank: rank(row.rank) });
 const person = ({ id, name, username }: WorkspaceRow<'users'>) => ({ id, name, username: username ?? null });
 const labelDto = (row: WorkspaceRow<'labels'>) => ({ ...ordered(row), boardId: row.boardId, name: row.name ?? null, color: row.color ?? null });
-
-function cardDto(card: WorkspaceRow<'cards'>, board: BoardAccessContext, list: WorkspaceRow<'lists'>) {
-  return { ...ordered(card), boardId: board.board.id, listId: list.id, name: card.name, type: card.type, kind: card.kind,
-    closed: card.closed ?? list.kind === 'closed', dueDate: iso(readStoredInstant(card.dueDate ?? null, 'dueDate')), permissions: cardPermissions(board, list) };
-}
 
 const fieldDefinition = (row: WorkspaceRow<'fieldDefinitions'>) => ({
   ...ordered(row), name: row.name, fieldGroupId: row.fieldGroupId, showOnFront: row.showOnFront ?? false,
@@ -129,7 +125,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       return {
         ...base, kind: 'linked' as const,
         linkedCard: { id: target.card.id, name: target.card.name, boardId: target.board.board.id,
-          completed: target.card.closed ?? target.list.kind === 'closed' },
+          completed: cardClosed(target.card, target.list) },
         assignee: await publicAssignee(row.assigneeId, boardId),
       };
     } catch (error) {
@@ -286,7 +282,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file');
       const coverAttachmentId = cover && (cover.availability === unavailableMedia
         || (cover.availability === availableMedia && await blobAvailable(cover.blobDigest, true))) ? cover.id : null;
-      return { data: { ...cardDto(card, board, list), description: card.description ?? null, previousListId, labels: labels.map(labelDto),
+      return { data: { ...cardDto(card, board, list), description: card.description ?? null, stopwatch: cardStopwatch(card.stopwatch), previousListId, labels: labels.map(labelDto),
         assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: visibleAttachments,
         coverAttachmentId, ...fields } };
     },

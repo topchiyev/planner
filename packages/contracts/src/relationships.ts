@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { cardLifecycleCommands } from './card-lifecycle.js';
 import { boardLifecycleCommands } from './board-lifecycle.js';
 import { listLifecycleCommands } from './list-lifecycle.js';
 import { publicIdSchema, revisionSchema } from './storage.js';
@@ -71,6 +72,7 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 }
 
 export const relationshipCommands = {
+  ...cardLifecycleCommands,
   ...boardLifecycleCommands,
   ...listLifecycleCommands,
   'projects.create': command('projects.create', 'POST', '/api/v1/projects', 201, 'create', projectCreate, workspaceData(id)),
@@ -92,6 +94,8 @@ export const relationshipReads = {
   'projects.managerCandidates': read('projects.managerCandidates', '/api/v1/projects/:id/manager-candidates', candidatesInput,
     workspacePage(workspacePersonSchema)),
   'boards.members': read('boards.members', '/api/v1/boards/:id/members', rosterInput, workspacePage(member)),
+  'boards.mentionMembers': read('boards.mentionMembers', '/api/v1/boards/:id/mention-members', candidatesInput,
+    workspacePage(workspacePersonSchema)),
   'boards.memberCandidates': read('boards.memberCandidates', '/api/v1/boards/:id/member-candidates', candidatesInput,
     workspacePage(workspacePersonSchema)),
 } as const;
