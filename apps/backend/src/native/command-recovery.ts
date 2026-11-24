@@ -36,7 +36,9 @@ export function keepCommandRecovery(gate: CommandGate, recover: (running: () => 
 }
 
 export function startNativeCommandRecovery(
-  config: NativeInstallationConfig, gate: CommandGate, recoverPrivate?: (database: Db, installationId: string) => Promise<void>,
+  config: NativeInstallationConfig, gate: CommandGate,
+  recoverPrivate?: (database: Db, installationId: string) => Promise<void>,
+  verifyBeforeReplay?: (database: Db, installationId: string) => Promise<void>,
 ) {
   return keepCommandRecovery(gate, async (running) => {
     const client = await connectConfiguredNativeMongo(config);

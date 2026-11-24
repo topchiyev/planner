@@ -9,7 +9,7 @@ import { isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { readInstallation, requireCurrentSchema } from '../../storage/schema.js';
 import { accounts, getLocalAccount } from './accounts.js';
 import { csrfToken, newToken, normalizeIdentifier, tokenDigest } from './credentials.js';
-import { getFactor } from './mfa-account.js';
+import { getFactor, hasPasswordOnlyAuth, hasPendingFactorEnrollment } from './mfa-account.js';
 import { beginPasswordMfa, verifyPasswordMfa } from './mfa-login.js';
 import type { PasswordHasher } from './password.js';
 
@@ -60,7 +60,7 @@ export async function loadCurrentBrowserSession(database: Db, installationId: st
   if (!stored || !account || account.auth.credentialsVersion !== record.credentialsVersion
       || time.getTime() - record.lastActivityAt.getTime() >= account.inactivityMs) return null;
   if (account.auth.mfa === 'none') {
-    if (record.factorId !== undefined) return null;
+    if (!hasPasswordOnlyAuth(stored) || record.factorId !== undefined) return null;
   } else {
     const factor = getFactor(stored);
     if (!factor || record.factorId !== factor.id) return null;
@@ -127,8 +127,8 @@ export function createBrowserSessions(
             || (record.normalizedEmail !== identifier && record.normalizedUsername !== identifier)) return { status: 'invalid' };
         const time = now();
         if (!mfaKey) {
-          if (account.auth.mfa === 'enrollment-required') return { status: 'enrollment-required' };
-          return account.auth.mfa === 'none' ? createSession(generationId, account, time) : { status: 'invalid' };
+          if (account.auth.mfa === 'enrollment-required' && hasPendingFactorEnrollment(record)) return { status: 'enrollment-required' };
+          return hasPasswordOnlyAuth(record) ? createSession(generationId, account, time) : { status: 'invalid' };
         }
         const step = await beginPasswordMfa(database, installationId, record, time, trustedToken);
         if (step.status !== 'passed') return step;

@@ -34,21 +34,21 @@ async function setup({ db, directory }, staged = false) {
   await installation.insertOne({
     _id: 'installation', installationId, schemaVersion: 0, activeGenerationId: staged ? null : generationId,
     setup: staged ? { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: generationId,
-      stagedMfaEnrollment: { userId, recoveryId, credentialsVersion: 1 } }
+      stagedMfaEnrollment: { userId, recoveryId, accountRevision: 3, credentialsVersion: 2 } }
       : { mode: 'fresh', pendingAction: 'complete', enrollmentGenerationId: generationId },
   });
   const user = {
-    _id: workspaceKey(generationId, userId), id: userId, generationId, revision: 1,
+    _id: workspaceKey(generationId, userId), id: userId, generationId, revision: staged ? 3 : 1,
     name: 'Synthetic MFA account', email: 'mfa@example.test', normalizedEmail: 'mfa@example.test', username: null, normalizedUsername: null,
     role: 'admin', disabledAt: null, createdAt: initial, preferences: defaultPreferences,
     requiresMfaEnrollment: staged,
-    localAuth: { passwordVerifier: verifier, credentialsVersion: 1, mfa: staged ? 'enrollment-required' : 'none' },
+    localAuth: { passwordVerifier: verifier, credentialsVersion: staged ? 2 : 1, mfa: staged ? 'enrollment-required' : 'none' },
   };
   await users.insertOne(user);
   if (staged) {
     await grants.insertOne({
       _id: workspaceKey(generationId, recoveryId), id: recoveryId, userId, generationId, installationId,
-      kind: 'account-recovery', targetEpoch: 0, tokenDigest: tokenDigest(newToken()),
+      kind: 'account-recovery', targetEpoch: 1, targetRevision: 2, actorId: userId, actorEpoch: 0, tokenDigest: tokenDigest(newToken()),
       issuedAt: new Date(initial.getTime() - 60_000), expiresAt: new Date(initial.getTime() + 29 * 60_000),
       consumedAt: new Date(initial.getTime() - 1_000), revokedAt: null,
     });
@@ -87,7 +87,13 @@ test('standalone Mongo atomically binds factor changes, consumes challenge and f
       assert.equal(first.status, 'authenticated');
       assert.deepEqual(await manage.list(first.token), { mfaEnabled: false, devices: [] });
       const own = { _id: workspaceKey(generationId, fixture.userId) };
-      await fixture.users.updateOne(own, { $set: { revision: Number.MAX_SAFE_INTEGER } });
+      await fixture.users.updateOne(own, { $set: { 'localAuth.factor': {} } });
+      assert.equal((await sessions.login({ identifier: 'mfa@example.test', password })).status, 'invalid');
+      assert.equal(await sessions.read(first.token), null);
+      const contradictory = await fixture.user();
+      assert.equal(usableAdmin(contradictory), false);
+      assert.notEqual(adminAccountOf(contradictory).signIn, 'available');
+      await fixture.users.updateOne(own, { $unset: { 'localAuth.factor': '' }, $set: { revision: Number.MAX_SAFE_INTEGER } });
       assert.equal(await manage.begin({ sessionToken: first.token }), null);
       assert.equal(gate.ready, true);
       assert.equal(await grants.countDocuments({ kind: 'mfa-enrollment' }), 0);
@@ -158,7 +164,7 @@ test('only the exact recovered staged administrator can enroll and completion le
   await withFixtureMongo(async (mongo) => {
     const { db } = mongo;
     const fixture = await setup(mongo, true);
-    const { installationId, generationId, userId, recoveryId, gate, manage, sessions, now, installation } = fixture;
+    const { installationId, generationId, userId, recoveryId, gate, manage, sessions, now, grants, users, installation } = fixture;
     const issue = () => gate.runCommand(() => issueStagedMfaTicket(db, installationId, now()));
     try {
       assert.equal((await sessions.login({ identifier: 'mfa@example.test', password })).status, 'invalid');
@@ -170,6 +176,22 @@ test('only the exact recovered staged administrator can enroll and completion le
       assert.equal(await manage.begin({ enrollmentId: ticket }), null);
       assert.equal(await readStagedMfaEnrollment(db, installationId, now()), null);
       await installation.updateOne({}, { $set: { 'setup.stagedMfaEnrollment.recoveryId': recoveryId } });
+      const grantId = { _id: workspaceKey(generationId, recoveryId) };
+      const recovered = await grants.findOne(grantId);
+      assert.ok(recovered);
+      await grants.updateOne(grantId, { $unset: { targetRevision: '' } });
+      assert.equal(await readStagedMfaEnrollment(db, installationId, now()), null);
+      await grants.updateOne(grantId, { $set: { targetRevision: 2, actorId: randomUUID() } });
+      assert.equal(await manage.begin({ enrollmentId: ticket }), null);
+      await grants.updateOne(grantId, { $set: { actorId: userId, userId: randomUUID() } });
+      assert.equal(await manage.begin({ enrollmentId: ticket }), null);
+      await grants.updateOne(grantId, { $set: { userId, tokenDigest: 'invalid' } });
+      assert.equal(await manage.begin({ enrollmentId: ticket }), null);
+      await grants.replaceOne(grantId, recovered);
+      const accountId = { _id: workspaceKey(generationId, userId) };
+      await users.updateOne(accountId, { $set: { revision: 4 } });
+      assert.equal(await manage.begin({ enrollmentId: ticket }), null);
+      await users.updateOne(accountId, { $set: { revision: 3 } });
       const enrollment = await manage.begin({ enrollmentId: ticket });
       assert.ok(enrollment);
       assert.equal(await manage.begin({ enrollmentId: ticket }), null);
@@ -185,6 +207,40 @@ test('only the exact recovered staged administrator can enroll and completion le
       assert.equal((await readInstallation(db, installationId)).activeGenerationId, null);
       assert.equal((await sessions.login({ identifier: 'mfa@example.test', password })).status, 'invalid');
       assert.equal(await db.collection('sessions').countDocuments({}), 0);
+    } finally { await gate.closeAndDrain(); }
+  });
+});
+
+
+test('malformed protected factor audit state refuses replay before credential or audit effects', { timeout: 25_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const { db } = mongo;
+    const fixture = await setup(mongo);
+    const { userId, generationId, gate, sessions, users, installationId, now } = fixture;
+    const accountId = { _id: workspaceKey(generationId, userId) };
+    const record = await fixture.user();
+    try {
+      const login = await sessions.login({ identifier: 'mfa@example.test', password });
+      assert.equal(login.status, 'authenticated');
+      const marker = {
+        id: randomUUID(), revision: record.revision, credentialsVersion: record.localAuth.credentialsVersion,
+        action: 'disabled', time: now(),
+      };
+      await assert.rejects(() => gate.runCommand(() => { throw new Error('test interruption'); }));
+      for (const invalid of [
+        { id: randomUUID() }, { disabledAt: now() }, { requiresMfaEnrollment: true },
+        { 'localAuth.credentialsVersion': -1, 'localAuth.factorAudit.credentialsVersion': -1 },
+      ]) {
+        await users.replaceOne(accountId, record);
+        await users.updateOne(accountId, { $set: { 'localAuth.factorAudit': marker } });
+        await users.updateOne(accountId, { $set: invalid });
+        await assert.rejects(() => gate.recover(() => recoverFactorChanges(db, installationId)), /invalid multifactor transition/u);
+        assert.equal((await db.collection('sessions').findOne({})).revokedAt, null);
+        assert.equal(await db.collection('auditEntries').countDocuments({}), 0);
+      }
+      await users.replaceOne(accountId, record);
+      await gate.recover(() => recoverFactorChanges(db, installationId));
+      assert.ok(await sessions.read(login.token));
     } finally { await gate.closeAndDrain(); }
   });
 });

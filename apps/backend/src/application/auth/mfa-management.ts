@@ -6,7 +6,7 @@ import { workspaceKey } from '../../storage/identity.js';
 import { getLocalAccount } from './accounts.js';
 import { tokenDigest } from './credentials.js';
 import {
-  applyFactorChange, canChangeFactor, getFactor, mfaAccounts, mfaActorScope, readStagedMfaEnrollment, verifyCurrentFactor,
+  applyFactorChange, canChangeFactor, getFactor, hasPendingFactorEnrollment, mfaAccounts, mfaActorScope, readStagedMfaEnrollment, verifyCurrentFactor,
 } from './mfa-account.js';
 import { createTotpSecret, issueRecoveryCodes, matchTotpCounter } from './mfa-crypto.js';
 import {
@@ -17,7 +17,7 @@ import { activeAccountGeneration, loadCurrentBrowserSession } from './sessions.j
 
 export async function issueStagedMfaTicket(database: Db, installationId: string, time: Date) {
   const stage = await readStagedMfaEnrollment(database, installationId, time);
-  if (!stage || !getLocalAccount(stage.account)) return null;
+  if (!stage) return null;
   const { recoveryId } = stage.scope;
   return issueMfaProof(database, mfaActorScope(installationId, stage.account), {
     kind: 'mfa-enrollment', source: 'staged', recoveryId,
@@ -55,7 +55,7 @@ export function createMfaManagement(
     if (!user || !local || !canChangeFactor(user, true)
         || local.auth.credentialsVersion !== proof.credentialsVersion) return null;
     if (proof.source === 'password') {
-      if (local.auth.mfa !== 'enrollment-required') return null;
+      if (local.auth.mfa !== 'enrollment-required' || !hasPendingFactorEnrollment(user)) return null;
     } else {
       if (local.auth.mfa !== 'none' || !sessionToken || tokenDigest(sessionToken) !== proof.sessionDigest) return null;
       const session = await currentSession(sessionToken, time);

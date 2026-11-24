@@ -3,7 +3,7 @@ import type { VerifyMfaInput } from '@planner/contracts';
 import type { Db } from 'mongodb';
 import { workspaceKey } from '../../storage/identity.js';
 import { getLocalAccount, type AccountRecord } from './accounts.js';
-import { consumeFactor, getFactor, mfaAccounts, mfaActorScope, verifyCurrentFactor } from './mfa-account.js';
+import { consumeFactor, getFactor, hasPasswordOnlyAuth, hasPendingFactorEnrollment, mfaAccounts, mfaActorScope, verifyCurrentFactor } from './mfa-account.js';
 import { consumeMfaProof, createTrustedDevice, findMfaProof, issueMfaProof, recordFailedFactor, useTrustedDevice } from './mfa-records.js';
 
 export async function beginPasswordMfa(
@@ -11,9 +11,10 @@ export async function beginPasswordMfa(
 ) {
   const local = getLocalAccount(account);
   if (!local) return { status: 'invalid' } as const;
-  if (local.auth.mfa === 'none') return { status: 'passed' } as const;
+  if (local.auth.mfa === 'none') return { status: hasPasswordOnlyAuth(account) ? 'passed' : 'invalid' } as const;
   const scope = mfaActorScope(installationId, account);
   if (local.auth.mfa === 'enrollment-required') {
+    if (!hasPendingFactorEnrollment(account)) return { status: 'invalid' } as const;
     const enrollmentId = await issueMfaProof(db, scope, { kind: 'mfa-enrollment', source: 'password' }, time);
     return { status: 'enrollment-required', enrollmentId } as const;
   }

@@ -59,11 +59,10 @@ try {
     } };
     port = config.appPort;
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
-      await assertNativeMfaKey(db, installationId, mfaKey);
       await recoverFirstAdmin(db, installationId);
       await recoverAccountChanges(db, installationId);
       await recoverFactorChanges(db, installationId);
-    });
+    }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey));
   } else {
     const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
     if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');

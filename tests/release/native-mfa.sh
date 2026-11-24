@@ -30,6 +30,17 @@ chown root:planner "$key"
 chmod 0640 "$key"
 if plannerctl start --json > "$work/mismatched.log" 2>&1; then exit 1; fi
 grep -Fq 'previously bound Planner multifactor key' "$work/mismatched.log"
+"$node" "$media/native-mfa-key-fixture.mjs" prepare
+systemctl start planner.service
+pid=$(systemctl show -p MainPID --value planner.service)
+[ "$pid" -gt 0 ]
+for attempt in {1..60}; do
+    if journalctl -u planner.service "_PID=$pid" -o cat --no-pager | grep -Fxq 'Planner command recovery could not be completed.'; then break; fi
+    sleep .2
+done
+journalctl -u planner.service "_PID=$pid" -o cat --no-pager | grep -Fxq 'Planner command recovery could not be completed.'
+systemctl stop planner.service
+"$node" "$media/native-mfa-key-fixture.mjs" unapplied
 mv -- "$saved" "$key"
 [ "$(sha256sum "$key")" = "$original_fingerprint" ]
 plannerctl start --json > "$work/resumed.json"
@@ -40,4 +51,5 @@ for attempt in {1..60}; do
 done
 curl --noproxy '*' --silent --fail --cacert "$certificate" --resolve planner.example.test:443:127.0.0.1 \
     https://planner.example.test/health/ready > /dev/null
+"$node" "$media/native-mfa-key-fixture.mjs" committed
 printf 'NATIVE MFA ACCEPTANCE PASSED\n'
