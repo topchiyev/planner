@@ -144,5 +144,3 @@ export async function affectedFieldBoards(records: WorkspaceRecords, generationI
 
 export const fieldAudit = (action: string, id: string, resourceType: 'fieldGroup' | 'fieldDefinition' | 'card' = 'fieldGroup') =>
   ({ action, resourceId: id, resourceType });
-
-export function missingField(): never { throw new WorkspaceAccessError('missing'); }

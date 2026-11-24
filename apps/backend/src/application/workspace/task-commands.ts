@@ -6,7 +6,7 @@ import { requireCapability, WorkspaceAccessError, type CardAccessContext, type W
 import { authorizeChecklistEdit, type ChecklistAccess } from './checklist-commands.js';
 import { cardClosed } from './card-state.js';
 import {
-  changedCard, changedChecklist, checklistEvent, checklistPosition, placeInOrder, taskOrderVersion, taskRows,
+  changedCard, changedChecklist, checklistEvent, checklistPosition, isUnavailableTask, placeInOrder, taskOrderVersion, taskRows,
 } from './checklist-state.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { RelationshipError, requireRevision, touchRevision } from './relationship-policy.js';
@@ -34,7 +34,7 @@ export async function authorizeTaskMove(scope: WorkspaceAuthorization, input: Re
   const access = await authorizeTaskEdit(scope, input.id);
   const id = access.card.card.id;
   const destination = input.toChecklistId === access.checklist.id ? access.checklist : (await scope.requireChecklist(input.toChecklistId, id)).checklist;
-  if (access.task.linkedUnavailable) throw new WorkspaceAccessError('missing');
+  if (isUnavailableTask(access.task)) throw new WorkspaceAccessError('missing');
   if (access.task.linkedCardId != null) {
     const link = publicIdSchema.safeParse(access.task.linkedCardId);
     if (!link.success) throw new WorkspaceAccessError('missing');
@@ -79,7 +79,7 @@ export async function planTaskUpdate(records: WorkspaceRecords, { task, checklis
   input: RelationshipCommandInput<'tasks.update'>, { generationId, timestamp, actorId, commandId }: CommandPlanningContext,
 ): Promise<CommandPlan> {
   const revision = requireRevision(task, input.expectedRevision)!;
-  if (task.linkedUnavailable || task.linkedCardId != null) throw new RelationshipError('taskFields');
+  if (isUnavailableTask(task) || task.linkedCardId != null) throw new RelationshipError('taskFields');
   if (input.assigneeId !== undefined) await validateAssignee(records, generationId, card.boardId, input.assigneeId);
   const completed = input.completed !== undefined && input.completed !== (task.completed ?? false);
   const fields: JournalFields = {

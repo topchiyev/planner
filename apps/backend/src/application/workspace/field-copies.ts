@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { RelationshipCommandInput } from '@planner/contracts';
-import { decodeRank, encodeRank } from '../../storage/identity.js';
+import { decodeRank, encodeRank, workspaceKey } from '../../storage/identity.js';
 import type { CommandPlan, CommandPlanningContext, PlannedEffect } from '../command-journal/operation.js';
 import type { WorkspaceAuthorization } from './authorization.js';
 import {
@@ -41,7 +41,7 @@ function copyDefinitions(group: FieldGroup, destinationId: string, definitions: 
     const fields = { fieldGroupId: destinationId, name: definition.name, showOnFront: definition.showOnFront === true,
       rank: rank.toString(), createdAt: timestamp, updatedAt: null };
     effects.push({ kind: 'insert', collection: 'fieldDefinitions', id, fields });
-    return { ...fields, _id: group.generationId + '/' + id, generationId: group.generationId, id, revision: 1,
+    return { ...fields, _id: workspaceKey(group.generationId, id), generationId: group.generationId, id, revision: 1,
       rank: encodeRank(rank), createdAt: new Date(timestamp) };
   });
   return { definitions: rows, remap, effects };
@@ -97,7 +97,7 @@ export async function planFieldPromotion(records: WorkspaceRecords, { source, de
   if (placement.rank === undefined) throw new Error('A new template must be ranked.');
   const fields = { name: input.name ?? effective.name, scopeType: 'project' as const, scopeId: destination.projectId,
     templateGroupId: null, fieldOrderVersion: 1, rank: placement.rank, createdAt: timestamp, updatedAt: null };
-  const template: FieldGroup = { ...fields, _id: generationId + '/' + id, generationId, id, revision: 1,
+  const template: FieldGroup = { ...fields, _id: workspaceKey(generationId, id), generationId, id, revision: 1,
     rank: encodeRank(placement.rank), createdAt: new Date(timestamp) };
   const copy = copyDefinitions(group, id, effective.definitions, timestamp, false);
   const parent = changeFieldOwner(destination, timestamp, true);

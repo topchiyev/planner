@@ -4,6 +4,8 @@ import test from 'node:test';
 import { relationshipParentRevisionHeader } from '@planner/contracts';
 import { csrfToken, readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
+import { planTransferredCardFieldGroup } from '../../apps/backend/dist/application/workspace/field-copies.js';
+import { createWorkspaceRecords } from '../../apps/backend/dist/application/workspace/records.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../../apps/backend/dist/application/workspace/relationship-commands.js';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
@@ -164,6 +166,21 @@ test('project templates, local ordering, promotion and confirmed deletion preser
     assert.equal(moved.orderVersion, 4);
     assert.deepEqual((await data(f.call(card(), editor))).fields.find(({ id }) => id === local).definitions.map(({ id }) => id),
       [sibling.definition.id, entry.definition.id]);
+    const removeId = await f.insert('fieldValues', fixtureId(593), {
+      cardId: ids.activeCard, fieldGroupId: local, fieldDefinitionId: entry.definition.id, value: 'Delete this exact value',
+    });
+    const retainedId = await f.insert('fieldValues', fixtureId(594), {
+      cardId: ids.activeCard, fieldGroupId: local, fieldDefinitionId: sibling.definition.id, value: '  Retain sibling  ',
+    });
+    const deleteKey = randomUUID();
+    await expectResponse(change(f, editor, 'DELETE', field(entry.definition.id), entry.definition.revision, { groupId: first }), 404);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const removed = await expectResponse(change(f, editor, 'DELETE', field(entry.definition.id), entry.definition.revision,
+        { groupId: local }, deleteKey), 204);
+      assert.equal(removed.headers[relationshipParentRevisionHeader], '5');
+    }
+    assert.equal(await row(f, 'fieldValues', removeId), null);
+    assert.equal((await row(f, 'fieldValues', retainedId)).value, '  Retain sibling  ');
     await expectResponse(change(f, editor, 'POST', group(second) + '/promote', 1, { projectRevision: 2 }), 403);
     const promoted = (await data(change(f, manager, 'POST', group(second) + '/promote', 1, { projectRevision: 2 }), 201)).group;
     assert.equal(promoted.name, 'Release template');
@@ -173,12 +190,22 @@ test('project templates, local ordering, promotion and confirmed deletion preser
     const foreign = await f.insert('fieldGroups', fixtureId(575), {
       scopeType: 'board', scopeId: ids.sharedBoard, templateGroupId: template, name: 'Foreign sentinel', rank: '1',
     });
+    const collidingBoard = await f.insert('boards', ids.privateProject, {
+      projectId: ids.privateProject, name: 'Same UUID in another collection', rank: '2048',
+    });
+    const collisionGroup = await f.insert('fieldGroups', fixtureId(574), {
+      scopeType: 'board', scopeId: collidingBoard, templateGroupId: template, name: null, rank: '1',
+    });
+    const unusedBoard = await f.insert('boards', fixtureId(576), {
+      projectId: ids.privateProject, name: 'Template chooser only', rank: '3072',
+    });
     await expectResponse(change(f, manager, 'DELETE', group(template), 1, {}), 422);
     const key = randomUUID();
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await expectResponse(change(f, manager, 'DELETE', group(template), 1, { confirm: true }, key), 204);
-      assert.equal(result.headers['x-planner-removed-groups'], '3');
+      assert.equal(result.headers['x-planner-removed-groups'], '4');
       assert.equal(result.headers['x-planner-removed-values'], '3');
+      assert.equal(result.headers[relationshipParentRevisionHeader], '4');
       assert.equal(result.data, '');
     }
     const refreshed = await data(f.call(card(), editor));
@@ -187,6 +214,14 @@ test('project templates, local ordering, promotion and confirmed deletion preser
     assert.equal(await row(f, 'fieldValues', val), null);
     assert.ok(await row(f, 'fieldGroups', foreign));
     assert.ok(await row(f, 'fieldGroups', promoted.id));
+    assert.equal(await row(f, 'fieldGroups', collisionGroup), null);
+    const projectAfter = await row(f, 'projects', ids.privateProject);
+    const boardAfter = await row(f, 'boards', collidingBoard);
+    assert.deepEqual([projectAfter.revision, projectAfter.fieldGroupOrderVersion, boardAfter.revision, boardAfter.fieldGroupOrderVersion], [4, 4, 2, 2]);
+    const removal = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey: key });
+    const events = await f.db.collection('events').find({ ...f.scope, commandId: removal.id }).toArray();
+    assert.deepEqual(events.map(({ boardId }) => boardId).sort(), [ids.privateBoard, collidingBoard, unusedBoard].sort());
+    assert.ok(events.every(({ kind, payload }) => kind === 'board.invalidated' && Object.keys(payload).length === 0));
     await expectResponse(change(f, editor, 'DELETE', group(template), 1, { confirm: true }, key), 404);
   });
 });
@@ -207,6 +242,14 @@ test('interrupted board field detach remaps inherited tuples across batches and 
         cardId: id, fieldGroupId: first, fieldDefinitionId: def, value: '  λ ' + index + ' ',
       });
     }
+    const transfer = await planTransferredCardFieldGroup(createWorkspaceRecords(f.db, f.generationId),
+      await row(f, 'fieldGroups', first),
+      { id: ids.activeCard, boardId: ids.privateBoard, projectId: ids.privateProject, rank: '1024' }, f.now().toISOString());
+    assert.deepEqual(transfer.effects.filter(({ collection }) => collection === 'fieldValues').map(({ id }) => id).sort(),
+      [val, fixtureId(592)].sort());
+    assert.ok(transfer.effects.filter(({ collection }) => collection === 'fieldValues')
+      .every(({ fields }) => fields.fieldGroupId === transfer.groupId));
+    assert.equal((await row(f, 'fieldValues', copyValue)).fieldGroupId, first);
     const idempotencyKey = randomUUID();
     const journal = new CommandJournal(f.gate, f.db, f.installationId, {
       operations: createRelationshipJournalOperations(f.db, () =>

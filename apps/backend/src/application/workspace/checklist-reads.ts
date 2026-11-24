@@ -2,7 +2,7 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import { decodeRank } from '../../storage/identity.js';
 import { WorkspaceAccessError, type CardAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardClosed } from './card-state.js';
-import { checklistRows, taskOrderVersion, taskRows } from './checklist-state.js';
+import { checklistRows, isUnavailableTask, taskOrderVersion, taskRows } from './checklist-state.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { canonicalRow, together, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
@@ -40,7 +40,7 @@ export function createChecklistReads(records: WorkspaceRecords, access: Workspac
     const assignees = await people(boardId, rows);
     async function project(row: Task) {
       const base = { ...entity(row), checklistId: row.checklistId };
-      if (row.linkedUnavailable) return { ...base, kind: 'unavailable' as const };
+      if (isUnavailableTask(row)) return { ...base, kind: 'unavailable' as const };
       const assignee = row.assigneeId ? assignees.get(row.assigneeId) ?? null : null;
       if (row.linkedCardId == null) return { ...base, kind: 'task' as const, name: row.name ?? '', completed: row.completed ?? false, assignee };
       const target = await readableTarget(row.linkedCardId);

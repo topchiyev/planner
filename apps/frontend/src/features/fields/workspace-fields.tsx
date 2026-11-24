@@ -40,29 +40,53 @@ export function CardFields({ card, project }: { card: Card; project: Board['proj
   </section>;
 }
 
-function CardValue({ card, group, field, value }: { card: Card; group: FieldGroup; field: Definition; value?: string }) {
+type CardValueProps = { card: Card; group: FieldGroup; field: Definition; value?: string };
+
+function CardValue(props: CardValueProps) {
+  const { card, value } = props;
+  if (!card.permissions.canEdit) return <p className="field-value">{value === undefined ? 'No value' : value === '' ? 'Empty value' : value}</p>;
+  return <CardValueEditor {...props} />;
+}
+
+function CardValueEditor({ card, group, field, value }: CardValueProps) {
   const action = useFieldMutation();
-  const [draft, setDraft] = useState<string>();
-  const current = draft ?? value ?? '';
+  const version = { revision: card.revision, groupRevision: group.revision, definitionRevision: field.revision };
+  const [draft, setDraft] = useState<{ value: string; version: typeof version }>();
+  const current = draft?.value ?? value ?? '';
+  const stale = draft !== undefined && (draft.version.revision !== version.revision
+    || draft.version.groupRevision !== version.groupRevision || draft.version.definitionRevision !== version.definitionRevision);
   const valid = fieldValueTextSchema.safeParse(current).success;
   function apply(clear: boolean) {
+    const { revision, groupRevision, definitionRevision } = draft?.version ?? version;
     const operation = clear ? 'fields.clearValue' : 'fields.setValue';
-    const options = { id: card.id, revision: card.revision, groupId: group.id, fieldId: field.id, body: {
-      groupRevision: group.revision, definitionRevision: field.revision, ...(!clear && { value: current }),
+    const options = { id: card.id, revision, groupId: group.id, fieldId: field.id, body: {
+      groupRevision, definitionRevision, ...(!clear && { value: current }),
     } };
     void action.run([operation, options], (csrf, key) => fieldCommand(operation, csrf, key, options), () => setDraft(undefined));
   }
-  if (!card.permissions.canEdit) return <p className="field-value">{value === undefined ? 'No value' : value === '' ? 'Empty value' : value}</p>;
   return <form className="project-form field-value-form" onSubmit={(event) => {
     event.preventDefault();
-    if (valid) apply(false);
+    if (valid && !stale) apply(false);
   }}>
-    <label>{field.name} value<textarea rows={2} value={current} onChange={(event) => setDraft(event.target.value)} /></label>
+    <label>{field.name} value<textarea rows={2} value={current} disabled={action.busy} onChange={(event) =>
+      setDraft({ value: event.target.value, version: draft?.version ?? version })} /></label>
     {!valid && <p role="status">Field values must have at most 512 Unicode characters.</p>}
-    {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
+    {action.problem && !stale && <p className="workspace-problem" role="alert">{action.problem}</p>}
+    {stale && <div role="alert">
+      <p>The card or field changed while you were editing.</p>
+      <p className="field-value">Current value: {value === undefined ? 'No value' : value === '' ? 'Empty value' : value}</p>
+      <div className="project-actions">
+        <button type="button" className="workspace-button" disabled={action.busy} onClick={() => { action.clearProblem(); setDraft({ value: current, version }); }}>
+          Keep draft
+        </button>
+        <button type="button" className="workspace-button" disabled={action.busy} onClick={() => { action.clearProblem(); setDraft(undefined); }}>
+          Use current value
+        </button>
+      </div>
+    </div>}
     <div className="project-actions">
-      <button type="submit" className="workspace-button workspace-button-primary" disabled={action.busy || !valid || current === value}>Save value</button>
-      {value !== undefined && <button type="button" className="workspace-button" disabled={action.busy} onClick={() => apply(true)}>Clear value</button>}
+      <button type="submit" className="workspace-button workspace-button-primary" disabled={action.busy || stale || !valid || current === value}>Save value</button>
+      {value !== undefined && <button type="button" className="workspace-button" disabled={action.busy || stale} onClick={() => apply(true)}>Clear value</button>}
     </div>
   </form>;
 }
