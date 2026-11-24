@@ -20,5 +20,6 @@ export * from './board-lifecycle.js';
 export * from './card-lifecycle.js';
 export * from './list-lifecycle.js';
 export * from './list-maintenance.js';
+export * from './checklists.js';
 export * from './card-transitions.js';
 export * from './affiliations.js';

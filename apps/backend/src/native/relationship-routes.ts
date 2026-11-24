@@ -1,5 +1,5 @@
 import {
-  boardDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
+  boardDeleteReceipt, checklistDeleteReceipt, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
   type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
@@ -155,6 +155,10 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
                 reply.header(relationshipParentRevisionHeader, listDeleteReceipt.parse(result).data.parentRevision);
               } else if (operation.id === 'labels.delete') {
                 reply.header(relationshipParentRevisionHeader, labelDeleteReceipt.parse(result).data.parentRevision);
+              } else if (operation.id === 'checklists.delete') {
+                reply.header(relationshipParentRevisionHeader, checklistDeleteReceipt.parse(result).data.parentRevision);
+              } else if (operation.id === 'tasks.delete') {
+                reply.header(relationshipParentRevisionHeader, taskDeleteReceipt.parse(result).data.checklist.revision);
               } else if (operation.target === 'edge') {
                 const { parentRevision } = removedRelationship.parse(result).data;
                 if (parentRevision !== null) reply.header(relationshipParentRevisionHeader, parentRevision);

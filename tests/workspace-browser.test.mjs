@@ -1138,3 +1138,102 @@ test('board and card labels, scoped assignees and explicit follows work in the n
     await expect(panel.getByRole('list', { name: 'Attached labels' })).toHaveCount(0);
   });
 });
+
+test('native checklists keep keyboard editing and private linked projections in sync', async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    await fixture.insert('boardPreferences', randomUUID(), {
+      boardId: ids.privateBoard, expandChecklists: true,
+    });
+    const editor = await page({ width: 1440, height: 900 });
+    const viewer = await page({ width: 390, height: 844 });
+    const path = origin + board(ids.privateBoard) + '/cards/' + ids.activeCard;
+    await signIn(editor, origin, 'first-editor');
+    await signIn(viewer, origin, 'viewer');
+    await editor.goto(path);
+
+    const editorPanel = editor.getByRole('region', { name: 'Checklists', exact: true });
+    const legacy = editorPanel.getByRole('button', { name: 'Linked work', exact: true });
+    await expect(legacy).toHaveAttribute('aria-expanded', 'true');
+    const writes = [];
+    editor.on('request', (request) => {
+      if (request.url().includes('/api/v1/') && ['POST', 'PATCH', 'DELETE'].includes(request.method())) writes.push(request.method());
+    });
+    await legacy.click();
+    await expect(legacy).toHaveAttribute('aria-expanded', 'false');
+    await legacy.click();
+    await expect(legacy).toHaveAttribute('aria-expanded', 'true');
+    assert.deepEqual(writes, []);
+
+    const createGroup = async (name, front) => {
+      await editorPanel.getByRole('button', { name: 'Add checklist', exact: true }).click();
+      const form = editor.getByRole('dialog', { name: 'Add checklist' });
+      await form.getByLabel('Checklist name').fill(name);
+      await expect(form.getByLabel('Show on card front')).toBeChecked();
+      if (!front) await form.getByLabel('Show on card front').uncheck();
+      await form.getByRole('button', { name: 'Create checklist', exact: true }).click();
+      const group = editorPanel.getByRole('region', { name, exact: true });
+      await expect(group.getByRole('button', { name, exact: true })).toHaveAttribute('aria-expanded', 'true');
+      return group;
+    };
+    const dispatch = await createGroup('Dispatch work', true);
+    const review = await createGroup('Review work', false);
+    await dispatch.getByRole('button', { name: 'Add task', exact: true }).click();
+    const task = editor.getByRole('dialog', { name: 'Add task' });
+    await task.getByLabel('Task name').fill('Review the handoff');
+    await task.getByRole('button', { name: 'Choose assignee' }).click();
+    await task.getByLabel('Find an assignee').fill('second-editor');
+    await task.getByRole('button', { name: 'Search members' }).click();
+    await task.getByRole('button', { name: 'Fixture second-editor', exact: true }).click();
+    await task.getByRole('button', { name: 'Create task' }).click();
+    await expect(task).toHaveCount(0);
+    await expect(dispatch.getByText('Fixture second-editor', { exact: true })).toBeVisible();
+
+    await dispatch.getByRole('button', { name: 'Edit task Review the handoff' }).click();
+    const edit = editor.getByRole('dialog', { name: 'Edit task' });
+    await edit.getByRole('button', { name: 'Change assignee' }).click();
+    await edit.getByRole('button', { name: 'Unassigned' }).click();
+    await edit.getByRole('button', { name: 'Save task' }).click();
+    await expect(edit).toHaveCount(0);
+    await expect(dispatch.getByText('Fixture second-editor', { exact: true })).toHaveCount(0);
+    const completion = dispatch.getByRole('checkbox', { name: 'Complete Review the handoff' });
+    await completion.click();
+    await expect(completion).toBeChecked();
+
+    await review.getByRole('button', { name: 'Link a card', exact: true }).click();
+    const linkForm = editor.getByRole('dialog', { name: 'Link a card' });
+    await linkForm.getByLabel('Card link or ID').fill(board(ids.sharedBoard) + '/cards/' + ids.sharedTarget);
+    await linkForm.getByRole('button', { name: 'Add linked task' }).click();
+    const linkName = 'Cross-board linked target';
+    const move = review.getByRole('button', { name: 'Move task ' + linkName });
+    await move.focus();
+    await move.press('Enter');
+    const moveForm = editor.getByRole('dialog', { name: 'Move task' });
+    await moveForm.getByLabel('Destination checklist').selectOption({ label: 'Dispatch work' });
+    await moveForm.getByRole('button', { name: 'Place task' }).click();
+    await expect(dispatch.getByRole('link', { name: linkName })).toBeVisible();
+    await expect(review.getByRole('link', { name: linkName })).toHaveCount(0);
+    await expect(dispatch.getByRole('button', { name: 'Edit task ' + linkName })).toHaveCount(0);
+
+    await viewer.goto(path);
+    const viewerPanel = viewer.getByRole('region', { name: 'Checklists', exact: true });
+    const viewerGroup = viewerPanel.getByRole('region', { name: 'Dispatch work', exact: true });
+    await expect(viewerGroup.getByText('Linked card unavailable')).toBeVisible();
+    await expect(viewerPanel.getByRole('button', { name: 'Add checklist' })).toHaveCount(0);
+    await expect(viewerPanel.getByRole('link', { name: linkName })).toHaveCount(0);
+
+    await dispatch.getByRole('button', { name: 'Checklist settings' }).click();
+    const settings = editor.getByRole('dialog', { name: 'Checklist settings' });
+    await settings.getByLabel('Hide completed tasks').check();
+    await settings.getByRole('button', { name: 'Save checklist settings' }).click();
+    await expect(dispatch.getByText('Review the handoff', { exact: true })).toHaveCount(0);
+    await viewer.reload();
+    await expect(viewerGroup.getByText('Linked card unavailable')).toBeVisible();
+    await expect(viewerGroup.getByText('Review the handoff', { exact: true })).toHaveCount(0);
+    await viewer.goto(origin + board(ids.privateBoard));
+    const front = viewer.getByRole('region', { name: 'Dispatch work', exact: true });
+    await expect(front.getByText('Linked card unavailable')).toBeVisible();
+    await expect(front.getByText('Review the handoff', { exact: true })).toHaveCount(0);
+    await expect(viewer.getByRole('region', { name: 'Review work', exact: true })).toHaveCount(0);
+    assert.ok(await viewer.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+  });
+});

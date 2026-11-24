@@ -3,7 +3,8 @@ import { publicIdSchema, signedInt64TextSchema, utcInstantSchema } from '@planne
 import { MongoServerError, type Document } from 'mongodb';
 import { encodeRank } from '../../storage/identity.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
-import type { BoardAccessContext } from './authorization.js';
+import type { BoardAccessContext, WorkspaceAuthorization } from './authorization.js';
+import { liveTaskMarker } from './checklist-state.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { cardLabelJoinFilter, scopedLabels } from './label-state.js';
 import { canonicalRow, equal, type WorkspaceRecords } from './records.js';
@@ -51,7 +52,8 @@ export function cardPlacementStages(records: WorkspaceRecords, boardId: string, 
   ];
 }
 
-export async function cardFilters(records: WorkspaceRecords, board: BoardAccessContext, query: WorkspaceReadInput<'boardCards'>) {
+export async function cardFilters(records: WorkspaceRecords, access: WorkspaceAuthorization, board: BoardAccessContext,
+  query: WorkspaceReadInput<'boardCards'>) {
   const stages: Document[] = [];
   const { id: boardId, generationId } = board.board;
   const canonical = canonicalRow(generationId);
@@ -79,11 +81,19 @@ export async function cardFilters(records: WorkspaceRecords, board: BoardAccessC
     stages.push(
       records.lookup('cardAssignees', 'matchedAssignees', { cardId: '$id' }, assignment(users), [{ $limit: 1 }]),
       records.lookup('checklists', 'matchedChecklists', { cardId: '$id' }, {
-        $expr: { $eq: ['$cardId', '$$cardId'] },
+        $expr: { $and: [canonical, equal('cardId', '$$cardId')] },
       }, [
         records.lookup('tasks', 'matchingTasks', { checklistId: '$id' }, {
-          assigneeId: { $in: users }, $expr: { $and: [canonical, equal('checklistId', '$$checklistId'), { $in: ['$assigneeId', users] }] },
-        }, [{ $limit: 1 }]),
+          assigneeId: { $in: users },
+          $expr: { $and: [canonical, liveTaskMarker, equal('checklistId', '$$checklistId'), { $in: ['$assigneeId', users] }] },
+        }, [
+          access.readableCardLookup('readableTarget', '$linkedCardId'),
+          { $match: { $or: [
+            { $expr: { $in: [{ $type: '$linkedCardId' }, ['null', 'missing']] } },
+            { 'readableTarget.0': { $exists: true } },
+          ] } },
+          { $limit: 1 },
+        ]),
         { $match: { 'matchingTasks.0': { $exists: true } } },
         { $limit: 1 },
       ]),
