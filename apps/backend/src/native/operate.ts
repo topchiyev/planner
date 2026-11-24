@@ -225,13 +225,13 @@ async function control(action: 'start' | 'stop' | 'restart') {
     if (!config) throw new NativeMongoError('Complete Planner setup before starting its services.');
     validateNativePorts(config);
     const listening = appListening(config.appPort, true);
-    if (action === 'start' && listening) {
+    if (action === 'start' && listening && systemctl('show', '--property=MainPID', '--value', database) !== '0') {
       const client = await connectOwnedDatabase(config, owner.appGroup);
       try { await verifyStorageSchema(client.db(databaseName), config.installationId); }
       finally { await client.close(); }
       return status(owner);
     }
-    if (action === 'restart') systemctl('stop', app);
+    if (action === 'restart' || listening) systemctl('stop', app);
     await withStoppedWriter(async (writer) => {
       if (action === 'restart') stopDatabase();
       const active = await ensureNativeMongo(config.dbPort);

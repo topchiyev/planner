@@ -125,6 +125,13 @@ state > "$work/still-old-schema.json"
 cmp "$work/online-old-schema.json" "$work/still-old-schema.json"
 state 1 > /dev/null
 
+systemctl stop planner-mongodb.service
+[ "$(probe live)" = 200 ]
+plannerctl start > "$work/recovered-database"
+[ "$(pid)" != "$first" ]
+first=$(pid)
+assert_writer "$first"
+
 systemctl kill --kill-whom=main --signal=KILL planner.service
 for attempt in {1..100}; do if [ "$(pid)" = 0 ]; then break; fi; sleep .1; done
 [ "$(pid)" = 0 ]
