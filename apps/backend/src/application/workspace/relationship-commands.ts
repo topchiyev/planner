@@ -122,7 +122,7 @@ export function createRelationshipJournalOperations(
       (_records, board, input, context, scope) => planBoardMove(board, input, context, scope)),
     'boards.update': define('boards.update', (scope, input) => authorizeBoardManage(scope, input.id), planBoardUpdate),
     'boards.delete': define('boards.delete', (scope, input) => authorizeBoardDelete(database, scope, input, origin, idempotencyKey),
-      (records, _access, input, context, scope) => planBoardDelete(records, scope, input, context)),
+      planBoardDelete),
     'projects.create': define('projects.create', async (scope) => { requireCapability(scope.roles.canCreateProject); },
       (records, _access, input, context) => planProjectCreate(records, input, context)),
     'projects.delete': define('projects.delete', (scope, input) => authorizeProjectDelete(database, scope, input, idempotencyKey),
