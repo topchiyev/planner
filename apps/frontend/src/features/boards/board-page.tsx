@@ -86,10 +86,6 @@ export function BoardPage() {
     if (viewKey && explicitView) saveBoardView(viewKey, explicitView);
   }, [viewKey, explicitView]);
 
-  useLayoutEffect(() => {
-    if (viewKey && !explicitView) saveBoardEntryView(viewKey, key, view);
-  }, [viewKey, key, explicitView, view]);
-
   useEffect(() => {
     if (inspectorOpen || concealed || !board) return;
     const opener = getCardOpener(board.recipeScope, pathname, search, key, routeState?.cardReturnKey);
@@ -99,6 +95,19 @@ export function BoardPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [inspectorOpen, concealed, board?.recipeScope, pathname, search, key, routeState?.cardReturnKey]);
+
+  useEffect(() => {
+    if (!viewKey || explicitView) return;
+    function rememberViewOnLink(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+      if (!(link instanceof HTMLAnchorElement) || (link.target && link.target !== '_self') || link.hasAttribute('download')
+          || link.origin !== window.location.origin || link.pathname + link.search === pathname + search) return;
+      saveBoardEntryView(viewKey!, key, view);
+    }
+    document.addEventListener('click', rememberViewOnLink, { capture: true });
+    return () => document.removeEventListener('click', rememberViewOnLink, { capture: true });
+  }, [viewKey, explicitView, key, view, pathname, search]);
 
   function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: BoardView) {
     const nextParams = new URLSearchParams(params);

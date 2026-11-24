@@ -428,6 +428,9 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     const href = await dispatch.getAttribute('href');
     await dispatch.click();
     await expect(main.getByRole('heading', { name: 'Morning dispatch', level: 1 })).toBeVisible();
+    await owner.reload();
+    await expect(main.getByRole('navigation', { name: 'Board view' }).getByRole('link', { name: 'Kanban' }))
+      .toHaveAttribute('aria-current', 'page');
     await main.getByRole('button', { name: 'Board settings', exact: true }).click();
     const settings = owner.getByRole('dialog', { name: 'Board settings' });
     await settings.getByLabel('Default view').selectOption('grid');
@@ -1966,6 +1969,12 @@ test('native board layouts share card placement, preference display, and paged i
     assert.equal(new URL(editor.url()).search, paged);
     await cardLink.click();
     await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
+    const inspectorViews = editor.getByRole('navigation', { name: 'Board view' });
+    await inspectorViews.getByRole('link', { name: 'List' }).click();
+    await expect(inspectorViews.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await editor.goBack();
+    await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
+    await expect(inspectorViews.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     await editor.goBack();
     await expect(cardLink).toBeFocused();
     await cardGrid.getByRole('button', { name: 'Move card Layout second card' }).press('Enter');
