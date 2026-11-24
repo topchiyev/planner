@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
+import type { Client } from 'pg';
 import { dirname, join, isAbsolute, normalize } from 'node:path';
 import type { Owner } from '../backup/archive.js';
 import { BackupError, fileChunks } from '../backup/archive.js';
 import { inspectDirectory, inspectObjects, parseObjectService, reconcileAssets } from './assets.js';
 import { assetManifestLimit, captureManifestLimit, MigrationError, readAssetManifest, readCaptureManifest, sha256 } from './manifest.js';
 import { openMigrationFile } from './prepare.js';
-import { readSourcePreflight } from './source-reader.js';
+import { finishSourceFingerprint, fingerprintRows, startAssetFingerprint, type SourceFingerprint } from './source-fingerprint.js';
+import { sourcePreflightInSnapshot, withSourceSnapshot } from './source-reader.js';
 import { migrationServiceName, parseSourceService } from './source-service.js';
 
 export type MigrationInput = { manifest: string; sourceService: string } & (
@@ -74,7 +76,39 @@ async function verifyDump(directory: string, owner: Owner, expected: string) {
   } finally { await Promise.allSettled(files.filter(opened).map(({ file }) => file.close())); }
 }
 
-export async function inspectMigration(input: MigrationInput, owner: Owner, sourceConfig: string, objectConfig?: string) {
+async function whileReadingAssets<T>(client: Client, verify: () => Promise<T>) {
+  let heartbeat: Promise<unknown> | undefined;
+  let failure: unknown;
+  const timer = setInterval(() => {
+    if (heartbeat || failure) return;
+    heartbeat = client.query('SELECT 1').catch((error: unknown) => { failure = error; })
+      .finally(() => { heartbeat = undefined; });
+  }, 15_000);
+  timer.unref();
+  try {
+    const result = await verify();
+    if (heartbeat) await heartbeat;
+    if (failure) throw failure;
+    return result;
+  } finally {
+    clearInterval(timer);
+    if (heartbeat) await heartbeat;
+  }
+}
+
+const admittedSnapshots = new WeakSet<VerifiedSourceSnapshot>();
+export type VerifiedSourceSnapshot = { readonly fingerprint: SourceFingerprint };
+
+export function assertVerifiedSourceSnapshot(snapshot: VerifiedSourceSnapshot) {
+  if (!admittedSnapshots.has(snapshot))
+    throw new MigrationError('source-changed', 'Open and verify the source snapshot before writing a batch.');
+}
+
+export async function withMigrationSnapshot<T>(
+  input: MigrationInput, owner: Owner, sourceConfig: string, objectConfig: string | undefined,
+  options: { expectedFingerprint?: string; batchSize?: number },
+  read: (client: Client, snapshot: VerifiedSourceSnapshot) => Promise<T>,
+) {
   try {
     const raw = await smallFile(input.manifest, owner, captureManifestLimit);
     const capture = readCaptureManifest(raw);
@@ -87,20 +121,42 @@ export async function inspectMigration(input: MigrationInput, owner: Owner, sour
     if ((capture.asset.kind === 'directory') !== (input.assetsRoot !== undefined)) {
       throw new MigrationError('asset-manifest', 'The declared capture does not match the selected asset source.');
     }
-    const source = await readSourcePreflight(service);
-    const reader = objectService ? inspectObjects(objectService) : await inspectDirectory(input.assetsRoot!, owner, assets);
-    const assetSummary = await reconcileAssets(reader, assets, source.assets);
-    const rows = Object.values(source.rows).reduce((sum, count) => sum + BigInt(count), 0n);
-    return {
-      manifestSha256, capture, dump, restoredPostgresVersion: source.restoredPostgresVersion,
-      rows: source.rows,
-      estimates: { sourceBytes: source.dataBytes, sourceIndexes: source.indexBytes, sourceRows: rows, assetBytes: assetSummary.bytes },
-      assets: { present: assetSummary.present, missingOriginals: assetSummary.missingOriginals, missingDerivatives: assetSummary.missingDerivatives },
-    };
+    const { value, restoredPostgresVersion } = await withSourceSnapshot(service, async (client) => {
+      const source = await sourcePreflightInSnapshot(client);
+      const rowDigest = await fingerprintRows(client, source.rows, options.batchSize);
+      const assetFingerprint = startAssetFingerprint();
+      const assetSummary = await whileReadingAssets(client, async () => {
+        const reader = objectService ? inspectObjects(objectService) : await inspectDirectory(input.assetsRoot!, owner, assets);
+        return reconcileAssets(reader, assets, source.assets, assetFingerprint.observe);
+      });
+      const fingerprint = finishSourceFingerprint(capture, rowDigest, assetFingerprint.finish());
+      if (options.expectedFingerprint !== undefined && options.expectedFingerprint !== fingerprint.sha256)
+        throw new MigrationError('source-changed', 'The source snapshot changed. Start a new import run.');
+      const rows = Object.values(source.rows).reduce((sum, count) => sum + BigInt(count), 0n);
+      Object.freeze(fingerprint.components);
+      const snapshot = Object.freeze({ fingerprint: Object.freeze(fingerprint) });
+      admittedSnapshots.add(snapshot);
+      let value: T;
+      try { value = await read(client, snapshot); }
+      finally { admittedSnapshots.delete(snapshot); }
+      return {
+        manifestSha256, capture, dump, fingerprint, rows: source.rows,
+        estimates: { sourceBytes: source.dataBytes, sourceIndexes: source.indexBytes, sourceRows: rows, assetBytes: assetSummary.bytes },
+        assets: { present: assetSummary.present, missingOriginals: assetSummary.missingOriginals, missingDerivatives: assetSummary.missingDerivatives },
+        value,
+      };
+    });
+    return { ...value, restoredPostgresVersion };
   } catch (error) {
     if (error instanceof MigrationError) throw error;
     if (error instanceof BackupError)
       throw new MigrationError('capture-integrity', 'The migration input could not be verified in its private directory.');
     throw new MigrationError('capture-integrity', 'The protected migration input is unavailable or changed during verification.');
   }
+}
+
+
+export async function inspectMigration(input: MigrationInput, owner: Owner, sourceConfig: string, objectConfig?: string) {
+  const { value: _value, ...receipt } = await withMigrationSnapshot(input, owner, sourceConfig, objectConfig, {}, async () => undefined);
+  return receipt;
 }

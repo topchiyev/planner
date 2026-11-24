@@ -1,10 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import { lstat, open, mkdir, link, unlink, statfs } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Db } from 'mongodb';
 import { anchoredDirectory, fdPath } from '../application/backup/archive.js';
 import type { WriterLease } from '../application/command-gate/writer-lease.js';
+import { durable } from '../application/command-journal/records.js';
+import { importRunKey, type ImportRun } from '../application/migration/checkpoint.js';
 import { MigrationError } from '../application/migration/manifest.js';
 import type { inspectMigration, MigrationInput } from '../application/migration/preflight.js';
 import { readInstallation, verifyStorageSchema } from '../storage/schema.js';
@@ -58,15 +60,19 @@ export async function publishMigrationPreflight(
   await assertMigrationTarget(db, installationId);
   const capacity = await checkMigrationCapacity(receipt.estimates);
   const runId = randomUUID();
+  const generationId = randomUUID();
+  const now = new Date();
   const output = {
     runId, manifestSha256: receipt.manifestSha256, state: 'preflighted',
+    fingerprintSha256: receipt.fingerprint.sha256,
     sourceRelease: receipt.capture.source.release, sourceEdition: receipt.capture.source.edition,
     capturePostgresVersion: receipt.capture.source.postgresVersion, restoredPostgresVersion: receipt.restoredPostgresVersion,
     assets: receipt.assets, eligibleUnderDefaultPolicy: receipt.assets.missingOriginals === 0,
     rows: receipt.rows, capacity,
   };
   const { source, asset, capturedAt } = receipt.capture;
-  const record = JSON.stringify({ formatVersion: 1, installationId, createdAt: new Date().toISOString(),
+  const record = JSON.stringify({ formatVersion: 1, installationId, generationId, createdAt: now.toISOString(),
+    checkpointKey: randomBytes(32).toString('base64url'), fingerprint: receipt.fingerprint,
     capture: { source, asset, capturedAt, dump: receipt.dump }, inputs: input, ...output }) + '\n';
   const parent = await anchoredDirectory('/var/lib/planner', root, 0o711);
   try {
@@ -88,6 +94,10 @@ export async function publishMigrationPreflight(
       await file.sync();
     } finally { await file.close(); }
     lease.assertHeld();
+    await db.collection<ImportRun>('importRuns').insertOne({
+      ...importRunKey({ generationId, installationId, runId }), state: 'preflighted', checkpoint: null,
+      manifestSha256: receipt.manifestSha256, fingerprint: receipt.fingerprint, createdAt: now, updatedAt: now,
+    }, durable);
     await link(pending, join(fdPath(dir), runId + '.json'));
     await unlink(pending);
     owned = undefined;

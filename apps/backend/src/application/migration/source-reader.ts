@@ -137,10 +137,11 @@ export async function withSourceSnapshot<T>(service: ReturnType<typeof parseSour
   } finally { await client.end().catch(() => undefined); }
 }
 
+export async function sourcePreflightInSnapshot(client: Client) {
+  return { ...await sourceInventory(client), assets: await sourceAssets(client) };
+}
+
 export async function readSourcePreflight(service: ReturnType<typeof parseSourceService>) {
-  const { value, restoredPostgresVersion } = await withSourceSnapshot(service, async (client) => ({
-    ...await sourceInventory(client),
-    assets: await sourceAssets(client),
-  }));
+  const { value, restoredPostgresVersion } = await withSourceSnapshot(service, sourcePreflightInSnapshot);
   return { ...value, restoredPostgresVersion };
 }

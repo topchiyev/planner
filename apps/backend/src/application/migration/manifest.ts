@@ -4,7 +4,7 @@ import { migrationAssetsSchema, migrationCaptureSchema, type MigrationAsset, typ
 export type MigrationFault = 'capture-format' | 'source-release' | 'source-edition' | 'capture-integrity'
   | 'archive-layout' | 'archive-limit' | 'asset-manifest' | 'asset-key' | 'asset-integrity'
   | 'source-service' | 'source-role' | 'source-catalog' | 'source-ledger' | 'source-read'
-  | 'target-setup' | 'target-capacity' | 'target-write';
+  | 'source-changed' | 'target-setup' | 'target-capacity' | 'target-write';
 
 export class MigrationError extends Error {
   constructor(readonly fault: MigrationFault, message: string) { super(message); }

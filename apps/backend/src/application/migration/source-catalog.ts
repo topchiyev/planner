@@ -5,6 +5,7 @@ import { MigrationError, sha256 } from './manifest.js';
 
 export const sourceTables = Object.freeze(Object.keys(baseline.tables).sort());
 const migrationDigest = '32a3fa9b45c357f523a5f02189ccb63376e9bd35b9844d00296ecf6b4f0b71ef';
+export const sourceCatalogProof = Object.freeze({ catalog: sha256(Buffer.from(JSON.stringify(baseline))), ledger: migrationDigest });
 const finalMigration = '20260918000000_add_show_card_counter_to_boards.js';
 
 const catalogSql = `WITH source_tables AS (
