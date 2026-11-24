@@ -122,13 +122,13 @@ export function validateEffect(effect: PlannedEffect, internal: boolean) {
     throw new CommandRecoveryError('A command effect targets an invalid collection or record.');
   }
   if (effect.kind === 'insert') {
-    workspaceInsertFields(effect.collection, effect.fields);
+    workspaceInsertFields(effect.collection, effect.fields, effect.revision);
     return;
   }
   if (effect.kind === 'update') encodeWorkspaceFields(effect.fields);
-  if (effect.kind === 'delete' && effect.revision === null) return;
+  if ((effect.kind === 'update' || effect.kind === 'delete') && effect.revision === null) return;
   if ((effect.kind !== 'update' && effect.kind !== 'delete') || !revisionSchema.safeParse(effect.revision).success
-      || (effect.kind === 'update' && !revisionSchema.safeParse(effect.revision + 1).success)) {
+      || (effect.kind === 'update' && !revisionSchema.safeParse((effect.revision ?? 0) + 1).success)) {
     throw new CommandRecoveryError('A command effect has an invalid revision or kind.');
   }
 }

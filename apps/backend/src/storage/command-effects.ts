@@ -29,7 +29,7 @@ export async function applyCommandEffect(
     }
   };
   if (effect.kind === 'insert') {
-    const document = { ...workspaceInsertFields(effect.collection, effect.fields), ...target, ...proof };
+    const document = { ...workspaceInsertFields(effect.collection, effect.fields, effect.revision), ...target, ...proof };
     try { await collection.insertOne(document, durable); }
     catch (error) {
       if (!(error instanceof MongoServerError) || error.code !== 11000) throw error;
@@ -40,7 +40,7 @@ export async function applyCommandEffect(
   const version: Filter<Target> = { ...target,
     revision: effect.revision === null ? { $exists: false } : effect.revision };
   if (effect.kind === 'update') {
-    const written = { ...encodeWorkspaceFields(effect.fields), ...proof, revision: effect.revision + 1 };
+    const written = { ...encodeWorkspaceFields(effect.fields), ...proof, revision: (effect.revision ?? 0) + 1 };
     const result = await collection.updateOne(version, { $set: written }, durable);
     if (result.matchedCount !== 1) await readProof(written);
     return;
