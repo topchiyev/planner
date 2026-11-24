@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { boardDeleteReceipt, type RelationshipBoardInvalidation, type RelationshipCommandInput } from '@planner/contracts';
+import { boardDeleteReceipt, type RelationshipCommandInput } from '@planner/contracts';
 import { revisionSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { decodeRank, encodeRank, workspaceKey } from '../../storage/identity.js';
@@ -12,7 +12,7 @@ import { planRankChange, RankAnchorError } from './ordered-ranks.js';
 import { RelationshipError, requireRevision, touchRevision } from './relationship-policy.js';
 import type { WorkspaceRecords, WorkspaceRow } from './records.js';
 
-const invalidate = (boardId: string): RelationshipBoardInvalidation => ({ boardId, kind: 'board.access-changed', payload: {} });
+const invalidate = (boardId: string) => ({ boardId, kind: 'board.invalidated', payload: {} } as const);
 const audit = (action: string, resourceId: string) => ({ action, resourceId, resourceType: 'board' });
 
 export async function authorizeBoardCreate(scope: WorkspaceAuthorization, id: string) {
@@ -113,7 +113,7 @@ export async function planBoardMove(
   }
   const parent = advanceBoardOrder(project.project, context.timestamp);
   const effects: PlannedEffect[] = [parent];
-  const events: RelationshipBoardInvalidation[] = [];
+  const events: ReturnType<typeof invalidate>[] = [];
   for (const row of boards) {
     const rank = ranks.get(row.id);
     if (rank === undefined) continue;
@@ -183,6 +183,8 @@ export async function planBoardDelete(records: WorkspaceRecords, access: BoardAc
   return {
     effects: [...descendants.effects, { kind: 'delete', collection: 'boards', id: board.id, revision }, parent],
     result: { data: { id: board.id, projectId: project.project.id, parentRevision: parent.revision + 1 } },
-    audit: audit('boards.delete', board.id), events: [board.id, ...descendants.otherBoardIds].map(invalidate),
+    audit: audit('boards.delete', board.id), events: [
+      { boardId: board.id, kind: 'board.access-changed', payload: {} }, ...descendants.otherBoardIds.map(invalidate),
+    ],
   };
 }

@@ -254,7 +254,7 @@ test('populated board deletion recovers across batches and redacts surviving lin
     assert.equal(audits.length, 1);
     const events = await f.db.collection('events').find({ ...f.scope, commandId: audits[0].commandId }).sort({ boardId: 1 }).toArray();
     assert.deepEqual(events.map(({ boardId, kind, payload }) => [boardId, kind, payload]),
-      [[ids.privateBoard, 'board.access-changed', {}], [target, 'board.access-changed', {}]]);
+      [[ids.privateBoard, 'board.invalidated', {}], [target, 'board.access-changed', {}]]);
     await f.gate.runCommand(() => f.db.collection('projectManagers').deleteOne({ ...f.scope, id: ids.sharedManager }));
     await response(mutate(f, manager, 'DELETE', board(target), 1, { name }, key), 404);
   });

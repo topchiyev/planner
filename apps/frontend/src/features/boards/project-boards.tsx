@@ -11,6 +11,7 @@ type Project = NonNullable<Awaited<ReturnType<typeof loadNativeProject>>>;
 export function ProjectBoards({ project }: { project: Project }) {
   const action = useBoardMutation();
   const [name, setName] = useState('');
+  const [announcement, setAnnouncement] = useState('');
   const anchorLinks = useRef(new Map<string, HTMLAnchorElement>());
   const boards = project.boards;
 
@@ -25,12 +26,15 @@ export function ProjectBoards({ project }: { project: Project }) {
   }
 
   function move(index: number, direction: -1 | 1) {
-    const { id, revision } = boards[index];
+    const { id, revision, name } = boards[index];
     const beforeBoardId = direction === -1 ? boards[index - 1].id : boards[index + 2]?.id ?? null;
     const projectBoardOrderVersion = project.boardOrderVersion;
     void action.run(['boards.move', id, revision, beforeBoardId, projectBoardOrderVersion], (csrf, key) =>
       relationshipCommand('boards.move', csrf, key, { id, revision, body: { beforeBoardId, projectBoardOrderVersion } }),
-    () => anchorLinks.current.get(id)?.focus());
+    () => {
+      anchorLinks.current.get(id)?.focus();
+      setAnnouncement(`Moved ${name} to position ${index + direction + 1} of ${boards.length}.`);
+    });
   }
 
   return <section aria-label="Boards" className="workspace-detail">
@@ -40,6 +44,7 @@ export function ProjectBoards({ project }: { project: Project }) {
       <button className="workspace-button workspace-button-primary" type="submit" disabled={action.busy || !name.trim()}>Create board</button>
     </form>}
     {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
+    <span className="sr-only" role="status">{announcement}</span>
     {boards.length ? project.permissions.canCreateBoard ? <ol className="workspace-board-order" aria-label="Board order">
       {boards.map(({ id, name }, index) => <li key={id}>
         <Link to={boardHref(id)} ref={(element) => { if (element) anchorLinks.current.set(id, element); else anchorLinks.current.delete(id); }}>{name}</Link>

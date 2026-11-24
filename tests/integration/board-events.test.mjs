@@ -387,7 +387,7 @@ test('board deletion closes all of its streams and emits only neutral invalidati
       assert.equal(deleted.status, 204);
       assert.equal(await target.next(), null);
       await new CommandJournal(f.gate, f.db, f.installationId).deliverPending(f.streams.accept);
-      assert.deepEqual(await surviving.next(), { event: 'board.access-changed', data: { boardId: ids.privateBoard },
+      assert.deepEqual(await surviving.next(), { event: 'board.invalidated', data: { boardId: ids.privateBoard },
         id: cursor(f, ids.viewer, ids.privateBoard, 1n) });
       assert.equal((await f.call(eventPath(ids.sharedBoard), projectManager)).status, 404);
     } finally { target?.close(); surviving?.close(); await f.close(); }
