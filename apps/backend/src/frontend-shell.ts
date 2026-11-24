@@ -9,24 +9,24 @@ const shellRoutes = [
   '/boards/:boardId/cards/:cardId',
 ];
 
-export function registerWebShell(app: FastifyInstance, webRoot: string) {
-  app.register(async (web) => {
-    await web.register(fastifyStatic, {
-      root: join(webRoot, 'assets'),
+export function registerFrontendShell(app: FastifyInstance, frontendRoot: string) {
+  app.register(async (frontend) => {
+    await frontend.register(fastifyStatic, {
+      root: join(frontendRoot, 'assets'),
       prefix: '/assets/',
       index: false,
       maxAge: '1y',
       immutable: true,
     });
 
-    web.get('/', (_request, reply) => reply.redirect('/workspace'));
+    frontend.get('/', (_request, reply) => reply.redirect('/workspace'));
     for (const route of shellRoutes.flatMap((path) => [path, `${path}/`])) {
-      web.get<{ Params: Record<string, string> }>(route, (request, reply) => {
+      frontend.get<{ Params: Record<string, string> }>(route, (request, reply) => {
         if (Object.values(request.params).some((id) => id.length === 0)) {
           return reply.callNotFound();
         }
         reply.header('Cache-Control', 'no-store');
-        return reply.sendFile('index.html', webRoot, { cacheControl: false });
+        return reply.sendFile('index.html', frontendRoot, { cacheControl: false });
       });
     }
   });

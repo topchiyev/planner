@@ -2,19 +2,19 @@
 
 ## Repository skeleton
 
-Use one npm workspace and one lockfile. Ship one Node.js application process with the compiled browser assets. The CLI and packaging scripts are separate entry points into the same install, recovery, and migration code.
+Use one npm workspace and one lockfile. Ship one Node.js backend process with the compiled frontend assets. The CLI and packaging scripts are separate entry points into the same install, recovery, and migration code.
 
 | Path | Ownership and contents |
 | --- | --- |
-| `package.json`, `package-lock.json`, `tsconfig.base.json` | Private npm workspace, release version 0.1.0, Node 24 engine, shared TypeScript strict settings and release commands. |
+| `package.json`, `package-lock.json`, `tsconfig.base.json` | Private npm workspace with `@planner/backend` and `@planner/frontend` application packages, release version 0.1.0, Node 24 engine, shared TypeScript strict settings and release commands. |
 | `packages/contracts/src` | Pure Zod schemas, resource IDs, DTOs, error codes, operation IDs, browser event envelopes and import-report shapes. Export from `index.ts`. Import no runtime adapter. |
-| `apps/server/src/main.ts`, `config.ts`, `build-app.ts` | Load validated configuration, open isolated MongoDB, acquire the writer lock, recover pending changes, construct Fastify, mount adapters and handle graceful shutdown. `build-app` supports injected services for HTTP tests. |
-| `apps/server/src/domain/{accounts,projects,boards,cards,content,collaboration}` | Pure rules for permissions, placement, revisions, field validation and state changes. |
-| `apps/server/src/application/{operations,access,command-gate,events}` | Shared operation handlers, authorization and journal boundary. Every REST or MCP tool calls a registered operation with a server-established actor. |
-| `apps/server/src/storage/{mongo,blobs}` | Connection, named collections, index and schema migrations, repositories, private file storage and repair. Keep BSON and filesystem objects inside adapters. |
-| `apps/server/src/http/{rest,session,events,files}` | REST routes and errors, browser login, authenticated SSE and download/upload controllers. |
-| `apps/server/src/{oauth,mcp,import,maintenance}` | OAuth provider plus adapter, MCP SDK transport, PLANKA readers and maps, and service lifecycle primitives. Import code may read only via its own source adapter and write only the inactive target generation. |
-| `apps/web/src/{app,api,components,features}` | Router, app shell and browser API wrapper, shared accessible controls, and feature pages for sign-in, projects, boards, card inspector, notifications, accounts and settings. Store client preferences through their documented boundaries. |
+| `apps/backend/src/main.ts`, `config.ts`, `build-app.ts` | Load validated configuration, open isolated MongoDB, acquire the writer lock, recover pending changes, construct Fastify, mount adapters and handle graceful shutdown. `build-app` supports injected services for HTTP tests. |
+| `apps/backend/src/domain/{accounts,projects,boards,cards,content,collaboration}` | Pure rules for permissions, placement, revisions, field validation and state changes. |
+| `apps/backend/src/application/{operations,access,command-gate,events}` | Shared operation handlers, authorization and journal boundary. Every REST or MCP tool calls a registered operation with a actor established by the backend. |
+| `apps/backend/src/storage/{mongo,blobs}` | Connection, named collections, index and schema migrations, repositories, private file storage and repair. Keep BSON and filesystem objects inside adapters. |
+| `apps/backend/src/http/{rest,session,events,files}` | REST routes and errors, browser login, authenticated SSE and download/upload controllers. |
+| `apps/backend/src/{oauth,mcp,import,maintenance}` | OAuth provider plus adapter, MCP SDK transport, PLANKA readers and maps, and service lifecycle primitives. Import code may read only via its own source adapter and write only the inactive target generation. |
+| `apps/frontend/src/{app,api,components,features}` | Router, app shell and browser API wrapper, shared accessible controls, and feature pages for sign-in, projects, boards, card inspector, notifications, accounts and settings. Store frontend preferences through their documented boundaries. |
 | `tools/cli/src/main.ts`, `ops/{package,systemd,proxy}` | `plannerctl` local operator command, .deb staging, two unit files and a sample TLS proxy config. No third-party service provisioning in package scripts. |
 | `tests/{fixtures,integration,e2e,release}` | Independent synthetic PLANKA and Planner inputs, real standalone MongoDB checks, browser and client acceptance, and clean-host package drills. |
 | `docs/{development,operations,migration,mcp}.md` | Commands, runtime service and storage ownership, source snapshot procedure, and supported client configuration. Keep runbooks adjacent to the task that introduces their entry point. |
@@ -23,8 +23,8 @@ Use TypeScript 6.0.3 in NodeNext ESM, Fastify 5, MongoDB Node driver 7, React 19
 
 ### Interfaces between modules
 
-1. Contracts export input and output schemas and an operation ID. The server registry binds each ID to its read or command handler, scope and resource policy. REST and MCP adapters deserialize from the same schemas. The storage adapters return domain objects.
-2. The browser sends the shared contract shape. Server error responses use a machine code and a safe message. The browser renders validation and conflict outcomes and re-fetches changed resources. It derives control visibility from server-returned permission flags.
+1. Contracts export input and output schemas and an operation ID. The backend registry binds each ID to its read or command handler, scope and resource policy. REST and MCP adapters deserialize from the same schemas. The storage adapters return domain objects.
+2. The frontend sends the shared contract shape. Backend error responses use a machine code and a safe message. The frontend renders validation and conflict outcomes and re-fetches changed resources. It derives control visibility from permission flags returned by the backend.
 3. Use `npm run dev`, `build`, `typecheck`, `test`, `test:integration`, `test:e2e`, and `verify` at the repository root. `verify` runs types, unit and contract tests, and build. Integration and browser commands run separately with their documented isolated fixtures. Test startup must refuse a shared MongoDB URI.
 
 ## Storage and command execution

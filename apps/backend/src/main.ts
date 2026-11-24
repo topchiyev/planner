@@ -3,7 +3,7 @@ import { buildApp } from './build-app.js';
 
 const app = buildApp({
   isReady: async () => false,
-  webRoot: fileURLToPath(new URL('../../web/dist/', import.meta.url)),
+  frontendRoot: fileURLToPath(new URL('../../frontend/dist/', import.meta.url)),
 });
 
 try {

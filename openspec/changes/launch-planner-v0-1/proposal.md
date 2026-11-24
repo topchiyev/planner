@@ -28,4 +28,4 @@ None. This is the first Planner release.
 
 ## Impact
 
-This establishes the web application, server, private persistence and file storage, native installer, import tooling and remote MCP interface. Release verification covers a clean host, representative snapshots from both PLANKA 2.3.x releases, multi-user permission boundaries and real Codex and Claude connections. PLANKA remains a migration source and interoperability reference. Planner ships independently written code and its own interface.
+This establishes the frontend, backend, private persistence and file storage, native installer, import tooling and remote MCP interface. Release verification covers a clean host, representative snapshots from both PLANKA 2.3.x releases, multi-user permission boundaries and real Codex and Claude connections. PLANKA remains a migration source and interoperability reference. Planner ships independently written code and its own interface.

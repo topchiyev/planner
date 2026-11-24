@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
-import { registerWebShell } from './web-shell.js';
+import { registerFrontendShell } from './frontend-shell.js';
 
 export interface AppDependencies {
   isReady: () => Promise<boolean>;
-  webRoot?: string;
+  frontendRoot?: string;
 }
 
-export function buildApp({ isReady, webRoot }: AppDependencies) {
+export function buildApp({ isReady, frontendRoot }: AppDependencies) {
   const app = Fastify({ requestIdHeader: false, genReqId: () => randomUUID() });
 
   app.get('/health/live', (request, reply) => {
@@ -38,6 +38,6 @@ export function buildApp({ isReady, webRoot }: AppDependencies) {
     });
   });
 
-  if (webRoot) registerWebShell(app, webRoot);
+  if (frontendRoot) registerFrontendShell(app, frontendRoot);
   return app;
 }

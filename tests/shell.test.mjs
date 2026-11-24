@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { chromium, expect } from '@playwright/test';
 import { createServer } from 'vite';
 
-const main = fileURLToPath(new URL('../apps/server/dist/main.js', import.meta.url));
-const webRoot = fileURLToPath(new URL('../apps/web/', import.meta.url));
+const main = fileURLToPath(new URL('../apps/backend/dist/main.js', import.meta.url));
+const frontendRoot = fileURLToPath(new URL('../apps/frontend/', import.meta.url));
 
 async function startBackend(t) {
   const cwd = await mkdtemp(join(tmpdir(), 'planner-shell-cwd-'));
@@ -190,7 +190,7 @@ test('Chromium uses the same Vite origin for API and health proxy requests', { t
   process.env.PLANNER_PROXY_PORT = new URL(backend).port;
   let vite;
   try {
-    vite = await createServer({ root: webRoot, logLevel: 'silent', server: { port: 0, strictPort: true } });
+    vite = await createServer({ root: frontendRoot, logLevel: 'silent', server: { port: 0, strictPort: true } });
   } finally {
     if (oldPort === undefined) delete process.env.PLANNER_PROXY_PORT;
     else process.env.PLANNER_PROXY_PORT = oldPort;

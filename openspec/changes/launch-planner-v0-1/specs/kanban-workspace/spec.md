@@ -74,7 +74,7 @@ Planner SHALL propagate authorized board updates to connected eligible users and
 
 #### Scenario: Two editors move the same card
 - **WHEN** two editors submit incompatible moves against the same card version
-- **THEN** the server commits a consistent placement and the clients converge on it or receive an explicit conflict and refresh.
+- **THEN** the backend commits a consistent placement and the clients converge on it or receive an explicit conflict and refresh.
 
 #### Scenario: An editor reconnects
 - **WHEN** a client reconnects after missing updates

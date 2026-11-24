@@ -11,8 +11,8 @@
   },
   "workspaces": [
     "packages/contracts",
-    "apps/server",
-    "apps/web",
+    "apps/backend",
+    "apps/frontend",
     "tools/cli"
   ],
   "scripts": {
@@ -21,7 +21,7 @@
     "verify": "npm run typecheck && npm run build && npm run test:health",
     "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify",
     "test:health": "node --import tsx --test tests/health.test.mjs",
-    "dev": "npm run build --workspace @planner/contracts && npm run dev --workspace @planner/web",
+    "dev": "npm run build --workspace @planner/contracts && npm run dev --workspace @planner/frontend",
     "test:shell": "node --test tests/shell.test.mjs"
   },
   "devDependencies": {
