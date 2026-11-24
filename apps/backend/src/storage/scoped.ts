@@ -132,7 +132,7 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
       const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;
       return Object.fromEntries(Object.entries(logical).map(([field, value]) => {
         if (integer64Fields.has(field)) return [field, readLongField(field, value)];
-        if (dates.has(field)) return [field, readStoredInstant(value)];
+        if (dates.has(field)) return [field, readStoredInstant(value, field)];
         if (field === 'revision') return [field, revisionSchema.parse(value)];
         return [field, decodeValue(value)];
       }));

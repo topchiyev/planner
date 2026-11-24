@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   generationIdSchema, maximumSignedInt64, minimumSignedInt64, parseSourceIdentity, publicIdSchema,
-  signedInt64TextSchema, sourceUuidSchema,
+  signedInt64TextSchema, sourceUuidSchema, utcInstantSchema,
 } from '@planner/contracts/storage';
 import { Long } from 'mongodb';
 
 export { randomUUID as newPublicId };
 export const signedLongFields = ['rank', 'historySequence', 'recoverySequence', 'sequence'] as const;
 export const storedInstantFields = [
-  'createdAt', 'updatedAt', 'listChangedAt', 'issuedAt', 'expiresAt', 'consumedAt', 'revokedAt', 'readAt',
+  'createdAt', 'updatedAt', 'dueDate', 'listChangedAt', 'issuedAt', 'expiresAt', 'consumedAt', 'revokedAt', 'readAt',
 ] as const;
 
 export function legacyPublicId(sourceInstanceId: string, entity: string, sourceId: string) {
@@ -52,8 +52,10 @@ export function isStoredDate(value: unknown): value is Date {
   return value instanceof Date && Number.isFinite(value.getTime());
 }
 
-export function readStoredInstant(value: unknown) {
+export function readStoredInstant(value: unknown, field?: string) {
   if (value === null || isStoredDate(value)) return value;
+  // Early generic card writes could store this field as canonical UTC text.
+  if (field === 'dueDate' && typeof value === 'string') return new Date(utcInstantSchema.parse(value));
   throw new TypeError('Expected a BSON Date or explicit null.');
 }
 

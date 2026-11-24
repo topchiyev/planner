@@ -159,3 +159,11 @@ The matrix identifies observable release checks. It is an index for implementati
 [migration-snapshots]: ../openspec/changes/launch-planner-v0-1/specs/planka-migration/spec.md#scenario-check-supported-snapshots
 [planner-session]: ../openspec/changes/launch-planner-v0-1/access-and-mcp.md#account-lifecycle-and-web-endpoints
 [workspace-files]: ../openspec/changes/launch-planner-v0-1/workspace.md#content-filters-and-files
+
+## Workspace authorization and reads
+
+The contracts package exports `workspaceOperations` with operation IDs, routes, input schemas and DTOs. Project lists use `hidden=exclude|include|only`, `favorite=true|false` and the documented project order. Board card queries use `context=board|archive|trash`, `q` and the declared relation filters. Repeat a query parameter for multiple selected label, member or list IDs. Paginated operations return a `page.nextCursor` bound to the current actor, generation, filters and order. Alphabetical project paging uses MongoDB’s binary name order, with the public ID breaking ties. A rename at the page boundary invalidates its cursor.
+
+Native workspace endpoints materialize the result under one read snapshot with a fresh session check. Command planners can use `resolveBrowserWorkspace` while they hold the command lease. A trusted adapter that has already verified the current actor and active generation can instead use `createWorkspaceAuthorization` within that lease. The resolver returns owned relation contexts, including their parent board or project. Use `requireCapability` for operations on visible resources. Check command-specific state such as target placement and revision separately.
+
+Cards store `kind: board|archive|trash` according to the current same-board list. Field groups use `scopeType` and `scopeId`. Definitions belong to a `fieldGroupId`, and values use the exact card, group and definition tuple. Missing and inaccessible linked cards share one neutral task projection. File bytes and event subscriptions have their own adapters and use the same parent authorization.

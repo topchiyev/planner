@@ -11,3 +11,4 @@ export { PLANNER_VERSION } from './version.js';
 export * from './auth.js';
 export * from './accounts.js';
 export * from './mfa.js';
+export * from './workspace.js';
