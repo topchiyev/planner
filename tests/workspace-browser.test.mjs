@@ -1973,6 +1973,10 @@ test('native board layouts share card placement, preference display, and paged i
     await narrow.getByRole('link', { name: 'Close card' }).click();
     await expect(narrow.locator('#page-heading')).toBeFocused();
     await expect(narrow.getByRole('table', { name: 'Cards' })).toBeVisible();
+    await narrow.goto(path + '/cards/not-a-card-id?view=list');
+    await expect(narrow.getByRole('heading', { name: 'Page not found', level: 2 })).toBeVisible();
+    await narrow.getByRole('link', { name: 'Close card' }).click();
+    await expect(narrow.locator('#page-heading')).toBeFocused();
   });
 });
 
