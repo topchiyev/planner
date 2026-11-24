@@ -5,11 +5,13 @@ import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
 import { readProtectedFile } from './native/mongo-host.js';
+import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
 import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
 import { readInstallationConfig } from './native/setup-state.js';
 
 let app: ReturnType<typeof buildApp> | undefined;
 let closeAdmin: (() => Promise<void>) | undefined;
+let closeProxy: (() => Promise<void>) | undefined;
 
 try {
   const frontendRoot = fileURLToPath(new URL('../../frontend/dist/', import.meta.url));
@@ -40,6 +42,7 @@ try {
   }
 
   app = buildApp(dependencies);
+  if (native) closeProxy = await startProxySocket(proxyRuntimeDirectory, app);
   const address = await app.listen({ host: '127.0.0.1', port });
   let shuttingDown = false;
 
@@ -47,7 +50,7 @@ try {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
-      await Promise.all([app?.close(), closeAdmin?.()]);
+      await Promise.all([app?.close(), closeAdmin?.(), closeProxy?.()]);
     } catch {
       console.error('Planner could not close its listeners.');
       process.exitCode = 1;
@@ -61,7 +64,7 @@ try {
   process.on('SIGTERM', shutdown);
   console.log(address);
 } catch {
-  await Promise.allSettled([app?.close(), closeAdmin?.()]);
+  await Promise.allSettled([app?.close(), closeAdmin?.(), closeProxy?.()]);
   console.error('Planner could not start its listeners.');
   process.exitCode = 1;
 }

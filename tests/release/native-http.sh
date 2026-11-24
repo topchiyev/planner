@@ -11,6 +11,7 @@ work=$(mktemp -d /var/tmp/planner-native-http.XXXXXX)
 origin=https://planner.example.test
 backend=http://127.0.0.1:27430
 admin=/run/planner/admin.sock
+proxy=/run/planner-proxy/http.sock
 fixture_pid=
 trap 'if [ -n "$fixture_pid" ]; then kill "$fixture_pid" 2>/dev/null || true; wait "$fixture_pid" 2>/dev/null || true; fi' EXIT
 
@@ -62,6 +63,7 @@ install -m 0644 "$media/planner-nginx.conf" /etc/nginx/conf.d/planner.conf
 nginx -t
 systemctl restart nginx
 plannerctl restart --json > "$work/restarted.json"
+ps -o user= --ppid "$(cat /run/nginx.pid)" | awk '$1 != "www-data" {invalid=1} END {exit (invalid || NR == 0)}'
 
 curl_loopback() { curl --noproxy '*' --silent --show-error --max-time 8 "$@"; }
 curl_tls() {
@@ -76,6 +78,9 @@ status_code() { "$@" -o /dev/null -w '%{http_code}'; }
 [ "$(ss -H -ltn 'sport = :27430' | awk '{print $4}')" = '127.0.0.1:27430' ]
 [ "$(stat -c '%U:%G:%a' /run/planner)" = 'planner:planner:750' ]
 [ "$(stat -c '%U:%G:%a' "$admin")" = 'planner:planner:600' ]
+[ "$(stat -c '%U:%G:%a' /run/planner-proxy)" = 'planner:planner:711' ]
+[ "$(stat -c '%U:%G:%a' "$proxy")" = 'planner:planner:666' ]
+if runuser -u nobody -- touch /run/planner-proxy/foreign 2>/dev/null; then exit 1; fi
 check_access '{"kind":"enrollment","step":"recovery"}'
 runuser -u planner -- curl --noproxy '*' --silent --fail --unix-socket "$admin" http://localhost/status > /dev/null
 if runuser -u nobody -- curl --noproxy '*' --silent --fail --unix-socket "$admin" http://localhost/status >/dev/null; then
@@ -136,10 +141,26 @@ for attempt in {1..60}; do
     sleep .1
 done
 [ -S "$admin" ]
+[ -S "$proxy" ]
 plannerctl start --json > "$work/started.json"
 check_access '{"kind":"enrollment","step":"recovery"}'
 plannerctl stop --json > "$work/stopped.json"
 [ ! -e "$admin" ]
+[ ! -e "$proxy" ]
+
+runuser -u nobody -- "$node" "$media/native-http-fixture.mjs" inert > "$work/inert.log" 2>&1 &
+fixture_pid=$!
+for attempt in {1..60}; do
+    if grep -Fqx 'INERT LISTENER READY' "$work/inert.log"; then break; fi
+    sleep .1
+done
+grep -Fqx 'INERT LISTENER READY' "$work/inert.log"
+[ "$(status_code curl_tls "$origin/health/live")" = 502 ]
+if grep -Fqx 'UNEXPECTED REQUEST' "$work/inert.log"; then exit 1; fi
+kill "$fixture_pid"
+wait "$fixture_pid" 2>/dev/null || true
+fixture_pid=
+echo 'The TLS proxy sent zero requests to the unrelated TCP listener during Planner downtime.'
 
 runuser -u planner -- "$node" "$media/native-http-fixture.mjs" serve > "$work/fixture.log" 2>&1 &
 fixture_pid=$!
@@ -158,7 +179,8 @@ root = Path(sys.argv[1])
 for path, address in [('direct.json', None), ('proxied.json', '127.0.0.2')]:
     value = json.loads((root / path).read_text())
     assert value == {'context': {'origin': 'https://planner.example.test', 'clientAddress': address},
-                     'host': 'planner.example.test', 'rawAddress': '127.0.0.1', 'forwarded': []}, value
+                     'host': 'planner.example.test', 'rawAddress': '127.0.0.1' if address is None else None,
+                     'forwarded': []}, value
 PY
 [ "$(status_code curl_tls "$origin/health/ready")" = 200 ]
 "$node" "$media/native-http-fixture.mjs" stream

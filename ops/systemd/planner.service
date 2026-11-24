@@ -18,7 +18,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/planner/blobs -/var/lib/planner/staging /var/lib/planner/backups /run/planner
+ReadWritePaths=/var/lib/planner/blobs -/var/lib/planner/staging /var/lib/planner/backups /run/planner /run/planner-proxy
 
 [Install]
 WantedBy=multi-user.target

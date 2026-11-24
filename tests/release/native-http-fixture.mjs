@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { get } from 'node:http';
+import { createServer, get } from 'node:http';
 import { request } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -13,10 +13,12 @@ const [mode] = process.argv.slice(2);
 
 if (mode === 'serve') {
   const { buildApp } = await import(new URL('build-app.js', backend));
+  const { startProxySocket } = await import(new URL('native/proxy-socket.js', backend));
   const proxyToken = (await readFile('/etc/planner/proxy-token', 'utf8')).trim();
+  process.umask(0o077);
   const app = buildApp({ native: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }) } });
   app.get('/fixture/context', (req) => ({
-    context: req.plannerConnection, host: req.host, rawAddress: req.ip,
+    context: req.plannerConnection, host: req.host, rawAddress: req.ip ?? null,
     forwarded: Object.keys(req.headers).filter((name) => name.startsWith('x-forwarded-')
       || name.startsWith('x-planner-') || ['forwarded', 'x-real-ip'].includes(name)),
   }));
@@ -29,8 +31,18 @@ if (mode === 'serve') {
     await delay(550);
     reply.raw.end();
   });
-  await app.listen({ host: '127.0.0.1', port: 27430 });
-  process.on('SIGTERM', () => { void app.close(); });
+  const closeProxy = await startProxySocket('/run/planner-proxy', app);
+  try { await app.listen({ host: '127.0.0.1', port: 27430 }); } catch (error) {
+    await closeProxy();
+    throw error;
+  }
+  process.on('SIGTERM', () => { void Promise.all([app.close(), closeProxy()]); });
+} else if (mode === 'inert') {
+  const server = createServer((_request, reply) => {
+    console.log('UNEXPECTED REQUEST');
+    reply.end();
+  });
+  server.listen(27430, '127.0.0.1', () => console.log('INERT LISTENER READY'));
 } else if (mode === 'stream') {
   const ca = await readFile('/etc/ssl/planner/fullchain.pem');
   await new Promise((resolve, reject) => {

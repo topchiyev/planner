@@ -25,6 +25,7 @@ Preflight reports the supported host, available storage, selected port status, i
 | `/var/lib/planner/mongodb` | `planner-mongodb:planner-mongodb` mode `0700`. |
 | `/var/lib/planner/blobs`, `/var/lib/planner/staging`, `/var/lib/planner/backups` | `planner:planner` mode `0700`. |
 | `/run/planner` | `planner:planner` mode `0750`, recreated after a reboot by systemd tmpfiles. |
+| `/run/planner-proxy` | `planner:planner` mode `0711`, recreated after a reboot by systemd tmpfiles. The Planner service alone can replace its HTTP socket. |
 
 Both service accounts are dedicated non-login system identities. Installing or reinstalling lays down `planner.service` and `planner-mongodb.service` without enabling or starting them. The installer reloads a running systemd manager so it sees the new units. MongoDB’s unit requires `mongod.conf`, and the backend unit requires both configuration files. Setup starts and verifies the private database before starting the backend. An occupied selected port causes installation to stop before unpacking, including when a running Planner instance still owns its port. Stop Planner’s own services through the operator workflow before reinstalling on their selected ports. The package leaves unrelated MongoDB installations on `27017` in place. If an occupied path or systemd definition belongs to another installation, resolve it before retrying. Planner checks exact package ownership and rejects service-specific drop-ins and higher-priority tmpfiles overrides that could change the runtime directory.
 
@@ -66,7 +67,9 @@ Stop Planner before a package upgrade or reinstall. Once configured, the install
 
 The installed application reads the canonical HTTPS origin and selected port from `/etc/planner/planner.json`. It listens on the IPv4 loopback interface. The origin has the scheme, authority and optional root slash. Use the same authority, including any non-default HTTPS port, in the proxy configuration and in `plannerctl setup`.
 
-Use the [nginx server configuration](../ops/proxy/planner-nginx.conf) with the operator-managed TLS certificate and edit the server name, authority check, forwarded authority and loopback port to match the installation. For a non-default HTTPS port, also change the TLS listener and include that port in the configured authorities. The sample uses the nginx real-IP module to forward the actual connection peer address. It replaces the forwarded scheme and authority and streams board events without response buffering or compression.
+Use the [nginx server configuration](../ops/proxy/planner-nginx.conf) with the operator-managed TLS certificate and edit the server name, authority check and forwarded authority to match the installation. For a non-default HTTPS port, also change the TLS listener and include that port in the configured authorities. The sample uses the nginx real-IP module to forward the actual connection peer address. It replaces the forwarded scheme and authority and streams board events without response buffering or compression.
+
+nginx connects to `/run/planner-proxy/http.sock` as its unprivileged worker account. Socket mode `0666` allows the connection, and the directory grants write access to the Planner service identity. The upstream uses this socket throughout setup, restart and downtime. The separate loopback HTTP port remains available for local health checks.
 
 After setup creates the Planner service group, provision the proxy credential as root. This command stores it in two protected files and prints no token.
 
@@ -86,7 +89,7 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-Planner accepts a single address from authenticated loopback proxy requests. It uses its configured origin for security decisions and strips forwarding headers before dispatch. Direct local requests have no asserted public client address. Keep the nginx credential include root-only and exclude the token from proxy logs. Restart Planner and reload nginx when rotating it.
+Planner accepts a single address from authenticated requests on the proxy socket. It uses its configured origin for security decisions and strips forwarding headers before dispatch. Direct loopback requests have no asserted public client address. Keep the nginx credential include root-only and exclude the token from proxy logs. Restart Planner and reload nginx when rotating it.
 
 ## Runtime status and setup access
 

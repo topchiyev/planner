@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { isIP } from 'node:net';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { RuntimeAccess } from './runtime-access.js';
@@ -24,12 +25,17 @@ export const proxyTokenPattern = /^[0-9a-f]{64}$/u;
 const proxyHeader = 'x-planner-proxy-token';
 const healthRoutes = new Set(['/health/live', '/health/ready']);
 const mfaMethods = new Set(['/api/v1/mfa/enrollment', '/api/v1/mfa/enrollment/verify']);
+const proxyRequests = new WeakSet<IncomingMessage>();
+
+export function markProxyRequest(request: IncomingMessage) {
+  proxyRequests.add(request);
+}
 
 function proxyAddress(request: FastifyRequest, authority: string, token?: Buffer) {
   const headers = request.headers;
   const supplied = headers[proxyHeader];
   const address = headers['x-forwarded-for'];
-  if (request.raw.socket.remoteAddress !== '127.0.0.1' || !token
+  if (!proxyRequests.has(request.raw) || !token
       || typeof supplied !== 'string' || !proxyTokenPattern.test(supplied)
       || !timingSafeEqual(token, Buffer.from(supplied, 'hex'))
       || headers['x-forwarded-host'] !== authority || headers['x-forwarded-proto'] !== 'https'

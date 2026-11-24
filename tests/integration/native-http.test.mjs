@@ -12,6 +12,7 @@ assertOwnedMongoEnvironment(process.env);
 const { buildApp } = await import('../../apps/backend/dist/build-app.js');
 const { boundedRuntimeProbe } = await import('../../apps/backend/dist/native/runtime-access.js');
 const { startAdminSocket } = await import('../../apps/backend/dist/native/admin-socket.js');
+const { startProxySocket } = await import('../../apps/backend/dist/native/proxy-socket.js');
 const frontendRoot = fileURLToPath(new URL('../../apps/frontend/dist/', import.meta.url));
 const origin = 'https://planner.example.test:8443';
 const authority = new URL(origin).host;
@@ -22,9 +23,9 @@ const proxyHeaders = {
   'x-forwarded-prefix': '/untrusted', 'x-real-ip': '10.4.0.4', origin,
 };
 
-function operatorRequest(socketPath, path) {
+function unixRequest(socketPath, path, { method, headers } = {}) {
   return new Promise((resolve, reject) => {
-    const call = request({ socketPath, path }, async (response) => {
+    const call = request({ socketPath, path, method, headers }, async (response) => {
       let body = '';
       for await (const chunk of response) body += chunk;
       resolve({ status: response.statusCode, data: JSON.parse(body) });
@@ -48,6 +49,15 @@ test('native transport gates every protected route and strips forged forwarding 
       return { context: req.plannerConnection, headers: req.headers, host: req.host, ip: req.ip };
     } });
   }
+  const proxyDirectory = await mkdtemp(join(tmpdir(), 'planner-proxy-'));
+  await chmod(proxyDirectory, 0o711);
+  const closeProxy = await startProxySocket(proxyDirectory, app);
+  t.after(async () => {
+    await closeProxy();
+    await rm(proxyDirectory, { recursive: true, force: true });
+  });
+  const socket = join(proxyDirectory, 'http.sock');
+  const proxyPost = (path, headers) => unixRequest(socket, path, { method: 'POST', headers });
   const inject = (method, url, headers = {}, remoteAddress = '127.0.0.1') => app.inject({ method, url, headers, remoteAddress });
   const denied = [
     ['GET', '/api/v1/projects'], ['HEAD', '/files/original'], ['GET', '/files/original'],
@@ -76,32 +86,39 @@ test('native transport gates every protected route and strips forged forwarding 
   assert.equal((await inject('GET', '/enroll-mfa')).statusCode, 503);
   assert.equal((await inject('GET', '/api/v1/recovery/consume', proxyHeaders)).statusCode, 503);
   assert.equal((await inject('POST', '/api/v1/recovery/consume', proxyHeaders)).statusCode, 503);
-  assert.equal((await inject('POST', '/api/v1/recovery/consume', {
+  assert.equal((await proxyPost('/api/v1/recovery/consume', {
     ...proxyHeaders, origin: 'https://other.invalid', 'x-planner-proxy-token': proxyToken,
-  })).statusCode, 503);
+  })).status, 503);
   const proxied = { ...proxyHeaders, 'x-planner-proxy-token': proxyToken };
+  assert.equal((await inject('POST', '/api/v1/recovery/consume', proxied)).statusCode, 503);
   assert.equal((await inject('POST', '/api/v1/recovery/consume', proxied, '127.0.0.2')).statusCode, 503);
-  const allowed = await inject('POST', '/api/v1/recovery/consume', proxied);
-  assert.equal(allowed.statusCode, 200);
-  assert.deepEqual(allowed.json().context, { origin, clientAddress: '2001:db8::17' });
-  assert.equal(allowed.json().host, authority);
-  assert.equal(allowed.json().ip, '127.0.0.1');
-  assert.deepEqual(Object.keys(allowed.json().headers).sort(), ['host', 'origin', 'user-agent']);
-  assert.equal((await inject('POST', '/api/v1/mfa/enrollment', proxied)).statusCode, 503);
+  assert.equal((await proxyPost('/api/v1/recovery/consume', proxyHeaders)).status, 503);
+  const allowed = await proxyPost('/api/v1/recovery/consume', proxied);
+  assert.equal(allowed.status, 200);
+  assert.deepEqual(allowed.data.context, { origin, clientAddress: '2001:db8::17' });
+  assert.equal(allowed.data.host, authority);
+  assert.equal(allowed.data.ip, undefined);
+  assert.equal(allowed.data.headers.origin, origin);
+  for (const name of Object.keys(proxied).filter((name) => name !== 'host' && name !== 'origin')) {
+    assert.equal(allowed.data.headers[name], undefined);
+  }
+  assert.equal((await proxyPost('/api/v1/mfa/enrollment', proxied)).status, 503);
   access = { kind: 'enrollment', step: 'mfa' };
   assert.equal((await inject('HEAD', '/enroll-mfa')).statusCode, 200);
-  assert.equal((await inject('POST', '/api/v1/mfa/enrollment/verify', proxied)).statusCode, 200);
-  assert.equal((await inject('POST', '/api/v1/recovery/consume', proxied)).statusCode, 503);
+  assert.equal((await proxyPost('/api/v1/mfa/enrollment/verify', proxied)).status, 200);
+  assert.equal((await proxyPost('/api/v1/recovery/consume', proxied)).status, 503);
 
   access = { kind: 'ready' };
   assert.equal((await inject('GET', '/health/ready')).statusCode, 200);
   assert.equal((await inject('GET', '/workspace')).statusCode, 200);
   assert.equal((await inject('GET', '/status')).statusCode, 404);
-  for (const headers of [proxyHeaders, { ...proxied, 'x-forwarded-for': '192.0.2.9, 192.0.2.10' }]) {
+  for (const headers of [proxyHeaders, proxied]) {
     const direct = (await inject('GET', '/api/v1/projects', headers)).json();
     assert.deepEqual(direct.context, { origin, clientAddress: null });
     assert.equal(direct.host, authority);
   }
+  const malformed = await unixRequest(socket, '/api/v1/projects', { headers: { ...proxied, 'x-forwarded-for': '192.0.2.9, 192.0.2.10' } });
+  assert.deepEqual(malformed.data.context, { origin, clientAddress: null });
 });
 
 test('timed-out readiness is bounded and keeps a single probe in flight', async () => {
@@ -135,10 +152,10 @@ test('operator status lives in its private socket namespace and retains a collid
     const close = await startAdminSocket(directory, readAccess);
     try {
       assert.equal((await lstat(socket)).mode & 0o777, 0o600);
-      assert.deepEqual(await operatorRequest(socket, '/status'), {
+      assert.deepEqual(await unixRequest(socket, '/status'), {
         status: 200, data: { version: '0.1.0', access: { kind: 'enrollment', step: 'recovery' } },
       });
-      assert.equal((await operatorRequest(socket, '/restart')).status, 404);
+      assert.equal((await unixRequest(socket, '/restart')).status, 404);
       await assert.rejects(startAdminSocket(directory, readAccess), /is in use/u);
     } finally { await close(); }
     await assert.rejects(lstat(socket), { code: 'ENOENT' });

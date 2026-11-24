@@ -7,7 +7,7 @@ media=${1:?Pass the mount point of the read-only candidate ISO}
 [ "$(id -u)" = 0 ]
 [ "$(findmnt -no FSTYPE --target "$media")" = iso9660 ]
 findmnt -no OPTIONS --target "$media" | grep -Eq '(^|,)ro(,|$)'
-for path in /opt/planner /etc/planner /var/lib/planner /run/planner; do [ ! -e "$path" ]; done
+for path in /opt/planner /etc/planner /var/lib/planner /run/planner /run/planner-proxy; do [ ! -e "$path" ]; done
 [ -z "$(getent passwd planner planner-mongodb || :)" ]
 
 verify_package() {
@@ -83,7 +83,7 @@ reject_install() {
         cat "$work/refused" >&2
         exit 1
     fi
-    for path in /opt/planner /run/planner /usr/bin/plannerctl; do [ ! -e "$path" ]; done
+    for path in /opt/planner /run/planner /run/planner-proxy /usr/bin/plannerctl; do [ ! -e "$path" ]; done
     [ -z "$(getent passwd planner planner-mongodb || :)" ]
 }
 
@@ -167,7 +167,7 @@ dpkg -r planner-workspace
 [ ! -e /opt/planner ]
 unlink /etc/planner/.native-installation
 unlink /var/lib/planner/.native-installation
-rmdir /etc/planner /var/lib/planner/{mongodb,blobs,staging,backups} /var/lib/planner /run/planner
+rmdir /etc/planner /var/lib/planner/{mongodb,blobs,staging,backups} /var/lib/planner /run/planner /run/planner-proxy
 for account in planner planner-mongodb; do
     userdel "$account"
     if getent group "$account" >/dev/null; then groupdel "$account"; fi
@@ -209,6 +209,7 @@ done
 [ "$(stat -c '%U:%G:%a' /var/lib/planner/mongodb)" = planner-mongodb:planner-mongodb:700 ]
 [ "$(stat -c '%U:%G:%a' /var/lib/planner/{blobs,staging,backups} | sort -u)" = planner:planner:700 ]
 [ "$(stat -c '%U:%G:%a' /run/planner)" = planner:planner:750 ]
+[ "$(stat -c '%U:%G:%a' /run/planner-proxy)" = planner:planner:711 ]
 [ "$(stat -c '%U:%G:%a' /opt/planner/releases/0.1.0)" = root:root:755 ]
 [ "$(/usr/bin/plannerctl --version)" = 0.1.0 ]
 
