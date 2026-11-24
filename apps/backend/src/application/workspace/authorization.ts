@@ -221,6 +221,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
 
   async function requireAttachment(id: string) {
     const attachment = found(await records.get('attachments', id));
+    if (attachment.deletedAt != null) throw new WorkspaceAccessError('missing');
     return { attachment, card: await requireCard(reference(attachment.cardId)) };
   }
 

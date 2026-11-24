@@ -22,6 +22,7 @@ export async function verifyActiveMedia(database: Db, installationId: string, st
       return;
     }
     await store.verifyBlob(identity);
+    if (checked.size >= 4096) checked.clear();
     checked.set(identity.digest, identity.byteLength);
   }
   async function verifyReference(digest: string | null | undefined, bytes: number | null | undefined) {
@@ -51,7 +52,7 @@ export async function verifyActiveMedia(database: Db, installationId: string, st
 // All-generation scans are intentionally confined to maintenance under the exclusive writer.
 async function preparedDigests(database: Db) {
   const digests = new Set<string>();
-  const pending = commands(database).find({ status: 'prepared' }, { promoteLongs: false, batchSize: 8 });
+  const pending = commands(database).find({ status: 'prepared' }, { promoteLongs: false, batchSize: 8, maxTimeMS: 2000 });
   let count = 0;
   let effects = 0;
   const remember = (digest: unknown) => {
@@ -85,9 +86,9 @@ async function preparedDigests(database: Db) {
 
 async function liveReferences(database: Db, digest: string) {
   for (const name of referenceCollections) {
-    if (await database.collection(name).findOne({ blobDigest: digest }, { projection: { _id: 1 } })) return true;
+    if (await database.collection(name).findOne({ blobDigest: digest }, { projection: { _id: 1 }, maxTimeMS: 2000 })) return true;
   }
-  return !!await database.collection('users').findOne({ avatarBlobDigest: digest }, { projection: { _id: 1 } });
+  return !!await database.collection('users').findOne({ avatarBlobDigest: digest }, { projection: { _id: 1 }, maxTimeMS: 2000 });
 }
 
 export async function sweepPrivateMedia(
@@ -96,7 +97,7 @@ export async function sweepPrivateMedia(
   const cutoff = now.getTime() - mediaOrphanGraceMs;
   if (!Number.isFinite(cutoff) || !Number.isSafeInteger(maximum) || maximum < 1 || maximum > 128) throw new MediaStorageError();
   await store.sweepStages(maximum, cutoff);
-  const candidates = await store.candidates(maximum, cutoff);
+  const candidates = await store.candidates(maximum, now.getTime());
   if (!candidates.length) return;
   const protectedDigests = await preparedDigests(database);
   if (!protectedDigests) return;
@@ -104,17 +105,23 @@ export async function sweepPrivateMedia(
   async function protectedBlob(digest: string) {
     if (protectedDigests!.has(digest) || await liveReferences(database, digest)) return true;
     const parents = catalogs.find({ $or: [{ 'variants.small.digest': digest }, { 'variants.large.digest': digest }] },
-      { projection: { digest: 1, variants: 1 }, limit: 129 });
+      { projection: { digest: 1, variants: 1 }, limit: 129, maxTimeMS: 2000 });
     let count = 0;
     for await (const parent of parents) {
       if (++count > 128 || !digestPattern.test(parent.digest)) return true;
-      if (protectedDigests!.has(parent.digest) || await liveReferences(database, parent.digest)) return true;
+      if (store.isPinned(parent.digest) || protectedDigests!.has(parent.digest) || await liveReferences(database, parent.digest)) return true;
     }
     return false;
   }
   for (const digest of candidates) {
-    if (store.isPinned(digest) || await protectedBlob(digest)) continue;
-    if (await store.deleteOrphan(digest)) await catalogs.deleteMany({ digest }, durable);
+    if (store.isPinned(digest) || await protectedBlob(digest)) {
+      await store.clearOrphan(digest);
+      continue;
+    }
+    if (!await store.observeOrphan(digest, now, cutoff)) continue;
+    // Preserve the marker until unlink. A failed catalog write cannot strand an undiscoverable catalog row.
+    await catalogs.deleteMany({ digest }, durable);
+    await store.deleteOrphan(digest);
   }
 }
 

@@ -17,7 +17,12 @@ ARCH = "amd64"
 MANIFEST = "manifest.json"
 SIGNATURE = "manifest.json.sig"
 PRE_DEPENDENCIES = "iproute2, mawk | gawk, util-linux"
-DEPENDENCIES = "systemd, passwd, libc6 (>= 2.38), libgcc-s1, libstdc++6, libcurl4t64, libssl3t64"
+PILLOW_MINIMUM = "10.2.0-1ubuntu1.5"
+MEDIA_DECODER = {
+    "distribution": "Ubuntu 24.04 LTS", "package": "python3-pil", "minimumVersion": PILLOW_MINIMUM,
+    "securityAdvisory": "https://ubuntu.com/security/notices/USN-9064-1",
+}
+DEPENDENCIES = f"systemd, passwd, libc6 (>= 2.38), libgcc-s1, libstdc++6, libcurl4t64, libssl3t64, python3-pil (>= {PILLOW_MINIMUM})"
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 NOTICE = re.compile(r"(?:licen[cs]es?|notice[s]?|copying|copyright|third[-_ ]party(?:[-_ ]notices?)?)(?:[._ -].*)?", re.I)
@@ -221,13 +226,14 @@ def stage_package(root, source, node_dir, mongo_dir, version, runtimes, provenan
     lock = read_json(source / "package-lock.json")["packages"]
     inventory = stage_npm_inventory(release, workspaces, lock, source / "ops/package/notices")
     write_json(doc / "dependencies.json", {
+        "mediaDecoder": MEDIA_DECODER,
         "debianDepends": DEPENDENCIES,
         "debianPreDepends": PRE_DEPENDENCIES,
         "npmProduction": inventory,
         "frontendBundleLicenses": "frontend-bundle-licenses.md",
         "runtimeNotices": {"node": "node/LICENSE", "mongodb": "mongodb/"},
     })
-    write_json(doc / "provenance.json", {**provenance, "runtimes": runtimes})
+    write_json(doc / "provenance.json", {**provenance, "runtimes": runtimes, "mediaDecoder": MEDIA_DECODER})
     (release / "bin").mkdir()
     launcher = release / "bin/plannerctl"
     shutil.copyfile(source / "ops/package/plannerctl", launcher)
@@ -240,6 +246,9 @@ def stage_package(root, source, node_dir, mongo_dir, version, runtimes, provenan
     control.mkdir()
     native = source / "ops/package/native-preflight"
     (release / "lib").mkdir()
+    decoder = release / "lib/decode-media.py"
+    shutil.copyfile(source / "ops/package/decode-media.py", decoder)
+    decoder.chmod(0o644)
     for destination in (control / "preinst", release / "lib/native-preflight"):
         shutil.copyfile(native, destination)
         destination.chmod(0o755)
@@ -323,6 +332,7 @@ def build(output, key, revision, cache):
                 "sha256": sha256(package), "size": package.stat().st_size,
             },
             "runtimes": runtimes,
+            "mediaDecoder": MEDIA_DECODER,
             **provenance,
         })
         run("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key,

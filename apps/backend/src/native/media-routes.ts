@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { mediaAvatarQuerySchema, mediaBackgroundIdsSchema, mediaIdSchema, mediaLinkInputSchema, mediaMutationSchema, mediaOperations,
-  mediaRenameSchema, mediaThumbnailIdsSchema, mediaVariantSchema } from '@planner/contracts';
+  mediaRenameSchema, mediaThumbnailIdsSchema, mediaVariantSchema, relationshipParentRevisionHeader } from '@planner/contracts';
 import { publicIdSchema, revisionSchema } from '@planner/contracts/storage';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -53,7 +53,7 @@ function browserToken(request: FastifyRequest) {
 }
 
 function mutationIntent(request: FastifyRequest, operation: MediaIntent['operation']): MediaIntent {
-  const match = /^"([1-9]\d*)"$/u.exec(request.headers['if-match'] ?? '');
+  const match = /^"([1-9]\d{0,15})"$/u.exec(request.headers['if-match'] ?? '');
   const revision = revisionSchema.safeParse(match ? Number(match[1]) : undefined);
   const key = publicIdSchema.safeParse(request.headers['idempotency-key']);
   const params = request.params as Record<string, unknown>;
@@ -127,8 +127,9 @@ export function registerMediaRoutes(app: FastifyInstance, access: MediaAccess) {
             if (!parsed.success) throw new MediaRejection('input');
             return media.mutate(token, await media.preflight(token, intent), parsed.data ?? {});
           });
-          return reply.code(operation === 'addLink' || operation === 'uploadAttachment' || operation === 'uploadBackground' ? 201 : 200)
-            .send(mediaMutationSchema.parse(result));
+          const response = mediaMutationSchema.parse(result);
+          if (method === 'DELETE') return reply.header(relationshipParentRevisionHeader, response.data.parent.revision).code(204).send();
+          return reply.code(operation === 'addLink' || operation === 'uploadAttachment' || operation === 'uploadBackground' ? 201 : 200).send(response);
         } catch (error) {
           if (upload && !request.raw.complete) reply.header('Connection', 'close');
           return respondError(request, reply, error);

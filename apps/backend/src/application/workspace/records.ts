@@ -22,10 +22,10 @@ interface Entity {
 type Ordered = { name: string; rank?: Long | null };
 interface Records {
   users: { name: string; username?: string | null; role: SiteRole; disabledAt: Date | null };
-  projects: Ordered & { type: 'private' | 'shared'; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null };
+  projects: Ordered & { type: 'private' | 'shared'; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null };
   projectManagers: { projectId: string; userId: string };
   projectFavorites: { projectId: string; userId: string };
-  projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null };
+  projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null; availability?: string | null };
   boards: Ordered & { projectId: string; defaultView?: BoardView; orderVersion?: number };
   boardMembers: { boardId: string; userId: string; role: 'editor' | 'viewer'; canComment: boolean | null };
   boardPreferences: {
@@ -52,7 +52,7 @@ interface Records {
   fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean };
   fieldValues: { cardId: string; fieldGroupId: string; fieldDefinitionId: string; value: string };
   comments: { boardId: string; cardId: string; authorId?: string | null; text: string };
-  attachments: { cardId: string; name: string; kind: 'file' | 'link'; byteLength?: number | null; blobDigest?: string | null; url?: string | null };
+  attachments: { cardId: string; name: string; kind: 'file' | 'link'; byteLength?: number | null; blobDigest?: string | null; url?: string | null; availability?: string | null; deletedAt?: Date | null };
   blobs: { digest: string; lifecycleState: string; byteLength: number };
   events: { boardId: string; sequence: Long };
 }

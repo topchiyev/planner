@@ -6,11 +6,18 @@ export const maximumMediaEnvelope = maximumMediaBytes + 64 * 1024;
 export const mediaVariantSchema = z.enum(['small', 'large']);
 export const mediaNameSchema = z.string().trim().min(1).max(255).normalize()
   .refine((value) => value !== '.' && value !== '..' && !/[\/\\\p{Cc}\p{Cs}]/u.test(value));
-export const mediaLinkSchema = z.string().trim().min(1).max(2048).transform((value, context) => {
+export function safeMediaLink(value?: string | null) {
+  if (!value) return null;
   try {
     const url = new URL(value);
     if ((url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password) return url.href;
-  } catch { /* Invalid external URLs are rejected. */ }
+  } catch { /* Invalid external URLs are unavailable. */ }
+  return null;
+}
+
+export const mediaLinkSchema = z.string().trim().min(1).max(2048).transform((value, context) => {
+  const url = safeMediaLink(value);
+  if (url) return url;
   context.issues.push({ code: 'custom', input: value, message: 'Expected an HTTP or HTTPS link.' });
   return z.NEVER;
 });

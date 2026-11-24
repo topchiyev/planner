@@ -3,7 +3,7 @@ import type { Readable } from 'node:stream';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Db } from 'mongodb';
 import {
-  mediaMutationSchema, mediaOperations, type MediaMutation, type MediaVariant,
+  mediaMutationSchema, mediaOperations, safeMediaLink, type MediaMutation, type MediaVariant,
 } from '@planner/contracts';
 import { publicIdSchema, revisionSchema } from '@planner/contracts/storage';
 import { newPublicId } from '../../storage/identity.js';
@@ -57,9 +57,10 @@ function parentId(parent: Parent) {
 function referenceDto(row: {
   id: string; revision: number; name: string; kind: 'file' | 'link'; byteLength?: number | null; url?: string | null; availability?: string | null;
 }, id: string) {
+  const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
   return {
     id: row.id, parentId: id, revision: row.revision, name: row.name, kind: row.kind,
-    byteLength: row.byteLength ?? null, url: row.url ?? null, available: row.kind === 'link' || row.availability === availableMedia,
+    byteLength: row.byteLength ?? null, url, available: row.kind === 'link' ? !!url : row.availability === availableMedia,
   };
 }
 
@@ -208,7 +209,7 @@ export function createMediaService(
           } else {
             if (!live(parent.reference)) throw missing();
             effects.push({ kind: 'delete', collection: 'projectBackgrounds', id: parent.reference.id, revision: parent.reference.revision });
-            if ((project as { backgroundId?: string }).backgroundId === parent.reference.id) projectFields.backgroundId = null;
+            if (project.backgroundId === parent.reference.id) projectFields.backgroundId = null;
           }
           effects.push({ kind: 'update', collection: 'projects', id, revision: project.revision, fields: projectFields });
         } else {
@@ -282,7 +283,7 @@ export function createMediaService(
           const project = await scope.requireProject(target.id);
           const file = await records.background(target.backgroundId);
           if (!live(file) || file.kind !== 'file' || file.projectId !== project.project.id
-              || (!project.manager && (project.project as { backgroundId?: string }).backgroundId !== file.id)) throw missing();
+              || (!project.manager && project.project.backgroundId !== file.id)) throw missing();
           reference = file;
         } else {
           const id = target.id ?? scope.actor.id;

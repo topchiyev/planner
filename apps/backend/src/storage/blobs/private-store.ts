@@ -76,6 +76,26 @@ export async function createPrivateMediaStore(staging: string, blobs: string) {
     return join(blobs, digest);
   }
 
+  function orphanPath(digest: string) {
+    return pathFor(digest) + '.orphan';
+  }
+
+  const infoIfPresent = (path: string) => lstat(path).catch((error: unknown) => {
+    if (errorCode(error) === 'ENOENT') return null;
+    throw error;
+  });
+
+  async function clearOrphan(digest: string) {
+    const path = orphanPath(digest);
+    const info = await infoIfPresent(path);
+    if (!info) return;
+    if (!ownedRegular(info, 0o400, 1) || info.size !== 0) throw new MediaStorageError();
+    await unlink(path).catch((error: unknown) => {
+      if (errorCode(error) !== 'ENOENT') throw error;
+    });
+    await syncDirectory(blobs);
+  }
+
   function ownedRegular(info: Stats, mode: number, maximumLinks = 2) {
     return info.isFile() && info.dev === blobRoot.dev && info.uid === uid && info.gid === gid
       && (info.mode & 0o7777) === mode && info.nlink > 0 && info.nlink <= maximumLinks;
@@ -223,6 +243,7 @@ export async function createPrivateMediaStore(staging: string, blobs: string) {
                 const before = await source.stat();
                 if (before.size !== blob.byteLength || (await inspectBlob(source, before.size)).digest !== blob.digest
                     || !sameInode(before, await lstat(from))) throw new MediaStorageError();
+                await clearOrphan(blob.digest);
                 try { await link(from, pathFor(blob.digest)); }
                 catch (error) {
                   if (errorCode(error) !== 'EEXIST') throw error;
@@ -256,7 +277,13 @@ export async function createPrivateMediaStore(staging: string, blobs: string) {
           sweeper = undefined;
           break;
         }
-        if (!entry.isFile() || !digestPattern.test(entry.name) || pinned.has(entry.name)) continue;
+        if (!entry.isFile()) continue;
+        if (entry.name.endsWith('.orphan')) {
+          const digest = entry.name.slice(0, -7);
+          if (digestPattern.test(digest) && !pinned.has(digest) && !await infoIfPresent(pathFor(digest))) await clearOrphan(digest);
+          continue;
+        }
+        if (!digestPattern.test(entry.name) || pinned.has(entry.name)) continue;
         const info = await lstat(pathFor(entry.name)).catch((error: unknown) => {
           if (errorCode(error) === 'ENOENT') return null;
           throw error;
@@ -265,6 +292,26 @@ export async function createPrivateMediaStore(staging: string, blobs: string) {
       }
       return ids;
     },
+    async observeOrphan(digest: string, now: Date, cutoff: number) {
+      await checkRoot(blobs, blobRoot);
+      if (pinned.has(digest)) return false;
+      const path = orphanPath(digest);
+      const old = await infoIfPresent(path);
+      if (pinned.has(digest)) return false;
+      if (old) {
+        if (!ownedRegular(old, 0o400, 1) || old.size !== 0) throw new MediaStorageError();
+        return old.mtimeMs <= cutoff;
+      }
+      const marker = await open(path, O_RDWR | O_NOFOLLOW | O_EXCL | O_CREAT, 0o400);
+      try {
+        await marker.utimes(now, now);
+        await marker.sync();
+      } finally { await marker.close(); }
+      await syncDirectory(blobs);
+      if (pinned.has(digest)) await clearOrphan(digest);
+      return false;
+    },
+    clearOrphan,
     async deleteOrphan(digest: string) {
       await checkRoot(blobs, blobRoot);
       if (pinned.has(digest)) return false;
@@ -275,6 +322,7 @@ export async function createPrivateMediaStore(staging: string, blobs: string) {
       deleting.add(digest);
       try {
         await unlink(name);
+        await clearOrphan(digest);
         await syncDirectory(blobs);
         return true;
       } finally { deleting.delete(digest); }
