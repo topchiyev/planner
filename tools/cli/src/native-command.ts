@@ -92,8 +92,11 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
     console.error(error instanceof Error ? error.message : 'Invalid native command options.');
     return 2;
   }
-  const env = command.startsWith('migration-')
-    ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('PG'))) : undefined;
+  const connectionOverrides = ['NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_USE_ENV_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'];
+  const env = command.startsWith('migration-') ? Object.fromEntries(Object.entries(process.env).filter(([key]) => {
+    const name = key.toUpperCase();
+    return !name.startsWith('PG') && !connectionOverrides.includes(name);
+  })) : undefined;
   const result = spawnSync(process.execPath, [operator, ...helperArgs], { stdio: 'inherit', env });
   if (result.status === null) console.error('The installed Planner operator command could not complete.');
   return result.status ?? 1;

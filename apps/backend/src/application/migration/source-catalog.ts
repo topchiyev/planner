@@ -4,6 +4,23 @@ import baseline from './planka-community-catalog.json' with { type: 'json' };
 import { MigrationError, sha256 } from './manifest.js';
 
 export const sourceTables = Object.freeze(Object.keys(baseline.tables).sort());
+const excludedAccountColumns = new Set([
+  'password', 'password_changed_at', 'terms_signature', 'terms_accepted_at', 'api_key_prefix', 'api_key_hash',
+  'api_key_created_at', 'totp_secret', 'totp_enabled_at', 'totp_recovery_codes',
+]);
+const aggregateColumns = new Map<string, readonly string[]>([
+  ['config', ['id', 'smtp_host']],
+  ['notification_service', ['id', 'format']],
+  ['session', ['id']],
+  ['trusted_device', ['id']],
+  ['webhook', ['id', 'board_id', 'project_id', 'user_id']],
+]);
+
+export const sourceColumns: Readonly<Record<string, readonly string[]>> = Object.freeze(Object.fromEntries(
+  Object.entries(baseline.tables).map(([table, columns]) => [table,
+    Object.freeze(aggregateColumns.get(table) ?? columns.map(([name]) => String(name))
+      .filter((name) => table !== 'user_account' || !excludedAccountColumns.has(name)))]),
+));
 const migrationDigest = '32a3fa9b45c357f523a5f02189ccb63376e9bd35b9844d00296ecf6b4f0b71ef';
 export const sourceCatalogProof = Object.freeze({ catalog: sha256(Buffer.from(JSON.stringify(baseline))), ledger: migrationDigest });
 const finalMigration = '20260918000000_add_show_card_counter_to_boards.js';

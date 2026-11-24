@@ -10,6 +10,7 @@ import { gzipSync } from 'node:zlib';
 import { inspectObjects, parseObjectService, reconcileAssets } from '../../apps/backend/dist/application/migration/assets.js';
 import { readCaptureManifest, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
 import { inspectMigration } from '../../apps/backend/dist/application/migration/preflight.js';
+import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { prepareMigration } from '../../apps/backend/dist/application/migration/prepare.js';
 import { assertMigrationCapacity } from '../../apps/backend/dist/native/migration-state.js';
 import { startFixturePostgres } from '../fixtures/planka/private-postgres.mjs';
@@ -120,8 +121,15 @@ test('both synthetic restored tags match the native-source preflight through a t
     const database = 'planka_preflight_' + suffix;
     postgres.createDatabase(database);
     postgres.write(database, assembleSnapshot(release));
-    postgres.write(database,
-      'REVOKE TEMPORARY ON DATABASE ' + database + ' FROM PUBLIC; GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader;');
+    postgres.write(database, 'REVOKE TEMPORARY ON DATABASE ' + database + ' FROM PUBLIC;');
+    for (const [table, columns] of Object.entries(sourceColumns)) {
+      postgres.write(database, 'GRANT SELECT (' + columns.map((column) => '"' + column + '"').join(',') +
+        ') ON TABLE public."' + table + '" TO fixture_reader;');
+    }
+    assert.equal(postgres.query(database,
+      "SELECT pg_catalog.has_column_privilege('public.user_account', 'password', 'SELECT')"), 'f');
+    assert.equal(postgres.query(database,
+      "SELECT pg_catalog.has_column_privilege('public.session', 'access_token', 'SELECT')"), 'f');
     const config = ['[fixture]', 'host=' + postgres.socketRoot, 'port=' + postgres.port, 'dbname=' + database,
       'user=fixture_reader', 'isolated=true'].join('\n');
     const bundle = await fixtureBundle(release);
@@ -140,6 +148,10 @@ test('both synthetic restored tags match the native-source preflight through a t
     postgres.write(database, 'GRANT UPDATE(name) ON public.board TO fixture_reader');
     await assert.rejects(inspectMigration(request, owner, config), refuses('source-role'));
     postgres.write(database, 'REVOKE UPDATE(name) ON public.board FROM fixture_reader');
+    const cardFields = sourceColumns.card.map((column) => '"' + column + '"').join(',');
+    postgres.write(database, 'REVOKE SELECT (' + cardFields + ') ON public.card FROM fixture_reader; GRANT SELECT(id) ON public.card TO fixture_reader');
+    await assert.rejects(inspectMigration(request, owner, config), refuses('source-role'));
+    postgres.write(database, 'GRANT SELECT (' + cardFields + ') ON public.card TO fixture_reader');
     postgres.write(database, 'ALTER TABLE public.board ADD COLUMN drift text');
     await assert.rejects(inspectMigration(request, owner, config), refuses('source-catalog'));
     postgres.write(database, 'ALTER TABLE public.board DROP COLUMN drift');
