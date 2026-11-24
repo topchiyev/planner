@@ -1,6 +1,8 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
+import { BoardCardPlacement, CardAppendTarget, DraggableBoardCard } from './card-placement-dnd.js';
+import { DeleteList } from '../lists/delete-list.js';
 import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-lists.js';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog, useWorkspaceMutation } from '../projects/project-controls.js';
@@ -27,6 +29,8 @@ export function BoardCards({ workspace, lists, context }: { workspace: Workspace
   const [more, setMore] = useState<{ first: CardPage; page: CardPage }>();
   const [loading, setLoading] = useState(false);
   const [problem, setProblem] = useState('');
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => pending.current?.abort(), []);
   const current = more?.first === first ? more.page : first;
   const editable = context === 'board' && workspace.board.permissions.canEdit;
   const renderContents = (list: BoardList) => <CardsInList workspace={workspace} list={list} editable={editable}
@@ -34,22 +38,27 @@ export function BoardCards({ workspace, lists, context }: { workspace: Workspace
 
   async function loadMore() {
     const cursor = current.page.nextCursor;
-    if (loading || !cursor) return;
+    if (pending.current || !cursor) return;
+    const controller = new AbortController();
+    pending.current = controller;
     setLoading(true);
     setProblem('');
     try {
-      const next = await readWorkspace('boardCards', workspace.board.id, new URLSearchParams({ context, cursor }));
+      const next = await readWorkspace('boardCards', workspace.board.id, new URLSearchParams({ context, cursor }), controller.signal);
+      if (controller.signal.aborted) return;
       const cards = new Map(current.data.map((card) => [card.id, card]));
       for (const card of next.data) cards.set(card.id, card);
       setMore({ first, page: { ...next, data: [...cards.values()] } });
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (error instanceof WorkspaceRequestError && error.status === 401) window.location.replace(workspaceSignInPath(pathname + search));
       else setProblem('More cards couldn’t load.');
-    } finally { setLoading(false); }
+    } finally { pending.current = null; if (!controller.signal.aborted) setLoading(false); }
   }
 
   return <>
-    {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} renderContents={renderContents} /> :
+    {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} renderContents={renderContents}
+      wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={current.data}>{children}</BoardCardPlacement>} /> :
       <ReadonlyBoardLists lists={lists} renderContents={renderContents} />}
     {problem && <p className="workspace-problem" role="alert">{problem}</p>}
     {current.page.nextCursor && <button className="workspace-button" type="button" disabled={loading} onClick={() => void loadMore()}>Load more cards</button>}
@@ -62,12 +71,18 @@ function CardsInList({ workspace, list, cards, editable, search }: {
   const [creating, setCreating] = useState(false);
   return <>
     {cards.length > 0 && <ul className="board-cards" aria-label={'Cards in ' + list.name}>
-      {cards.map((card) => <li key={card.id}><Link to={{ pathname: cardPath(card.boardId, card.id), search }}>{card.name}</Link>
-        {card.closed && <span>Closed</span>}
-      </li>)}
+      {cards.map((card) => {
+        const content = <><Link to={{ pathname: cardPath(card.boardId, card.id), search }}>{card.name}</Link>
+          {card.closed && <span>Closed</span>}</>;
+        return editable ? <DraggableBoardCard card={card} key={card.id}>{content}</DraggableBoardCard> : <li key={card.id}>{content}</li>;
+      })}
     </ul>}
-    {editable && <button className="workspace-button board-add-card" type="button" aria-label={'Add card to ' + list.name}
-      onClick={() => setCreating(true)}>Add card</button>}
+    {editable && <CardAppendTarget listId={list.id} />}
+    {editable && <div className="project-actions">
+      <button className="workspace-button board-add-card" type="button" aria-label={'Add card to ' + list.name}
+        onClick={() => setCreating(true)}>Add card</button>
+      <DeleteList workspace={workspace} list={list} />
+    </div>}
     {editable && creating && <CreateCardDialog workspace={workspace} list={list} cards={cards} close={() => setCreating(false)} />}
   </>;
 }
@@ -88,7 +103,7 @@ function CreateCardDialog({ workspace, list, cards, close }: {
     event.preventDefault();
     if (!name.trim()) return;
     const body: Omit<RelationshipCommandInput<'cards.create'>, 'id' | 'expectedRevision'> = {
-      name: name.trim(), description: null, beforeCardId: beforeCardId || null, ...(type && { type }),
+      name: name.trim(), description: null, beforeCardId: beforeCardId || null, ...(type && !restriction && { type }),
     };
     void action.run(['cards.create', list.id, list.revision, body], (csrf, key) =>
       relationshipCommand('cards.create', csrf, key, { id: list.id, revision: list.revision, body }), async (result) => {

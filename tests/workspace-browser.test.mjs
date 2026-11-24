@@ -698,6 +698,12 @@ test('project deletion confirms and sends an exact imported name with spaces and
 
 test('desktop editors create a closed card and use rich text, ID-backed mentions and a local-only stopwatch', { timeout: 120_000 }, async () => {
   await workspaceBrowser(async ({ fixture: f, origin, page }) => {
+    for (let index = 0; index < 12; index++) {
+      const userId = fixtureId(12000 + index);
+      await f.insert('users', userId, { normalizedEmail: `alias-${index}@planner.invalid`, normalizedUsername: null,
+        name: 'Shared alias', username: null, role: 'boardUser', disabledAt: null });
+      await f.insert('boardMembers', fixtureId(13000 + index), { boardId: ids.privateBoard, userId, role: 'viewer', canComment: false });
+    }
     const editor = await page({ width: 1440, height: 900 });
     await signIn(editor, origin, 'first-editor');
     await editor.goto(origin + board(ids.privateBoard) + '?view=grid');
@@ -720,16 +726,28 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
     await inspector.getByRole('button', { name: 'Find members' }).click();
     await inspector.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
     await expect(inspector.locator('.card-mention')).toHaveText('@Fixture second-editor');
+    await inspector.getByRole('button', { name: 'Mention a board member' }).click();
+    await inspector.getByLabel('Find a board member').fill('Shared alias');
+    await inspector.getByRole('button', { name: 'Find members' }).click();
+    await expect(inspector.getByRole('button', { name: 'Mention Shared alias' })).toHaveCount(10);
+    await inspector.getByRole('button', { name: 'Next members page' }).click();
+    await expect(inspector.getByRole('button', { name: 'Mention Shared alias' })).toHaveCount(2);
+    await inspector.getByRole('button', { name: 'Mention Shared alias' }).last().click();
     await modes.getByRole('button', { name: 'Markdown' }).click();
     await expect(inspector.getByRole('textbox', { name: 'Description' })).toHaveValue(
       new RegExp('Spectral log 🌱 .*\\[Fixture second-editor\\]\\(' + ids.secondEditor + '\\)'));
     await inspector.getByLabel('Due date and time (UTC)').fill('2026-03-19T13:13');
+    const saved = editor.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + cardId));
     await inspector.getByRole('button', { name: 'Save card', exact: true }).click();
+    const receipt = await saved;
+    assert.equal(receipt.status(), 200);
+    assert.equal(receipt.request().postDataJSON().dueDate, '2026-03-19T13:13:00.000Z');
     await expect(inspector.getByRole('button', { name: 'Save card', exact: true })).toBeDisabled();
     const persisted = await f.db.collection('cards').findOne({ ...f.scope, id: cardId });
     assert.equal(persisted.dueDate.toISOString(), '2026-03-19T13:13:00.000Z');
     assert.equal(persisted.dueDateCompleted, false);
     assert.ok(persisted.description.includes(`@[Fixture second-editor](${ids.secondEditor})`));
+    assert.ok(persisted.description.includes(`@[Shared alias](${fixtureId(12011)})`));
 
     await inspector.getByRole('button', { name: 'Start stopwatch' }).click();
     await expect(inspector.getByRole('button', { name: 'Stop stopwatch' })).toBeEnabled();
@@ -755,7 +773,7 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
 
 test('narrow card inspector retains exact imported Markdown and stale drafts, then clears the editor on access loss', { timeout: 120_000 }, async () => {
   await workspaceBrowser(async ({ fixture: f, origin, page }) => {
-    const raw = '  <span>Imported text</span>\r\n\r\nUnicode 🌱 [Unsafe](javascript:example)  ';
+    const raw = '  <span>Imported text</span>\r\n\r\n<div data-fixture-html>Imported block</div>\r\n\r\nUnicode 🌱 [Unsafe](javascript:example) and `a < b`\r\n\r\n```js\r\nif (a < b) work()\r\n```  ';
     await f.db.collection('cards').updateOne({ ...f.scope, id: ids.activeCard }, { $set: { description: raw, stopwatch: { startedAt: null, total: 19 } } });
     await f.db.collection('users').updateOne({ ...f.scope, id: ids.firstEditor }, { $set: { 'preferences.editorMode': 'markup' } });
     const first = await page({ width: 390, height: 844 });
@@ -771,6 +789,10 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await mode.getByRole('button', { name: 'Rich text' }).click();
     await expect(editor.getByRole('textbox', { name: 'Description' })).toContainText('Imported text');
     await expect(editor.locator('a[href^="javascript:"]')).toHaveCount(0);
+    await expect(editor.locator('[data-fixture-html]')).toHaveCount(0);
+    await expect(editor.getByRole('textbox', { name: 'Description' })).toContainText('Imported block');
+    await expect(editor.locator('code').filter({ hasText: /^a < b$/u })).toBeVisible();
+    await expect(editor.locator('pre code')).toContainText('if (a < b) work()');
     await mode.getByRole('button', { name: 'Markdown' }).click();
     await editor.getByLabel('Card type').selectOption('story');
     await expect(editor.getByLabel('Due date and time (UTC)')).toHaveCount(0);
@@ -782,7 +804,7 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await expect(editor.getByLabel('Elapsed time')).toHaveText('00:00:19');
 
     await second.reload();
-    await editor.getByLabel('Description').fill('Keep this local draft 🌱');
+    await editor.getByRole('textbox', { name: 'Description', exact: true }).fill('Keep this local draft 🌱');
     const competing = second.getByRole('complementary', { name: 'Moving an assigned card' });
     await competing.getByLabel('Card name').fill('Name from another editor');
     await competing.getByRole('button', { name: 'Save card', exact: true }).click();
@@ -790,7 +812,7 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await editor.getByRole('button', { name: 'Save card', exact: true }).click();
     const current = first.getByRole('complementary', { name: 'Name from another editor' });
     await expect(current.getByText('The card changed while you were editing.')).toBeVisible();
-    await expect(current.getByLabel('Description')).toHaveValue('Keep this local draft 🌱');
+    await expect(current.getByRole('textbox', { name: 'Description', exact: true })).toHaveValue('Keep this local draft 🌱');
     await current.getByRole('button', { name: 'Keep edits and use current revision' }).click();
     await f.gate.runCommand(() => f.db.collection('boardMembers').updateOne({ ...f.scope, boardId: ids.privateBoard, userId: ids.firstEditor },
       { $set: { role: 'viewer', canComment: false }, $inc: { revision: 1 } }));
@@ -798,5 +820,109 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await expect(current.getByRole('button', { name: 'Save card', exact: true })).toHaveCount(0);
     await expect(current.getByText('Keep this local draft 🌱')).toHaveCount(0);
     assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: ids.activeCard })).description, raw);
+    await f.gate.runCommand(() => f.db.collection('sessions').updateMany({ ...f.scope, userId: ids.secondEditor },
+      { $set: { expiresAt: new Date('2025-01-01T00:00:00.000Z') } }));
+    await second.getByRole('button', { name: 'Mention a board member' }).click();
+    await expect(second).toHaveURL((url) => url.pathname === '/sign-in' &&
+      url.searchParams.get('returnTo') === new URL(target).pathname);
+  });
+});
+
+test('editors move cards by pointer and keyboard, recover stale placement, and use historical actions', { timeout: 150_000 }, async () => {
+  await workspaceBrowser(async ({ origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    const colleague = await page({ width: 1240, height: 900 });
+    const reader = await page({ width: 390, height: 844 });
+    const root = board(ids.privateBoard);
+    const path = root + '?context=board&view=kanban';
+    const name = 'Moving an assigned card';
+    const missingTitle = 'Story with a missing prior list';
+    const cardLink = (p, label = name) => p.getByRole('link', { name: label, exact: true });
+    const listRow = (p, title) => p.getByRole('list', { name: 'Board lists' }).locator(':scope > li')
+      .filter({ has: p.getByText(title, { exact: true }) });
+    await signIn(editor, origin, 'first-editor');
+    await signIn(colleague, origin, 'second-editor');
+    await signIn(reader, origin, 'viewer');
+    await editor.goto(origin + path);
+    await colleague.goto(origin + path);
+
+    const lane = listRow(editor, 'To do');
+    const closed = listRow(editor, 'Done');
+    const source = lane.locator('[data-card-drag-handle]');
+    await source.hover();
+    const handle = await source.boundingBox();
+    assert.ok(handle);
+    await editor.mouse.down();
+    await editor.mouse.move(handle.x + handle.width / 2 - 12, handle.y + handle.height / 2, { steps: 4 });
+    const target = closed.getByText('Drop card at the end', { exact: true });
+    await expect(target).toBeVisible();
+    const targetBox = await target.boundingBox();
+    assert.ok(targetBox);
+    await editor.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 });
+    await expect(target).toHaveAttribute('data-card-drop-target', 'true');
+    await editor.mouse.up();
+    await expect(closed.getByRole('link', { name, exact: true })).toBeVisible();
+
+    const move = editor.getByRole('button', { name: 'Move card ' + name, exact: true });
+    await move.focus();
+    await editor.keyboard.press('Enter');
+    const picker = editor.getByRole('dialog', { name: 'Move card' });
+    const destination = picker.getByLabel('Destination list');
+    await expect(destination).toBeFocused();
+    await destination.selectOption({ label: 'To do' });
+    await colleague.reload();
+    await colleague.getByRole('button', { name: 'Add card to To do', exact: true }).click();
+    const add = colleague.getByRole('dialog', { name: 'Add card' });
+    await add.getByLabel('Card name').fill('Concurrent card');
+    await add.getByRole('button', { name: 'Create card' }).click();
+    await expect(colleague.getByRole('heading', { name: 'Concurrent card', exact: true })).toBeVisible();
+    await picker.getByRole('button', { name: 'Move card', exact: true }).press('Enter');
+    await expect(editor.getByRole('alert')).toContainText('The card order changed');
+    await expect(closed.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(move).toBeFocused();
+    await editor.keyboard.press('Enter');
+    await destination.selectOption({ label: 'To do' });
+    await picker.getByLabel('Position').selectOption({ label: 'Before Concurrent card' });
+    await picker.getByRole('button', { name: 'Move card', exact: true }).click();
+    await expect(lane.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(move).toBeFocused();
+    await expect(editor).toHaveURL(origin + path);
+
+    await cardLink(editor).click();
+    const inspector = editor.getByRole('complementary', { name });
+    const placement = inspector.getByRole('region', { name: 'Card placement' });
+    await placement.getByRole('button', { name: 'Archive card', exact: true }).click();
+    await expect(placement.getByRole('status')).toContainText('Card archived.');
+    await expect(inspector.getByRole('textbox', { name: 'Card name' })).toHaveCount(0);
+    await reader.goto(origin + root + '/cards/' + ids.activeCard + '?context=archive&view=list');
+    await expect(reader.getByRole('heading', { name, exact: true })).toBeVisible();
+    await expect(reader.getByRole('button', { name: 'Restore card', exact: true })).toHaveCount(0);
+    await expect(reader.getByRole('button', { name: 'Move to trash', exact: true })).toHaveCount(0);
+
+    await placement.getByRole('button', { name: 'Move to trash', exact: true }).click();
+    await expect(placement.getByRole('status')).toContainText('Card moved to trash.');
+    await placement.getByRole('button', { name: 'Restore card', exact: true }).click();
+    await expect(placement.getByRole('status')).toContainText('Card restored.');
+
+    await editor.goto(origin + root + '?context=archive&view=list');
+    await cardLink(editor, missingTitle).click();
+    const missing = editor.getByRole('complementary', { name: missingTitle }).getByRole('region', { name: 'Card placement' });
+    const unavailable = editor.waitForResponse((response) =>
+      response.request().method() === 'POST' && response.url().endsWith('/api/v1/cards/' + ids.archivedStory + '/restore'));
+    await missing.getByRole('button', { name: 'Restore card', exact: true }).click();
+    assert.equal((await unavailable).status(), 422);
+    const restore = editor.getByRole('dialog', { name: 'Restore card' });
+    await restore.getByLabel('Destination list').selectOption({ label: 'Done' });
+    await restore.getByRole('button', { name: 'Restore card', exact: true }).click();
+    await expect(missing.getByRole('status')).toContainText('Card restored.');
+
+    await editor.goto(origin + path);
+    await expect(closed.getByRole('link', { name: missingTitle, exact: true })).toBeVisible();
+    await closed.getByRole('button', { name: 'Delete list Done', exact: true }).click();
+    await editor.getByRole('dialog', { name: 'Delete list' }).getByRole('button', { name: 'Confirm list deletion' }).click();
+    await expect(closed).toHaveCount(0);
+    await editor.getByRole('link', { name: 'Trash', exact: true }).click();
+    await expect(cardLink(editor, missingTitle)).toBeVisible();
+    await expect(editor.getByRole('button', { name: 'Delete list Trash' })).toHaveCount(0);
   });
 });

@@ -128,6 +128,7 @@ export async function planCardTransition(database: Db, records: WorkspaceRecords
     effects.push(boardHistoryChange(board, timestamp, history.last));
   }
 
+  const changedRankSiblings = updates.size > 0;
   const cardChange = touchRevision('cards', card, timestamp, revision);
   addCardUpdate(updates, { ...cardChange, fields: { ...cardChange.fields, ...fields } });
   const sourceChange = listPlacementChange(source, timestamp);
@@ -141,11 +142,13 @@ export async function planCardTransition(database: Db, records: WorkspaceRecords
     if (effect.kind !== 'update') throw new Error('Linked completion must only update scoped rows.');
     addCardUpdate(updates, effect);
   }
+  const invalidated = new Set(links?.events.map(({ boardId }) => boardId));
+  if (changedRankSiblings) invalidated.add(board.id);
   const resultRevision = cardChange.revision + 1;
   return {
     effects: [...updates.values(), ...effects],
     result: makeResult(resultRevision, listPosition(source, sourceChange), listPosition(destination, destinationChange)), audit,
     events: [{ boardId: board.id, kind: 'card.changed', payload: { id: card.id, revision: resultRevision } },
-      ...(updates.size > 1 ? [scopedBoardInvalidation(board.id)] : []), ...(links?.events ?? [])],
+      ...[...invalidated].sort().map(scopedBoardInvalidation)],
   };
 }

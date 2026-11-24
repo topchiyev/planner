@@ -1,11 +1,13 @@
 import { Link, useLoaderData, useLocation, useRouteLoaderData } from 'react-router';
-import type { loadNativeCard } from '../workspace/workspace-loaders.js';
+import { workspaceBoardId, type loadNativeBoard, type loadNativeCard } from '../workspace/workspace-loaders.js';
 import type { loadBrowserSession } from '../auth/browser-session.js';
+import { CardInspectorTransitions } from '../cards/card-inspector-transitions.js';
 import { CardEditing } from '../cards/card-editing.js';
 import { PageHeading } from '../../app/page-state.js';
 
 export function CardInspector() {
   const card = useLoaderData<Awaited<ReturnType<typeof loadNativeCard>>>();
+  const workspace = useRouteLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>(workspaceBoardId);
   const { search } = useLocation();
   const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
   return (
@@ -17,6 +19,7 @@ export function CardInspector() {
         </Link>
       </header>
       {card === undefined && <p className="inspector-status">Card details are unavailable.</p>}
+      {card && workspace && <CardInspectorTransitions key={card.id} card={card} workspace={workspace} />}
       {card && <CardEditing key={`${session?.account.id}:${card.boardId}:${card.id}`} card={card} />}
     </aside>
   );
