@@ -18,6 +18,7 @@ export async function tlsBridge(directory, startProxy) {
       headers: { ...incoming.headers, ...proxyHeaders(origin) } }, (response) => {
       reply.writeHead(response.statusCode, response.headers);
       reply.flushHeaders();
+      response.once('close', () => { if (!response.complete) reply.destroy(); });
       response.pipe(reply);
     });
     forwarded.once('error', () => reply.destroy());

@@ -2035,6 +2035,37 @@ test('native browser applies verified live updates passively and preserves a dir
       .getByRole('link', { name: 'Board from the live peer' })).toBeVisible();
     await expect(draft).toHaveValue('Unsubmitted local title');
 
+    const heldCard = Promise.withResolvers();
+    const releaseCard = Promise.withResolvers();
+    const selectedCard = '/api/v1/cards/' + ids.activeCard;
+    const cardPath = origin + selectedCard;
+    let holdNextCardRead = true;
+    await editor.route('**' + selectedCard + '?boardId=*', async (intercepted) => {
+      if (!holdNextCardRead) { await intercepted.continue(); return; }
+      holdNextCardRead = false;
+      const snapshot = await intercepted.fetch();
+      heldCard.resolve();
+      await releaseCard.promise;
+      await intercepted.fulfill({ response: snapshot }).catch(() => {});
+    });
+    async function renameCard(name) {
+      const current = (await (await peer.request.get(cardPath)).json()).data;
+      const saved = await peer.request.patch(cardPath, {
+        headers: { ...peerHeaders, 'If-Match': '"' + current.revision + '"', 'Idempotency-Key': randomUUID() },
+        data: { name },
+      });
+      assert.equal(saved.status(), 200, await saved.text());
+      await publish();
+    }
+    try {
+      await renameCard('First update in a burst');
+      await heldCard.promise;
+      await renameCard('Newest update in a burst');
+    } finally { releaseCard.resolve(); }
+    await expect(editor.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
+    await expect(peer.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
+    await expect(draft).toHaveValue('Unsubmitted local title');
+
     let invalidatedResume = false;
     await editor.route('**' + eventsPath + '?after=*', async (intercepted) => {
       const url = new URL(intercepted.request().url());
@@ -2063,12 +2094,12 @@ test('native browser applies verified live updates passively and preserves a dir
     await expect(draft).toHaveCount(0);
     await expect(editor.getByRole('link', { name: 'Board from the live peer', exact: true })).toHaveCount(0);
     assert.equal((await session()).lastActivityAt.getTime(), lastActivity);
-    await expect(peer.getByRole('heading', { name: 'Peer live title', level: 2 })).toBeVisible();
+    await expect(peer.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
     const peerActivity = (await f.db.collection('sessions').findOne({ ...f.scope, userId: ids.privateOwner })).lastActivityAt.getTime();
     assert.equal(peerActivity, time);
     time += 121_000;
     await expect(peer.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible({ timeout: 10_000 });
     assert.equal(new URL(peer.url()).searchParams.get('returnTo'), path);
-    await expect(peer.getByRole('heading', { name: 'Peer live title', level: 2 })).toHaveCount(0);
+    await expect(peer.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toHaveCount(0);
   }, false, { clock: () => new Date(time), heartbeatMs: 200 });
 });
