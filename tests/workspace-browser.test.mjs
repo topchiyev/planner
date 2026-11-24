@@ -2272,10 +2272,23 @@ test('keyboard cut rechecks the source revision, cancels cleanly and reopens aft
     await dialog.getByRole('button', { name: 'Paste card', exact: true }).click();
     assert.equal((await stale).status(), 409);
     await expect(toolbar.getByRole('alert')).toContainText('The placement changed');
+    const accepted = [];
+    await editor.route('**/api/v1/cards/' + ids.activeCard + '/move', async (intercepted) => {
+      const response = await intercepted.fetch();
+      const { ['idempotency-key']: key, ['if-match']: revision } = intercepted.request().headers();
+      accepted.push({ key, revision, body: intercepted.request().postDataJSON(), status: response.status() });
+      if (accepted.length === 1) await intercepted.abort('failed');
+      else await intercepted.fulfill({ response });
+    });
     await toolbar.getByRole('button', { name: 'Paste card', exact: true }).click();
     await dialog.getByLabel('Destination list').selectOption(ids.sharedActiveList);
     await dialog.getByRole('button', { name: 'Paste card', exact: true }).click();
+    await expect(toolbar.getByRole('alert')).toContainText('The paste response was interrupted.');
+    assert.equal(accepted[0].status, 200);
+    assert.equal((await fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard })).boardId, ids.sharedBoard);
+    await toolbar.getByRole('button', { name: 'Retry paste' }).click();
     await expect(editor).toHaveURL(origin + board(ids.sharedBoard) + '/cards/' + ids.activeCard);
+    assert.deepEqual(accepted[1], accepted[0]);
     await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeFocused();
     await expect(toolbar.getByRole('button', { name: 'Paste card', exact: true })).toHaveCount(0);
     assert.equal((await fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard })).boardId, ids.sharedBoard);
@@ -2319,6 +2332,9 @@ test('description drafts recover exact Markdown, preserve newer tab writes and r
     await expect(markdown(editor)).toHaveValue('Original saved description');
     assert.deepEqual(await browserDescriptionDrafts(editor), []);
     await markdown(editor).fill(exact);
+    await markdown(editor).press('Control+a');
+    await markdown(editor).press('Control+c');
+    await expect(editor.getByRole('region', { name: 'Board clipboard' })).toHaveCount(0);
     await expect.poll(async () => (await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown)).toEqual([exact]);
     await editor.goto(otherTarget);
     await expect(editor.getByRole('heading', { name: 'Another draft scope', level: 2 })).toBeVisible();
