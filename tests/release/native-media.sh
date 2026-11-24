@@ -84,8 +84,7 @@ wait_for 200 /recover
 main_pid=$(systemctl show -p MainPID --value planner.service)
 nsenter --target "$main_pid" --mount -- runuser -u planner -- /bin/bash -euc '
   [ "$(findmnt -no ID -T /var/lib/planner/staging)" = "$(findmnt -no ID -T /var/lib/planner/blobs)" ]
-  ! test -x /var/lib/planner/mongodb
-  ! ls /var/lib/planner/mongodb >/dev/null 2>&1
+  if test -x /var/lib/planner/mongodb || ls /var/lib/planner/mongodb >/dev/null 2>&1; then exit 1; fi
   probe=$(mktemp /var/lib/planner/staging/qualification.XXXXXX)
   link=/var/lib/planner/blobs/.qualification-atomic-link
   trap '''rm -f -- "$probe" "$link"''' EXIT
