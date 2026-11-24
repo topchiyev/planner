@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
 import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-lists.js';
@@ -27,6 +27,8 @@ export function BoardCards({ workspace, lists, context }: { workspace: Workspace
   const [more, setMore] = useState<{ first: CardPage; page: CardPage }>();
   const [loading, setLoading] = useState(false);
   const [problem, setProblem] = useState('');
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => pending.current?.abort(), []);
   const current = more?.first === first ? more.page : first;
   const editable = context === 'board' && workspace.board.permissions.canEdit;
   const renderContents = (list: BoardList) => <CardsInList workspace={workspace} list={list} editable={editable}
@@ -34,18 +36,22 @@ export function BoardCards({ workspace, lists, context }: { workspace: Workspace
 
   async function loadMore() {
     const cursor = current.page.nextCursor;
-    if (loading || !cursor) return;
+    if (pending.current || !cursor) return;
+    const controller = new AbortController();
+    pending.current = controller;
     setLoading(true);
     setProblem('');
     try {
-      const next = await readWorkspace('boardCards', workspace.board.id, new URLSearchParams({ context, cursor }));
+      const next = await readWorkspace('boardCards', workspace.board.id, new URLSearchParams({ context, cursor }), controller.signal);
+      if (controller.signal.aborted) return;
       const cards = new Map(current.data.map((card) => [card.id, card]));
       for (const card of next.data) cards.set(card.id, card);
       setMore({ first, page: { ...next, data: [...cards.values()] } });
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (error instanceof WorkspaceRequestError && error.status === 401) window.location.replace(workspaceSignInPath(pathname + search));
       else setProblem('More cards couldn’t load.');
-    } finally { setLoading(false); }
+    } finally { pending.current = null; if (!controller.signal.aborted) setLoading(false); }
   }
 
   return <>
@@ -88,7 +94,7 @@ function CreateCardDialog({ workspace, list, cards, close }: {
     event.preventDefault();
     if (!name.trim()) return;
     const body: Omit<RelationshipCommandInput<'cards.create'>, 'id' | 'expectedRevision'> = {
-      name: name.trim(), description: null, beforeCardId: beforeCardId || null, ...(type && { type }),
+      name: name.trim(), description: null, beforeCardId: beforeCardId || null, ...(type && !restriction && { type }),
     };
     void action.run(['cards.create', list.id, list.revision, body], (csrf, key) =>
       relationshipCommand('cards.create', csrf, key, { id: list.id, revision: list.revision, body }), async (result) => {

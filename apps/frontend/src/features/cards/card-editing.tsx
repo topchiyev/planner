@@ -116,25 +116,27 @@ function EditableCard({ card }: { card: Card }) {
       </div>
     </div>}
     <form className="project-form" onSubmit={save} aria-label="Edit card">
-      <label>Card name<input required value={effective.name} maxLength={Math.max(128, card.name.length)}
-        onChange={(event) => edit('name', event.target.value)} /></label>
-      <label>Card type<select value={effective.type} onChange={(event) => edit('type', event.target.value as Card['type'])}>
-        {allowedTypes.map((type) => <option key={type} value={type}>{options[type]}</option>)}
-      </select></label>
-      <label className="board-checkbox"><input type="checkbox" checked={effective.closed}
-        onChange={(event) => edit('closed', event.target.checked)} />Card closed</label>
-      {effective.type === 'project' && <fieldset className="board-option-set">
-        <legend>Due date</legend>
-        <label>Due date and time (UTC)<input type="datetime-local" value={dateInput(effective.dueDate)}
-          onChange={(event) => {
-            const next = event.target.valueAsNumber;
-            edit('dueDate', Number.isNaN(next) ? null : new Date(next).toISOString());
-          }} /></label>
-        {effective.dueDate && <label className="board-checkbox"><input type="checkbox" checked={dirty?.dueDateCompleted ?? effective.dueDateCompleted}
-          onChange={(event) => edit('dueDateCompleted', event.target.checked)} />Due date complete</label>}
-      </fieldset>}
-      <CardMarkdownInput value={effective.description ?? ''} original={current.description ?? ''} mode={editor} boardId={card.boardId}
-        onMode={setEditorMode} onChange={(value) => edit('description', value || null)} />
+      <fieldset className="card-editing-fields" disabled={action.busy}>
+        <label>Card name<input required value={effective.name} maxLength={Math.max(128, card.name.length)}
+          onChange={(event) => edit('name', event.target.value)} /></label>
+        <label>Card type<select value={effective.type} onChange={(event) => edit('type', event.target.value as Card['type'])}>
+          {allowedTypes.map((type) => <option key={type} value={type}>{options[type]}</option>)}
+        </select></label>
+        <label className="board-checkbox"><input type="checkbox" checked={effective.closed}
+          onChange={(event) => edit('closed', event.target.checked)} />Card closed</label>
+        {effective.type === 'project' && <fieldset className="board-option-set">
+          <legend>Due date</legend>
+          <label>Due date and time (UTC)<input type="datetime-local" value={dateInput(effective.dueDate)}
+            onChange={(event) => {
+              const next = event.target.valueAsNumber;
+              edit('dueDate', Number.isNaN(next) ? null : new Date(next).toISOString());
+            }} /></label>
+          {effective.dueDate && <label className="board-checkbox"><input type="checkbox" checked={dirty?.dueDateCompleted ?? effective.dueDateCompleted}
+            onChange={(event) => edit('dueDateCompleted', event.target.checked)} />Due date complete</label>}
+        </fieldset>}
+        <CardMarkdownInput value={effective.description ?? ''} original={current.description ?? ''} mode={editor} boardId={card.boardId}
+          onMode={setEditorMode} onChange={(value) => edit('description', value || null)} />
+      </fieldset>
       {!valid && <p className="workspace-problem" role="status">Use up to 128 characters in the title and {maximumCardDescriptionLength} in the description.</p>}
       <button type="submit" className="workspace-button workspace-button-primary"
         disabled={action.busy || stale || !valid || !Object.keys(dirtyValues).length}>Save card</button>

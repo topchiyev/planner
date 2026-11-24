@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Node } from '@tiptap/core';
-import { Markdown } from '@tiptap/markdown';
+import { Markdown, MarkdownManager } from '@tiptap/markdown';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { cardMentionToken, maximumCardDescriptionLength, type RelationshipReadOutput } from '@planner/contracts';
@@ -44,22 +44,41 @@ function webUrl(value: string) {
   }
 }
 
+function inertHtmlTokenizer() {
+  const { instance } = new MarkdownManager();
+  const tokenizer = new instance.Tokenizer();
+  const blockHtml = tokenizer.html.bind(tokenizer);
+  const inlineHtml = tokenizer.tag.bind(tokenizer);
+  const literal = (raw: string) => ({ type: 'escape', raw, text: raw });
+  return Object.assign(tokenizer, {
+    html(source: string) {
+      const match = blockHtml(source);
+      if (match) return { type: 'paragraph', raw: match.raw, text: match.raw, tokens: [literal(match.raw)] };
+    },
+    tag(source: string) {
+      const state = tokenizer.lexer.state;
+      const { inLink, inRawBlock } = state;
+      const match = inlineHtml(source);
+      // The HTML tokenizer normally enters anchor and raw-text modes. Its result here is ordinary text.
+      Object.assign(state, { inLink, inRawBlock });
+      if (match) return literal(match.raw);
+    },
+  });
+}
+
 const extensions = [
-  StarterKit.configure({ link: { openOnClick: false, autolink: false, linkOnPaste: false, isAllowedUri: webUrl } }),
-  Markdown,
+  StarterKit.configure({ underline: false, link: { openOnClick: false, autolink: false, linkOnPaste: false, isAllowedUri: webUrl } }),
+  Markdown.configure({ markedOptions: { tokenizer: inertHtmlTokenizer() } }),
   PlannerMention,
 ];
 
-// Escape raw HTML before it reaches the rich parser. The editable source and database keep the original Markdown.
-const richContent = (source: string) => source.replace(/</gu, '\\<');
-
 export function CardDescription({ description }: { description: string }) {
   const editor = useEditor({
-    extensions, content: richContent(description), contentType: 'markdown', editable: false,
+    extensions, content: description, contentType: 'markdown', editable: false,
     editorProps: { attributes: { class: 'card-rendered-description' } },
   });
   useEffect(() => {
-    editor?.commands.setContent(richContent(description), { contentType: 'markdown', emitUpdate: false });
+    editor?.commands.setContent(description, { contentType: 'markdown', emitUpdate: false });
   }, [editor, description]);
   return <EditorContent editor={editor} />;
 }
@@ -94,7 +113,7 @@ export function CardMarkdownInput({ value, original, mode, boardId, onMode, onCh
 function RichInput({ value, boardId, onChange }: { value: string; boardId: string; onChange: (value: string) => void }) {
   const emitted = useRef<string | null>(null);
   const editor = useEditor({
-    extensions, content: richContent(value), contentType: 'markdown',
+    extensions, content: value, contentType: 'markdown',
     editorProps: { attributes: { role: 'textbox', 'aria-label': 'Description', 'aria-multiline': 'true', class: 'card-rich-input' } },
     onUpdate: ({ editor }) => {
       const source = editor.getMarkdown();
@@ -105,7 +124,7 @@ function RichInput({ value, boardId, onChange }: { value: string; boardId: strin
 
   useEffect(() => {
     if (!editor || value === emitted.current) return;
-    editor.commands.setContent(richContent(value), { contentType: 'markdown', emitUpdate: false });
+    editor.commands.setContent(value, { contentType: 'markdown', emitUpdate: false });
     emitted.current = value;
   }, [editor, value]);
 

@@ -117,7 +117,7 @@ test('card updates preserve hidden fields and exact imported text and synchroniz
 
     const second = fixtureId(9100);
     await f.insert('tasks', second, { checklistId: ids.checklist, linkedCardId: id, completed: true });
-    await f.db.collection('tasks').updateOne({ ...f.scope, id: ids.linkedTask }, { $set: { completed: true } });
+    assert.equal((await f.db.collection('tasks').findOne({ ...f.scope, id: ids.linkedTask })).completed, false);
     const key = randomUUID();
     const reopen = { type: 'project', closed: false };
     const saved = (await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 2, reopen, key), 200)).data;
