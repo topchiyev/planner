@@ -130,7 +130,7 @@ export function createRelationshipJournalOperations(
       normalize: (input) => Object.fromEntries(Object.entries(parse(input)).filter(([, value]) => value !== undefined)),
       async authorize(context, input) { await authorize(await resolveActor(context), parse(input)); },
       async authorizeReplay(context, receipt) {
-        await authorizeTransferReplay(await resolveActor(context), operation, receipt.scope, receipt.result);
+        await authorizeTransferReplay(await resolveActor(context), operation, receipt.scope, receipt.request, receipt.result);
       },
       async plan(context, input) {
         const parsed = parse(input);

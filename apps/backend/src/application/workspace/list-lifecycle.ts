@@ -65,7 +65,7 @@ function listRanks(rows: WorkspaceRow<'lists'>[], id: string, before: string | n
   }
 }
 
-function listEffect(list: WorkspaceRow<'lists'>, timestamp: string, changes: { boardId?: string; rank?: string; name?: string; color?: WorkspaceRow<'lists'>['color'] }) {
+function listEffect(list: WorkspaceRow<'lists'>, timestamp: string, changes: { boardId?: string; transferredAcrossBoards?: boolean; rank?: string; name?: string; color?: WorkspaceRow<'lists'>['color'] }) {
   const base = touchRevision('lists', list, timestamp);
   return { ...base, fields: { ...base.fields, orderVersion: listCardOrderVersion(list), ...changes } };
 }
@@ -132,7 +132,7 @@ export async function planListMove(records: WorkspaceRecords, { source, destinat
   const commandAudit = audit('lists.move', list.id);
   if (!ranks.size) return { effects: [], result: result(list, board.revision, oldVersion), audit: commandAudit };
   const parent = boardEffect(destination.board, timestamp, nextVersion + 1);
-  const moved = listEffect(list, timestamp, same ? {} : { boardId: destination.board.id });
+  const moved = listEffect(list, timestamp, same ? {} : { boardId: destination.board.id, transferredAcrossBoards: true });
   const rank = ranks.get(list.id);
   if (rank !== undefined) moved.fields = { ...moved.fields, rank: rank.toString() };
   const resultingList = { ...list, boardId: destination.board.id, rank: rank === undefined ? list.rank : encodeRank(rank),
@@ -152,7 +152,7 @@ export async function planListMove(records: WorkspaceRecords, { source, destinat
   for (const card of occupants) {
     const touch = touchRevision('cards', card, timestamp);
     effects.push({ ...touch, fields: {
-      ...touch.fields, boardId: destination.board.id, previousListId: null,
+      ...touch.fields, boardId: destination.board.id, transferredAcrossBoards: true, previousListId: null,
       ...previousPlacementProvenance(card.previousListId, timestamp, 'removed'),
       ...(graph.fieldOrderChanged.has(card.id) && { fieldGroupOrderVersion: nextFieldOrder(fieldGroupOrder(card)) }),
     } });

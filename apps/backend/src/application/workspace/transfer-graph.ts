@@ -52,7 +52,7 @@ export async function planMoveCardGraph(records: WorkspaceRecords, source: Board
       planLinkedCardCompletion(records, generationId, { id: card.id, boardId: destination.id }, completed, timestamp),
     ]);
     fieldGroupsMaterialized += fields.materialized;
-    if (fields.materialized) fieldOrderChanged.add(card.id);
+    if (fields.newGroups) fieldOrderChanged.add(card.id);
     effects.push(...fields.effects, ...links.effects);
     for (const { boardId } of links.events) invalidated.add(boardId);
   }

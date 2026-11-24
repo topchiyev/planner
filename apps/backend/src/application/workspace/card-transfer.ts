@@ -80,13 +80,14 @@ export async function planCrossBoardCardMove(records: WorkspaceRecords, access: 
     effects.push(boardHistoryChange(destinationBoard, timestamp, history.last));
   }
   const graph = await planMoveCardGraph(records, sourceBoard, destinationBoard, [{ card, completed: closed }], context);
+  if (kind === 'board' && graph.summary.labelsCreated > 0) effects.push(boardHistoryChange(destinationBoard, timestamp));
   const sourceChange = listPlacementChange(source, timestamp);
   const destinationChange = listPlacementChange(destination, timestamp);
   const cardChange = touchRevision('cards', card, timestamp, revision);
   graph.invalidated.add(destinationBoard.id);
   return {
     effects: mergeTransferEffects([...effects, ...graph.effects, sourceChange, destinationChange,
-      { ...cardChange, fields: { ...cardChange.fields, ...fields, boardId: destinationBoard.id,
+      { ...cardChange, fields: { ...cardChange.fields, ...fields, boardId: destinationBoard.id, transferredAcrossBoards: true,
         ...(graph.fieldOrderChanged.has(card.id) && { fieldGroupOrderVersion: nextFieldOrder(fieldGroupOrder(card)) }) } },
       { kind: 'insert', collection: 'activities', id: randomUUID(), fields: {
         boardId: destinationBoard.id, cardId: card.id, actorId, commandId, kind: 'moveCard', toListId: destination.id, createdAt: timestamp,
@@ -129,7 +130,8 @@ export async function planDuplicateCard(records: WorkspaceRecords, access: CardT
       ...fields, creatorId: actorId, description: card.description ?? null, rank: rank.toString(), createdAt: timestamp, updatedAt: null,
       stopwatch: stopwatch ? { total, startedAt: null } : null,
       previousListId: null, coverAttachmentId: graph.coverAttachmentId, checklistOrderVersion: 1, fieldGroupOrderVersion: 1,
-    } }, ...graph.effects, ...placement, destination, { kind: 'insert', collection: 'activities', id: randomUUID(), fields: {
+    } }, ...graph.effects, ...placement, destination, ...(graph.summary.labelsCreated > 0 ? [boardHistoryChange(board.board, timestamp)] : []),
+    { kind: 'insert', collection: 'activities', id: randomUUID(), fields: {
       boardId: board.board.id, cardId: id, actorId, commandId, kind: 'duplicateCard', createdAt: timestamp,
     } }],
     result: { data: { card: duplicate, destination: position(list, destination), remaps: graph.summary } },

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useLocation, useRevalidator } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
+import { TransferBoardPicker, type TransferBoard } from '../transfers/transfer-board-picker.js';
 import type { BoardList } from '../lists/board-lists.js';
 import { WorkspaceDialog, useWorkspaceMutation } from '../projects/project-controls.js';
 import { readWorkspace, WorkspaceRequestError } from '../workspace/workspace-api.js';
@@ -24,18 +25,19 @@ export function useCardPlacementMutation() {
     'Check the destination before trying again.');
 }
 
-export function captureCardPlacement(workspace: PlacementWorkspace, card: PlacementCard): CardPlacement | null {
-  if (card.boardId !== workspace.board.id || !card.permissions.canMove) return null;
+export function captureCardPlacement(workspace: PlacementWorkspace, card: PlacementCard, mode: 'move' | 'duplicate' = 'move'): CardPlacement | null {
+  if (card.boardId !== workspace.board.id || !(mode === 'move' ? card.permissions.canMove : card.permissions.canDuplicateFrom)) return null;
   const source = workspace.lists.find(({ id }) => id === card.listId);
   if (!source) return null;
-  return { card, source, destinations: workspace.lists.filter(({ kind }) => kind === 'active' || kind === 'closed') };
+  return { card, source, destinations: workspace.board.permissions.canEdit ? workspace.lists.filter(({ kind }) => kind === 'active' || kind === 'closed') : [] };
 }
 
-export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardId: string | null):
+export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardId: string | null, destinationVersion?: number):
   Omit<RelationshipCommandInput<'cards.move'>, 'id' | 'expectedRevision'> | null {
   const destination = state.destinations.find(({ id }) => id === toListId);
-  if (!destination) return null;
-  return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion: destination.orderVersion };
+  const destinationOrderVersion = destinationVersion ?? destination?.orderVersion;
+  if (destinationOrderVersion === undefined) return null;
+  return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion };
 }
 
 function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
@@ -52,11 +54,13 @@ interface PlacementPage {
 }
 
 export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
-  state: CardPlacement; mode: 'move' | 'restore'; onClose: () => void; onPlace: (toListId: string, beforeCardId: string | null) => void;
+  state: CardPlacement; mode: 'move' | 'restore' | 'duplicate'; onClose: () => void;
+  onPlace: (toListId: string, beforeCardId: string | null, destinationVersion: number) => void;
 }) {
-  const initiallySameList = mode === 'move' && state.destinations.some(({ id }) => id === state.source.id);
+  const initiallySameList = mode !== 'restore' && state.destinations.some(({ id }) => id === state.source.id);
   const [to, setTo] = useState(initiallySameList ? state.source.id : '');
   const [before, setBefore] = useState('');
+  const [destinationBoard, setDestinationBoard] = useState<TransferBoard | null | undefined>(null);
   const [page, setPage] = useState<PlacementPage>();
   const [loadingMore, setLoadingMore] = useState(false);
   const [accessLost, setAccessLost] = useState(false);
@@ -65,7 +69,17 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   const { pathname, search } = useLocation();
   const signIn = workspaceSignInPath(pathname + search);
   const { card } = state;
-  const action = mode === 'move' ? 'Move card' : 'Restore card';
+  const action = mode === 'move' ? 'Move card' : mode === 'duplicate' ? 'Duplicate card' : 'Restore card';
+  const boardId = destinationBoard?.id ?? card.boardId;
+  const destinations = destinationBoard === undefined ? [] : destinationBoard
+    ? destinationBoard.lists.filter(({ kind }) => kind === 'active' || kind === 'closed') : state.destinations;
+  const destinationVersion = destinations.find(({ id }) => id === to)?.orderVersion;
+
+  function pickBoard(destination: TransferBoard | null | undefined) {
+    setDestinationBoard(destination);
+    setTo('');
+    setBefore('');
+  }
 
   const handleProtectedRead = useCallback((error: unknown) => {
     if (!(error instanceof WorkspaceRequestError)) return false;
@@ -88,15 +102,15 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
     if (!to) return;
     const controller = new AbortController();
     requests.current = controller;
-    void anchorPage(card.boardId, to, controller.signal).then(({ data, page }) => {
-      if (!controller.signal.aborted) setPage({ listId: to, cards: data.filter(({ id }) => id !== card.id), nextCursor: page.nextCursor });
+    void anchorPage(boardId, to, controller.signal).then(({ data, page }) => {
+      if (!controller.signal.aborted) setPage({ listId: to, cards: data.filter(({ id }) => mode === 'duplicate' || id !== card.id), nextCursor: page.nextCursor });
     }).catch((error: unknown) => {
       if (!controller.signal.aborted && !handleProtectedRead(error)) {
         setPage({ listId: to, cards: [], nextCursor: null, problem: 'Positions couldn’t load. You can still place the card at the end.' });
       }
     });
     return () => controller.abort();
-  }, [to, card.boardId, card.id, handleProtectedRead]);
+  }, [to, boardId, card.id, mode, handleProtectedRead]);
 
   async function loadMore() {
     const current = page?.listId === to ? page : undefined;
@@ -104,10 +118,10 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
     if (!current?.nextCursor || !controller || controller.signal.aborted || loadingMore) return;
     setLoadingMore(true);
     try {
-      const next = await anchorPage(card.boardId, to, controller.signal, current.nextCursor);
+      const next = await anchorPage(boardId, to, controller.signal, current.nextCursor);
       if (controller.signal.aborted) return;
       const cards = new Map(current.cards.map((candidate) => [candidate.id, candidate]));
-      for (const candidate of next.data) if (candidate.id !== card.id) cards.set(candidate.id, candidate);
+      for (const candidate of next.data) if (mode === 'duplicate' || candidate.id !== card.id) cards.set(candidate.id, candidate);
       setPage({ listId: to, cards: [...cards.values()], nextCursor: next.page.nextCursor });
     } catch (error) {
       if (!controller.signal.aborted && !handleProtectedRead(error)) setPage({ ...current, problem: 'More positions couldn’t load.' });
@@ -118,16 +132,17 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (to) onPlace(to, before || null);
+    if (to && destinationVersion !== undefined) onPlace(to, before || null, destinationVersion);
   }
 
   return <WorkspaceDialog title={action} onClose={onClose}>
     <form className="project-form" method="post" onSubmit={submit}>
       {mode === 'restore' && <p>Choose an active or closed list before restoring.</p>}
-      <label>Destination list<select value={to} required ref={(element) => { if (element) element.autofocus = true; }}
+      {mode !== 'restore' && <TransferBoardPicker sourceBoardId={card.boardId} onPick={pickBoard} onUnavailable={() => setAccessLost(true)} />}
+      <label>Destination list<select value={to} required disabled={!destinations.length} ref={(element) => { if (element) element.autofocus = true; }}
         onChange={(event) => { setTo(event.target.value); setBefore(''); }}>
         <option value="" disabled>Choose a list</option>
-        {state.destinations.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}
+        {destinations.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}
       </select></label>
       {to && <label>Position<select value={before} onChange={(event) => setBefore(event.target.value)}>
         <option value="">At the end</option>
@@ -136,7 +151,7 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
       {to && page?.listId === to && page.nextCursor && <button className="workspace-button" type="button" disabled={loadingMore}
         onClick={() => void loadMore()}>{loadingMore ? 'Loading positions…' : 'Load more positions'}</button>}
       {to && page?.listId === to && page.problem && <p role="status">{page.problem}</p>}
-      <button className="workspace-button workspace-button-primary" type="submit" disabled={!to}>{action}</button>
+      <button className="workspace-button workspace-button-primary" type="submit" disabled={!to || destinationVersion === undefined}>{action}</button>
     </form>
   </WorkspaceDialog>;
 }

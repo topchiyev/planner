@@ -31,7 +31,7 @@ const sizeFields = new Set(['byteLength', 'batch']);
 const dates = new Set<string>(storedInstantFields);
 const nullablePublicReference = publicIdSchema.nullable();
 const publicReferences = new Set([
-  'actorId', 'assigneeId', 'boardId', 'cardId', 'checklistId', 'commandId', 'fieldDefinitionId', 'fieldGroupId',
+  'actorId', 'assigneeId', 'boardId', 'cardId', 'checklistId', 'commandId', 'definitionOrderTieId', 'fieldDefinitionId', 'fieldGroupId',
   'labelId', 'linkedCardId', 'listId', 'projectId', 'recipientId', 'resourceId', 'runId', 'scopeId', 'userId',
 ]);
 const writeConcern = { w: 1, j: true };
@@ -128,7 +128,9 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
         promoteLongs: false,
         ...(name === 'users' && { projection: { localAuth: 0, accountChange: 0 } }),
         ...(name === 'tasks' && { projection: { linkedUnavailableProvenance: 0 } }),
-        ...(name === 'cards' && { projection: { previousListProvenance: 0 } }),
+        ...(name === 'cards' && { projection: { previousListProvenance: 0, transferredAcrossBoards: 0 } }),
+        ...(name === 'lists' && { projection: { transferredAcrossBoards: 0 } }),
+        ...(name === 'fieldDefinitions' && { projection: { definitionOrderTieId: 0 } }),
       });
       if (!stored) return null;
       const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;
