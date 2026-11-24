@@ -107,15 +107,47 @@ check_account() {
         fail identity "Another user shares the service UID for $account."
 }
 
+require_payload_owner() {
+    printf '%s\n' "$payload" | grep -Fxq -- "$1" ||
+        fail ownership "The path $1 is occupied outside the Planner package."
+}
+
+check_units() {
+    for unit in planner.service planner-mongodb.service; do
+        vendor=/usr/lib/systemd/system/$unit
+        for base in /etc/systemd/system /etc/systemd/system.control /run/systemd/system \
+            /run/systemd/system.control /run/systemd/transient /run/systemd/generator \
+            /run/systemd/generator.early /run/systemd/generator.late /usr/local/lib/systemd/system /usr/lib/systemd/system; do
+            if [ "$base/$unit" != "$vendor" ] && exists "$base/$unit"; then
+                fail ownership "A local definition already occupies $unit."
+            fi
+            if exists "$base/$unit.d"; then fail ownership "A local drop-in directory already occupies $unit."; fi
+            if [ "$unit" = planner-mongodb.service ] && exists "$base/planner-.service.d"; then
+                fail ownership "A local drop-in directory already occupies $unit."
+            fi
+        done
+        if exists "$vendor"; then
+            require_payload_owner "$vendor"
+            owned_file "$vendor" 0:0:644
+        fi
+        if [ -d /run/systemd/system ] && [ -S /run/systemd/private ]; then
+            effective=$(systemctl show --property=FragmentPath,DropInPaths "$unit") ||
+                fail ownership "Unable to determine the systemd definition for $unit."
+            fragment=$(printf '%s\n' "$effective" | sed -n 's/^FragmentPath=//p')
+            if [ -n "$fragment" ] && [ "$(readlink -m -- "$fragment")" != "$vendor" ]; then
+                fail ownership "The effective systemd definition for $unit is outside the Planner package."
+            fi
+            if printf '%s\n' "$effective" | grep -Eq '^DropInPaths=.*\/(planner(-mongodb)?|planner-)\.service\.d/'; then
+                fail ownership "The effective systemd definition for $unit uses a local drop-in."
+            fi
+        fi
+    done
+}
+
 check_payload() {
-    payload_owned=no
-    if [ -n "$identity" ] || [ "$mode" = provision ] || [ "$mode" = upgrade ]; then
-        payload_owned=yes
-    elif [ "$(dpkg-query -S /usr/bin/plannerctl 2>/dev/null || :)" = 'planner-workspace: /usr/bin/plannerctl' ]; then
-        payload_owned=yes
-    fi
+    payload=$(dpkg-query -L planner-workspace 2>/dev/null || :)
     if exists "$release"; then
-        [ "$payload_owned" = yes ] || fail ownership 'The Planner release path is already in use.'
+        require_payload_owner "$release"
         owned_directory "$release" 0:0:755
         owned_directory "$release/releases" 0:0:755
         for path in "$release/releases/"*; do
@@ -128,6 +160,12 @@ check_payload() {
             printf '%s\n' "$target" | grep -Exq 'releases/[0-9]+\.[0-9]+\.[0-9]+' && [ -d "$release/$target" ] ||
                 fail ownership 'The Planner current release link has an unexpected target.'
         fi
+        unowned=$({ printf '%s\n\n' "$payload"; find "$release" -xdev -print; } | awk '
+            /^$/ {scan=1; next}
+            !scan {owned[$0]=1; next}
+            !($0 in owned) {print}
+        ')
+        [ -z "$unowned" ] || fail ownership 'The Planner release tree contains a path outside the package inventory.'
         unsafe=$(find "$release" -xdev \( ! -uid 0 -o ! -gid 0 -o \( ! -type l -perm /022 \) \) -print -quit)
         [ -z "$unsafe" ] || fail ownership 'The Planner release tree contains a file with unsafe ownership or mode.'
         find "$release" -xdev -type l -exec sh -c '
@@ -138,23 +176,14 @@ check_payload() {
         ' sh {} + || fail ownership 'A Planner release link points outside the release tree.'
     fi
     if exists /usr/bin/plannerctl; then
-        [ "$payload_owned" = yes ] && [ -L /usr/bin/plannerctl ] &&
-            [ "$(stat -c '%u:%g' -- /usr/bin/plannerctl)" = 0:0 ] &&
+        require_payload_owner /usr/bin/plannerctl
+        [ -L /usr/bin/plannerctl ] && [ "$(stat -c '%u:%g' -- /usr/bin/plannerctl)" = 0:0 ] &&
             [ "$(readlink -- /usr/bin/plannerctl)" = ../../opt/planner/current/bin/plannerctl ] ||
             fail ownership 'The plannerctl entry point is already in use.'
     fi
-    for unit in planner.service planner-mongodb.service; do
-        for base in /etc/systemd/system /run/systemd/system; do
-            if exists "$base/$unit"; then fail ownership "A local definition already occupies $unit."; fi
-        done
-        path=/usr/lib/systemd/system/$unit
-        if exists "$path"; then
-            [ "$payload_owned" = yes ] || fail ownership "A unit already occupies $unit."
-            owned_file "$path" 0:0:644
-        fi
-    done
+    check_units
     if exists /usr/lib/tmpfiles.d/planner-workspace.conf; then
-        [ "$payload_owned" = yes ] || fail ownership 'A local runtime directory definition already occupies Planner’s path.'
+        require_payload_owner /usr/lib/tmpfiles.d/planner-workspace.conf
         owned_file /usr/lib/tmpfiles.d/planner-workspace.conf 0:0:644
     fi
 }

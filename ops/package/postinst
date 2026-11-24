@@ -2,5 +2,8 @@
 set -eu
 
 if [ "${1:-}" = configure ]; then
-    exec /opt/planner/current/lib/native-preflight provision
+    /opt/planner/current/lib/native-preflight provision
+    if [ -d /run/systemd/system ] && [ -S /run/systemd/private ]; then
+        /usr/bin/systemctl daemon-reload
+    fi
 fi

@@ -17,7 +17,7 @@ ARCH = "amd64"
 MANIFEST = "manifest.json"
 SIGNATURE = "manifest.json.sig"
 PRE_DEPENDENCIES = "iproute2, mawk | gawk"
-DEPENDENCIES = "passwd, libc6 (>= 2.38), libgcc-s1, libstdc++6, libcurl4t64, libssl3t64"
+DEPENDENCIES = "systemd, passwd, libc6 (>= 2.38), libgcc-s1, libstdc++6, libcurl4t64, libssl3t64"
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 NOTICE = re.compile(r"(?:licen[cs]es?|notice[s]?|copying|copyright|third[-_ ]party(?:[-_ ]notices?)?)(?:[._ -].*)?", re.I)

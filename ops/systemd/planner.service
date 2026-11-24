@@ -1,8 +1,8 @@
 [Unit]
 Description=Planner workspace
 After=planner-mongodb.service
-Requires=planner-mongodb.service
 ConditionPathExists=/etc/planner/planner.json
+ConditionPathExists=/etc/planner/mongod.conf
 
 [Service]
 User=planner

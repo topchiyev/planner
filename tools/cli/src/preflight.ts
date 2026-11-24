@@ -84,7 +84,11 @@ export function runPreflight(args: string[], version: string) {
   if (options.json) {
     console.log(JSON.stringify(report));
   } else if (ok) {
-    console.log(`Planner ${version} native preflight passed. Application port ${options.appPort} and database port ${options.dbPort} are available. Runtime configuration is ${runtime}.`);
+    console.log(`Planner ${version} native preflight passed on Ubuntu 24.04 amd64.`);
+    console.log(`Application port ${options.appPort} and database port ${options.dbPort} are available.`);
+    console.log(`Release filesystem has ${report.storage.releaseAvailableKiB} KiB available. State filesystem has ${report.storage.stateAvailableKiB} KiB available.`);
+    console.log(`Ownership is ${report.ownership}. Installation is ${report.installation}.`);
+    console.log(`Runtime configuration is ${runtime}. Readiness is ${report.runtime.readiness}.`);
   } else {
     console.error(message);
   }

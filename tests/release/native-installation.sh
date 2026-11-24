@@ -9,9 +9,10 @@ findmnt -no OPTIONS --target "$media" | grep -Eq '(^|,)ro(,|$)'
 for path in /opt/planner /etc/planner /var/lib/planner /run/planner; do [ ! -e "$path" ]; done
 [ -z "$(getent passwd planner planner-mongodb || :)" ]
 
-openssl pkeyutl -verify -rawin -pubin -inkey "$media/test-key.pub.pem" \
-    -in "$media/manifest.json" -sigfile "$media/manifest.json.sig"
-package=$(python3 - "$media" <<'PY'
+verify_package() {
+    openssl pkeyutl -verify -rawin -pubin -inkey "$1/test-key.pub.pem" \
+        -in "$1/manifest.json" -sigfile "$1/manifest.json.sig" >&2
+    python3 - "$1" <<'PY'
 import hashlib
 import json
 from pathlib import Path
@@ -25,7 +26,9 @@ with package.open('rb') as stream:
 assert package.stat().st_size == item['size']
 print(package)
 PY
-)
+}
+package=$(verify_package "$media")
+previous=$(verify_package "$media/previous")
 
 work=$(mktemp -d /var/tmp/planner-native-test.XXXXXX)
 chmod 0755 "$work"
@@ -93,6 +96,36 @@ groupadd --system planner
 reject_install identity 'System identity planner is already in use.'
 groupdel planner
 
+for conflict in /etc/systemd/system/planner.service.d /run/systemd/system/planner-mongodb.service.d; do
+    mkdir "$conflict"
+    printf '[Service]\nEnvironment=PLANNER_TEST_FOREIGN=1\n' > "$conflict/test.conf"
+    reject_install drop-in 'A local drop-in directory already occupies'
+    unlink "$conflict/test.conf"
+    rmdir "$conflict"
+done
+
+dpkg -i "$previous"
+old_launcher=$(sha256sum /usr/bin/plannerctl)
+for conflict in /usr/lib/systemd/system/planner.service /usr/lib/tmpfiles.d/planner-workspace.conf; do
+    printf '# owned by the guest fixture, outside the Planner package\n' > "$conflict"
+    chmod 0644 "$conflict"
+    foreign=$(sha256sum "$conflict")
+    if dpkg -i "$package" > "$work/refused" 2>&1; then
+        echo "Upgrade unexpectedly replaced $conflict" >&2
+        exit 1
+    fi
+    grep -F "The path $conflict is occupied outside the Planner package." "$work/refused"
+    [ "$(sha256sum "$conflict")" = "$foreign" ]
+    [ "$(sha256sum /usr/bin/plannerctl)" = "$old_launcher" ]
+    [ ! -e /opt/planner/current/lib/native-preflight ]
+    [ ! -e /etc/planner ]
+    [ ! -e /var/lib/planner ]
+    [ -z "$(getent passwd planner planner-mongodb || :)" ]
+    unlink "$conflict"
+done
+dpkg -r planner-workspace
+[ ! -e /opt/planner ]
+
 systemd-run --unit=planner-test-port --uid=nobody /usr/bin/python3 -m http.server 27431 --bind 127.0.0.1
 for attempt in {1..50}; do
     if ss -H -ltn | grep -q ':27431 '; then break; fi
@@ -104,16 +137,25 @@ reject_install collision 'Planner database port 27431 is occupied.'
 
 install_planner() { PLANNER_INSTALL_APP_PORT=27530 PLANNER_INSTALL_DB_PORT=27531 dpkg -i "$package"; }
 install_planner
-systemctl daemon-reload
 systemd-analyze verify planner.service planner-mongodb.service
 for unit in planner.service planner-mongodb.service; do
     [ "$(systemctl is-enabled "$unit" || true)" = disabled ]
+    [ "$(systemctl show -p FragmentPath --value "$unit")" = "/usr/lib/systemd/system/$unit" ]
     [ "$(systemctl show -p MainPID --value "$unit")" = 0 ]
 done
 systemctl start planner.service planner-mongodb.service
 for unit in planner.service planner-mongodb.service; do
     [ "$(systemctl show -p MainPID --value "$unit")" = 0 ]
     [ "$(systemctl show -p ConditionResult --value "$unit")" = no ]
+done
+
+for config_file in planner.json mongod.conf; do
+    case "$config_file" in planner.json) group=planner ;; mongod.conf) group=planner-mongodb ;; esac
+    install -o root -g "$group" -m 0640 /dev/null "/etc/planner/$config_file"
+    systemctl start planner.service
+    [ "$(systemctl show -p ConditionResult --value planner.service)" = no ]
+    [ "$(systemctl show -p MainPID --value planner.service planner-mongodb.service | sort -u)" = 0 ]
+    unlink "/etc/planner/$config_file"
 done
 
 for account in planner planner-mongodb; do
@@ -146,6 +188,13 @@ assert passed['runtime'] == {'configuration': 'unconfigured', 'readiness': 'unav
 assert passed['ports']['application']['port'] == 27530 and passed['ports']['database']['port'] == 27531
 print('Read-only CLI preflight classified the default collision and passed on alternate ports.')
 PY
+
+runuser -u nobody -- /usr/bin/plannerctl preflight --public-url https://planner.example.test \
+    --app-port 27530 --db-port 27531 > "$work/human.txt"
+grep -F 'passed on Ubuntu 24.04 amd64' "$work/human.txt"
+grep -F 'KiB available' "$work/human.txt"
+grep -F 'Ownership is valid' "$work/human.txt"
+grep -F 'Readiness is unavailable' "$work/human.txt"
 
 receipt=$(sha256sum /etc/planner/.native-installation /var/lib/planner/.native-installation)
 users=$(getent passwd planner planner-mongodb)
