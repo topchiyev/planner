@@ -58,8 +58,12 @@ export function BoardPage() {
     const selected = clipboard?.selected;
     if (!selected) return;
     if (board && board.recipeScope !== selected.scope) { clipboard.discard(selected); return; }
-    if (clipboard.attempt || selected.boardId !== boardId) return;
-    if (initial === null || live.phase === 'missing' || (cardId === selected.cardId && live.card === null)) clipboard.discard(selected);
+    if (selected.boardId !== boardId) return;
+    if (initial === null || live.phase === 'missing') { clipboard.discard(selected); return; }
+    if (clipboard.attempt || live.phase !== 'visible') return;
+    const source = live.card?.id === selected.cardId ? live.card : board?.cardsPage?.data.find(({ id }) => id === selected.cardId);
+    const permitted = source && (selected.action === 'cut' ? source.permissions.canMove : source.permissions.canDuplicateFrom);
+    if ((cardId === selected.cardId && live.card === null) || (source && !permitted)) clipboard.discard(selected);
   }, [clipboard, board, boardId, initial, live.phase, cardId, live.card]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
