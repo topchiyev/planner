@@ -7,12 +7,14 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
+import pg from 'pg';
 import { inspectDirectory, inspectObjects, parseObjectService, reconcileAssets } from '../../apps/backend/dist/application/migration/assets.js';
 import { readAssetManifest, readCaptureManifest, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
 import { inspectMigration } from '../../apps/backend/dist/application/migration/preflight.js';
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { prepareMigration } from '../../apps/backend/dist/application/migration/prepare.js';
 import { assertMigrationCapacity } from '../../apps/backend/dist/native/migration-state.js';
+import { parseSourceService } from '../../apps/backend/dist/application/migration/source-service.js';
 import { startFixturePostgres } from '../fixtures/planka/private-postgres.mjs';
 import { assembleSnapshot } from '../fixtures/planka/snapshot.mjs';
 
@@ -132,6 +134,11 @@ test('both synthetic restored tags match the native-source preflight through a t
       "SELECT pg_catalog.has_column_privilege('public.session', 'access_token', 'SELECT')"), 'f');
     const config = ['[fixture]', 'host=' + postgres.socketRoot, 'port=' + postgres.port, 'dbname=' + database,
       'user=fixture_reader', 'isolated=true'].join('\n');
+    const uncachedIdentity = new pg.Client(parseSourceService(config, 'fixture'));
+    assert.equal(typeof uncachedIdentity.connectionParameters.password, 'function');
+    assert.equal(await uncachedIdentity.connectionParameters.password(), '');
+    const configuredIdentity = new pg.Client(parseSourceService(config + '\npassword=synthetic-fixture-only', 'fixture'));
+    assert.equal(await configuredIdentity.connectionParameters.password(), 'synthetic-fixture-only');
     const bundle = await fixtureBundle(release);
     await writeFile(input, tar(...bundle.entries), { mode: 0o600 });
     const prepared = await prepareMigration(input, work, owner);

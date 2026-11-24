@@ -43,7 +43,8 @@ export function parseSourceService(config: string, name: string) {
   if (!isAbsolute(host) || normalize(host) !== host || host === '/' || !sqlName.test(database) || !sqlName.test(user)
     || !/^[1-9][0-9]{0,4}$/u.test(portText) || port > 65_535 || Buffer.byteLength(join(host, versionSocket + port)) > 103
     || database === 'postgres' || database === 'template0' || database === 'template1') throw invalid();
-  const password = service.get('password') ?? '';
+  // An explicit supplier prevents pg's authentication challenge from consulting an ambient passfile.
+  const password = () => service.get('password') ?? '';
   return { host, port, user, database, password, ssl: false, application_name: 'planner-migration-preflight',
     client_encoding: 'UTF8', connectionTimeoutMillis: 8_000, query_timeout: 35_000 } satisfies ClientConfig;
 }
