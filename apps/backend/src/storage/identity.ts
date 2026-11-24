@@ -12,9 +12,12 @@ export const storedInstantFields = [
 ] as const;
 
 export function legacyPublicId(sourceInstanceId: string, entity: string, sourceId: string) {
-  const namespace = Buffer.from(sourceUuidSchema.parse(sourceInstanceId).replaceAll('-', ''), 'hex');
   const identity = parseSourceIdentity(entity, sourceId);
-  const name = `${identity.entity}:${identity.sourceId}`;
+  return nameBasedUuid(sourceInstanceId, `${identity.entity}:${identity.sourceId}`);
+}
+
+export function nameBasedUuid(namespaceId: string, name: string) {
+  const namespace = Buffer.from(sourceUuidSchema.parse(namespaceId).replaceAll('-', ''), 'hex');
   const bytes = createHash('sha1').update(namespace).update(name, 'utf8').digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
