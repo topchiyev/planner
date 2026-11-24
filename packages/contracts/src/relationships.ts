@@ -109,6 +109,8 @@ export const relationshipReads = {
   'projects.managerCandidates': read('projects.managerCandidates', '/api/v1/projects/:id/manager-candidates', candidatesInput,
     workspacePage(workspacePersonSchema)),
   'boards.members': read('boards.members', '/api/v1/boards/:id/members', rosterInput, workspacePage(member)),
+  'boards.filterMembers': read('boards.filterMembers', '/api/v1/boards/:id/filter-members', candidatesInput,
+    workspacePage(workspacePersonSchema)),
   'boards.mentionMembers': read('boards.mentionMembers', '/api/v1/boards/:id/mention-members', candidatesInput,
     workspacePage(workspacePersonSchema)),
   'boards.memberCandidates': read('boards.memberCandidates', '/api/v1/boards/:id/member-candidates', candidatesInput,

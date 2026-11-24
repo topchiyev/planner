@@ -22,7 +22,9 @@ const workspaceRoutes: RouteObject[] = [
   },
   {
     path: 'boards/:boardId',
-    ...(nativeBrowserAuth && { id: workspaceBoardId, loader: loadNativeBoard }),
+    ...(nativeBrowserAuth && { id: workspaceBoardId, loader: loadNativeBoard,
+      shouldRevalidate: ({ currentUrl, nextUrl, defaultShouldRevalidate }) =>
+        currentUrl.pathname !== nextUrl.pathname || defaultShouldRevalidate }),
     lazy: async () => ({ Component: (await import('../features/boards/board-page.js')).BoardPage }),
     children: [{
       path: 'cards/:cardId',

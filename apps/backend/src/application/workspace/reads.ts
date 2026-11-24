@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { safeMediaLink, type WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
-import type { Db, Document, Long } from 'mongodb';
+import type { Db, Long } from 'mongodb';
 import { decodeRank } from '../../storage/identity.js';
 import type { BoardEventCursors } from '../board-events/cursor.js';
 import { createBoardEventStore } from '../board-events/store.js';
@@ -10,6 +10,7 @@ import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/
 import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { attachmentFiles, cardAttachmentRows, coverForCard, cardCovers } from './card-media.js';
+import { selectBoardCards } from './board-card-page.js';
 import { cardDto, cardStopwatch } from './card-state.js';
 import { createChecklistReads } from './checklist-reads.js';
 import { commentPermissions } from './comment-commands.js';
@@ -21,8 +22,7 @@ import { eligibleBoardPeople } from './eligible-members.js';
 import { cardLabelJoinFilter, labelDto, scopedLabels } from './label-state.js';
 import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
 import { boardListOrderVersion, listDto } from './list-state.js';
-import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
-  rejectedPattern, textQuery, type PagePosition } from './queries.js';
+import { cardPlacementStages, datedOrder, rankedOrder, readPage, textQuery, type PagePosition } from './queries.js';
 import { availableProjectImage, effectiveProjectBackground } from './project-background.js';
 import { canonicalRow, createWorkspaceRecords, equal, publicIdField, rankSort, together, type WorkspaceRow } from './records.js';
 import { projectFavoriteFilter, projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
@@ -208,13 +208,14 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const board = await access.requireBoard(id);
       const [project, lists, labels, preferences, latestSequence, totals, follow, groups] = await together([
         projectSummary(board.project),
-        records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] } }, rankSort),
+        records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] },
+          $expr: { $and: [canonical, equal('boardId', id), { $in: ['$kind', ['active', 'closed', 'archive', 'trash']] }] } }, rankSort),
         scopedLabels(records, generationId, id),
         boardPreferencesRow(records, generationId, id),
         createBoardEventStore(database, generationId, id).highWater(),
         together((['board', 'archive', 'trash'] as const).map((kind) =>
           records.aggregate<{ _id: string; count: number }>('cards', { boardId: id, kind }, [
-            ...cardPlacementStages(records, id, kind), { $group: { _id: '$listId', count: { $sum: 1 } } },
+            ...cardPlacementStages(records, generationId, id, kind), { $group: { _id: '$listId', count: { $sum: 1 } } },
           ]))),
         board.permissions.canFollow ? personalFollow(records, generationId, 'board', id, actor.id) : null,
         fieldGroupRows(records, generationId, 'board', id),
@@ -225,7 +226,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         lists: lists.map((item) => ({ ...listDto(item), cardCount: counts.get(item.id) ?? 0 })),
         labels: labels.map(labelDto), fields: await fieldGroups(groups, board.project.project.id),
         fieldGroupOrderVersion: fieldGroupOrder(board.board), orderVersion: boardListOrderVersion(board.board),
-        latestEventSequence: latestSequence.toString(),
+        latestEventSequence: latestSequence.toString(), recipeScope: nameAnchor('board recipe/' + generationId + '/' + actor.id),
         eventCursor: eventCursors.encode({ actorId: actor.id, generationId, boardId: id }, latestSequence),
         preferences: boardPreferences(board.board, preferences),
         following: !!follow,
@@ -233,40 +234,16 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       } };
     },
 
-    async boardCards(input: WorkspaceReadInput<'boardCards'>) {
-      const board = await access.requireBoard(input.id);
-      const search = cardSearch(input.q);
-      const order = input.context === 'board' ? rankedOrder : historyOrder;
-      const scope = cursorScope('boards.cards', input.context === 'board' ? 'rank-id' : 'history-id', [
-        input.id, input.context, search.binding, JSON.stringify(input.labelsAny), JSON.stringify(input.labelsNone),
-        JSON.stringify(input.members), JSON.stringify(input.listIds), String(input.unassigned), String(input.limit),
-      ]);
-      const pagination = readPage(order, scope, input.limit, input.cursor);
-      const invalid = { data: [], page: { nextCursor: null }, searchValidation: 'invalid-pattern' as const };
-      if (!search.valid) return invalid;
-      const filter: Document = { boardId: input.id, kind: input.context };
-      if (input.listIds.length) filter.listId = { $in: input.listIds };
-      const filters = await cardFilters(records, access, board, input);
-      let rows: (WorkspaceRow<'cards'> & { placement: WorkspaceRow<'lists'>[] })[];
-      try {
-        rows = await records.aggregate('cards', filter,
-          [...cardPlacementStages(records, input.id, input.context), { $match: search.filter }, ...filters, ...pagination.stages],
-          search.bounded ? { maxTimeMS: 350 } : undefined);
-      } catch (error) {
-        if (search.bounded && rejectedPattern(error)) return invalid;
-        throw error;
-      }
-      const { selected, page } = pagination.result(rows, (row): PagePosition => {
-        if (input.context === 'board') return { rank: rank(row.rank), id: row.id };
-        return { listChangedAt: iso(row.listChangedAt), historySequence: rank(row.historySequence), id: row.id };
-      });
+    async boardCards(input: WorkspaceReadInput<'boardCards'>, resolved?: BoardAccessContext) {
+      const board = resolved ?? await access.requireBoard(input.id);
+      const { selected, page, counts, searchValidation } = await selectBoardCards(records, access, board, input);
       const ids = selected.map(({ id }) => id);
       const [front, fields, covers] = await together([
         checklistReads.front(ids, board.board.id), frontFields(board, ids), cardCovers(records, generationId, selected),
       ]);
       return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front.get(row.id) ?? [],
         frontFields: fields.get(row.id) ?? [], cover: covers.get(row.id) ?? null })),
-        page, searchValidation: 'ok' as const };
+        counts, page, searchValidation };
     },
 
     async cardGet({ id, boardId: expectedBoard }: WorkspaceReadInput<'cardGet'>) {

@@ -1,13 +1,13 @@
 import { workspaceCardContext, type WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema, signedInt64TextSchema, utcInstantSchema } from '@planner/contracts/storage';
-import { MongoServerError, type Document } from 'mongodb';
+import type { Document } from 'mongodb';
 import { encodeRank } from '../../storage/identity.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import type { BoardAccessContext, WorkspaceAuthorization } from './authorization.js';
 import { liveTaskMarker } from './checklist-state.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { cardLabelJoinFilter, scopedLabels } from './label-state.js';
-import { canonicalRow, equal, type WorkspaceRecords } from './records.js';
+import { canonicalRow, equal, publicIdField, type WorkspaceRecords } from './records.js';
 
 export const escapeSearch = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 function searchFields(pattern: string, fields: string[]) {
@@ -19,35 +19,20 @@ export function textQuery(value: string, fields: string[]) {
   return { binding: JSON.stringify(terms), filter: terms.length ? { $and: terms.map((term) => searchFields(escapeSearch(term), fields)) } : {} };
 }
 
-export function cardSearch(value: string) {
-  const fields = ['name', 'description'];
-  if (!value.startsWith('/')) return { ...textQuery(value, fields), bounded: false, valid: true };
-  const expression = value.slice(1, -1);
-  // Only accept constructs shared by RE2 and the server matcher. The server caps each match and query.
-  let valid = value.startsWith('/') && value.endsWith('/') && expression.length > 0 && expression.length <= 128
-    && !/\(\?(?!:)|\(\*|\\[1-9gkKQRCXZAGz]|\+\+|\*\+|\?\+|\}\+/u.test(expression);
-  if (valid) {
-    try { new RegExp(expression, 'iu'); } catch { valid = false; }
-  }
-  return { binding: value, filter: valid ? searchFields('(*LIMIT_MATCH=10000)(*LIMIT_DEPTH=100)' + expression, fields) : {},
-    bounded: true, valid };
-}
-
-export function rejectedPattern(error: unknown) {
-  return error instanceof MongoServerError && (error.code === 50 || error.code === 51111
-    || /regular expression|match limit|depth limit/iu.test(error.message));
-}
-
 type Context = WorkspaceReadInput<'boardCards'>['context'];
 export const contextKinds = {
   board: ['active', 'closed'], archive: ['archive'], trash: ['trash'],
 } as const satisfies Record<ReturnType<typeof workspaceCardContext.parse>, readonly string[]>;
 
-export function cardPlacementStages(records: WorkspaceRecords, boardId: string, context: Context): Document[] {
+export function cardPlacementStages(records: WorkspaceRecords, generationId: string, boardId: string, context: Context): Document[] {
+  const canonical = canonicalRow(generationId);
   return [
+    { $match: { $expr: { $and: [canonical, equal('boardId', boardId), equal('kind', context), publicIdField('listId')] } } },
     records.lookup('lists', 'placement', { listId: '$listId' }, {
-      boardId, kind: { $in: contextKinds[context] }, $expr: { $eq: ['$id', '$$listId'] },
-    }, [{ $limit: 1 }]),
+      boardId, kind: { $in: contextKinds[context] }, $expr: { $and: [
+        canonical, equal('boardId', boardId), { $in: ['$kind', contextKinds[context]] }, { $eq: ['$id', '$$listId'] },
+      ] },
+    }, [{ $project: { _id: 0, id: 1, kind: 1 } }, { $limit: 1 }]),
     { $match: { 'placement.0': { $exists: true } } },
   ];
 }

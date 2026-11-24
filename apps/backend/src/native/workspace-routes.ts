@@ -1,18 +1,22 @@
 import { workspaceOperations, type WorkspaceReadInput, type WorkspaceReadOperation, type WorkspaceReadOutput } from '@planner/contracts';
+import { publicIdSchema } from '@planner/contracts/storage';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from 'mongodb';
 import { readSessionCookie } from '../application/auth/credentials.js';
 import type { BoardEventCursors } from '../application/board-events/cursor.js';
-import type { CommandGate } from '../application/command-gate/gate.js';
+import { CleanCommandRejection, type CommandGate } from '../application/command-gate/gate.js';
 import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../application/workspace/authorization.js';
 import { createWorkspaceReads } from '../application/workspace/reads.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
 
+class InvalidWorkspaceQuery extends CleanCommandRejection {}
+
 export interface WorkspaceReader {
   read<K extends WorkspaceReadOperation>(token: string, operation: K, input: WorkspaceReadInput<K>): Promise<WorkspaceReadOutput<K>>;
+  boardCards(token: string, id: unknown, query: Record<string, unknown>): Promise<WorkspaceReadOutput<'boardCards'>>;
 }
 
 export function createWorkspaceReader(
@@ -27,19 +31,33 @@ export function createWorkspaceReader(
         return workspaceOperations[operation].output.parse(output) as WorkspaceReadOutput<K>;
       });
     },
+    boardCards(token, id, query) {
+      return gate.readSnapshot(async () => {
+        const scope = await resolveBrowserWorkspace(database, installationId, token, now());
+        const boardId = publicIdSchema.safeParse(id);
+        if (!boardId.success) throw new WorkspaceAccessError('missing');
+        const board = await scope.requireBoard(boardId.data);
+        if (Object.hasOwn(query, 'id')) throw new InvalidWorkspaceQuery();
+        const operation = workspaceOperations.boardCards;
+        const parsed = operation.input.safeParse({ ...query, id: boardId.data });
+        if (!parsed.success) throw new InvalidWorkspaceQuery();
+        return operation.output.parse(await createWorkspaceReads(database, scope, eventCursors).boardCards(parsed.data, board));
+      });
+    },
   };
 }
 
 export function createNativeWorkspaceReader(
   config: NativeInstallationConfig, gate: CommandGate, eventCursors: BoardEventCursors,
 ): WorkspaceReader {
+  async function connected<T>(operation: (reader: WorkspaceReader) => Promise<T>) {
+    const client = await connectConfiguredNativeMongo(config);
+    try { return await operation(createWorkspaceReader(client.db(databaseName), config.installationId, gate, eventCursors)); }
+    finally { await client.close(); }
+  }
   return {
-    async read(token, operation, input) {
-      const client = await connectConfiguredNativeMongo(config);
-      try {
-        return await createWorkspaceReader(client.db(databaseName), config.installationId, gate, eventCursors).read(token, operation, input);
-      } finally { await client.close(); }
-    },
+    read: (token, operation, input) => connected((reader) => reader.read(token, operation, input)),
+    boardCards: (token, id, query) => connected((reader) => reader.boardCards(token, id, query)),
   };
 }
 
@@ -61,13 +79,13 @@ export function registerWorkspaceRoutes(app: FastifyInstance, reader: WorkspaceR
           }
           const params = (request.params ?? {}) as Record<string, unknown>;
           const query = (request.query ?? {}) as Record<string, unknown>;
-          const parsed = input.safeParse({ ...params, ...query });
-          if (!parsed.success || Object.keys(params).some((field) => Object.hasOwn(query, field))) {
-            return fail(request, reply, 422, 'INVALID_REQUEST', 'Check the workspace query.');
-          }
           try {
+            if (key === 'boardCards') return await reader.boardCards(token, params.id, query);
+            const parsed = input.safeParse({ ...params, ...query });
+            if (!parsed.success || Object.keys(params).some((field) => Object.hasOwn(query, field))) throw new InvalidWorkspaceQuery();
             return await reader.read(token, key, parsed.data);
           } catch (error) {
+            if (error instanceof InvalidWorkspaceQuery) return fail(request, reply, 422, 'INVALID_REQUEST', 'Check the workspace query.');
             if (error instanceof WorkspaceAccessError) return fail(request, reply, error.statusCode, error.code, error.message);
             if (error instanceof InvalidPageCursor) return fail(request, reply, 422, 'INVALID_CURSOR', error.message);
             return fail(request, reply, 503, 'UNAVAILABLE', 'Planner is unavailable.');

@@ -1,0 +1,9 @@
+.board-filter-form { display: grid; gap: .625rem; margin-block: .75rem; }
+.board-filter-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem; }
+.board-filter-actions label { display: grid; gap: .25rem; flex: 1 1 14rem; min-inline-size: 0; }
+.board-filter-actions input[type="search"] { inline-size: 100%; }
+.board-filter-details summary { inline-size: fit-content; cursor: pointer; }
+.board-filter-sets { display: flex; flex-wrap: wrap; gap: .75rem; margin-block: .625rem; }
+.board-filter-group { border: 1px solid var(--border, #d6dbe2); border-radius: .5rem; min-inline-size: 0; }
+.board-filter-choice { display: flex; align-items: baseline; gap: .4rem; overflow-wrap: anywhere; }
+.board-filter-form p { margin: 0; }

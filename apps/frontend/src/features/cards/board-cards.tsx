@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router';
-import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
+import { useState, type FormEvent } from 'react';
+import { Link, useLocation, useNavigate, useRevalidator } from 'react-router';
+import type { RelationshipCommandInput, WorkspaceReadOutput } from '@planner/contracts';
 import { BoardCardPlacement, CardAppendTarget, DraggableBoardCard } from './card-placement-dnd.js';
 import { ClearTrash, ListMaintenanceButtons } from '../lists/list-maintenance.js';
 import { CardFrontCover } from '../media/card-cover.js';
@@ -10,7 +10,7 @@ import { DeleteList } from '../lists/delete-list.js';
 import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-lists.js';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog, useWorkspaceMutation } from '../projects/project-controls.js';
-import { readWorkspace, WorkspaceRequestError } from '../workspace/workspace-api.js';
+import { boardFilterLocation, hasBoardFilters } from '../workspace/board-filter-route.js';
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
 import './board-cards.css';
 
@@ -29,45 +29,31 @@ function cardPath(boardId: string, cardId: string) {
 
 export function BoardCards({ workspace, lists, context }: { workspace: Workspace; lists: BoardList[]; context: BoardCardContext }) {
   const { pathname, search } = useLocation();
-  const first = workspace.cardsPage;
-  const [more, setMore] = useState<{ first: CardPage; page: CardPage }>();
-  const [loading, setLoading] = useState(false);
-  const [problem, setProblem] = useState('');
-  const pending = useRef<AbortController | null>(null);
-  useEffect(() => () => pending.current?.abort(), []);
-  const current = more?.first === first ? more.page : first;
+  const current = workspace.cardsPage;
+  const revalidator = useRevalidator();
   const editable = context === 'board' && workspace.board.permissions.canEdit;
+  if (!current) return <p className="workspace-problem" role="alert">
+    Cards couldn’t load. <button className="workspace-button" type="button" disabled={revalidator.state !== 'idle'}
+      onClick={() => void revalidator.revalidate()}>Retry</button>
+  </p>;
+  const counts = new Map(current.counts.map(({ listId, count }) => [listId, count]));
   const renderContents = (list: BoardList) => <CardsInList workspace={workspace} list={list} editable={editable}
     cards={current.data.filter((card) => card.listId === list.id)} search={search} />;
-
-  async function loadMore() {
-    const cursor = current.page.nextCursor;
-    if (pending.current || !cursor) return;
-    const controller = new AbortController();
-    pending.current = controller;
-    setLoading(true);
-    setProblem('');
-    try {
-      const next = await readWorkspace('boardCards', workspace.board.id, new URLSearchParams({ context, cursor }), controller.signal);
-      if (controller.signal.aborted) return;
-      const cards = new Map(current.data.map((card) => [card.id, card]));
-      for (const card of next.data) cards.set(card.id, card);
-      setMore({ first, page: { ...next, data: [...cards.values()] } });
-    } catch (error) {
-      if (controller.signal.aborted) return;
-      if (error instanceof WorkspaceRequestError && error.status === 401) window.location.replace(workspaceSignInPath(pathname + search));
-      else setProblem('More cards couldn’t load.');
-    } finally { pending.current = null; if (!controller.signal.aborted) setLoading(false); }
-  }
-
   const trash = context === 'trash' ? lists.find(({ kind }) => kind === 'trash') : undefined;
+  const validation = current.searchValidation;
+  const pageTo = (cursor: string | null) => ({ pathname, search: boardFilterLocation(search, workspace.recipe, cursor) });
   return <>
+    {validation === 'invalid-pattern' ? <p role="status">Enter a valid slash-delimited search pattern.</p>
+      : validation === 'search-limit' ? <p role="status">Search reached its scan limit. Narrow the filters and try again.</p>
+        : !current.data.length && <p role="status">{hasBoardFilters(workspace.recipe) ? 'No matching cards' : 'No cards to show'}</p>}
     {trash && <ClearTrash workspace={workspace} trash={trash} />}
-    {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} renderContents={renderContents}
+    {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} counts={counts} renderContents={renderContents}
       wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={current.data}>{children}</BoardCardPlacement>} /> :
-      <ReadonlyBoardLists lists={lists} renderContents={renderContents} />}
-    {problem && <p className="workspace-problem" role="alert">{problem}</p>}
-    {current.page.nextCursor && <button className="workspace-button" type="button" disabled={loading} onClick={() => void loadMore()}>Load more cards</button>}
+      <ReadonlyBoardLists lists={lists} counts={counts} renderContents={renderContents} />}
+    {(workspace.recipeCursor || current.page.nextCursor) && <nav aria-label="Card pages" className="workspace-pagination">
+      {workspace.recipeCursor && <Link to={pageTo(null)}>First page</Link>}
+      {current.page.nextCursor && <Link to={pageTo(current.page.nextCursor)}>Next page</Link>}
+    </nav>}
   </>;
 }
 
