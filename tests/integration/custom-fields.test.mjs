@@ -166,6 +166,21 @@ test('project templates, local ordering, promotion and confirmed deletion preser
     assert.equal(moved.orderVersion, 4);
     assert.deepEqual((await data(f.call(card(), editor))).fields.find(({ id }) => id === local).definitions.map(({ id }) => id),
       [sibling.definition.id, entry.definition.id]);
+    const removeId = await f.insert('fieldValues', fixtureId(593), {
+      cardId: ids.activeCard, fieldGroupId: local, fieldDefinitionId: entry.definition.id, value: 'Delete this exact value',
+    });
+    const retainedId = await f.insert('fieldValues', fixtureId(594), {
+      cardId: ids.activeCard, fieldGroupId: local, fieldDefinitionId: sibling.definition.id, value: '  Retain sibling  ',
+    });
+    const deleteKey = randomUUID();
+    await expectResponse(change(f, editor, 'DELETE', field(entry.definition.id), entry.definition.revision, { groupId: first }), 404);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const removed = await expectResponse(change(f, editor, 'DELETE', field(entry.definition.id), entry.definition.revision,
+        { groupId: local }, deleteKey), 204);
+      assert.equal(removed.headers[relationshipParentRevisionHeader], '5');
+    }
+    assert.equal(await row(f, 'fieldValues', removeId), null);
+    assert.equal((await row(f, 'fieldValues', retainedId)).value, '  Retain sibling  ');
     await expectResponse(change(f, editor, 'POST', group(second) + '/promote', 1, { projectRevision: 2 }), 403);
     const promoted = (await data(change(f, manager, 'POST', group(second) + '/promote', 1, { projectRevision: 2 }), 201)).group;
     assert.equal(promoted.name, 'Release template');

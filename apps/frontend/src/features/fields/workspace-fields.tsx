@@ -68,7 +68,7 @@ function CardValueEditor({ card, group, field, value }: CardValueProps) {
     event.preventDefault();
     if (valid && !stale) apply(false);
   }}>
-    <label>{field.name} value<textarea rows={2} value={current} onChange={(event) =>
+    <label>{field.name} value<textarea rows={2} value={current} disabled={action.busy} onChange={(event) =>
       setDraft({ value: event.target.value, version: draft?.version ?? version })} /></label>
     {!valid && <p role="status">Field values must have at most 512 Unicode characters.</p>}
     {action.problem && !stale && <p className="workspace-problem" role="alert">{action.problem}</p>}
@@ -76,10 +76,10 @@ function CardValueEditor({ card, group, field, value }: CardValueProps) {
       <p>The card or field changed while you were editing.</p>
       <p className="field-value">Current value: {value === undefined ? 'No value' : value === '' ? 'Empty value' : value}</p>
       <div className="project-actions">
-        <button type="button" className="workspace-button" onClick={() => { action.clearProblem(); setDraft({ value: current, version }); }}>
+        <button type="button" className="workspace-button" disabled={action.busy} onClick={() => { action.clearProblem(); setDraft({ value: current, version }); }}>
           Keep draft
         </button>
-        <button type="button" className="workspace-button" onClick={() => { action.clearProblem(); setDraft(undefined); }}>
+        <button type="button" className="workspace-button" disabled={action.busy} onClick={() => { action.clearProblem(); setDraft(undefined); }}>
           Use current value
         </button>
       </div>
