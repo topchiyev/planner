@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { RelationshipCommandInput } from '@planner/contracts';
 import { decodeRank, encodeRank, workspaceKey } from '../../storage/identity.js';
-import type { CommandPlan, CommandPlanningContext, PlannedEffect } from '../command-journal/operation.js';
+import type { CommandPlan, CommandPlanningContext, JournalFields, PlannedEffect } from '../command-journal/operation.js';
 import type { WorkspaceAuthorization } from './authorization.js';
 import {
   affectedFieldBoards, authorizeFieldOwner, authorizeGroupEdit, changeFieldOwner, fieldAudit, fieldEvents,
@@ -108,18 +108,62 @@ export async function planFieldPromotion(records: WorkspaceRecords, { source, de
   };
 }
 
-/** For an already-authorized transfer, scope the source to one card's current board placement. Caller owns card changes and invalidations. */
-export async function planTransferredCardFieldGroup(records: WorkspaceRecords, source: FieldGroup,
-  { id: cardId, boardId, projectId, rank }: { id: string; boardId: string; projectId: string; rank: string }, timestamp: string) {
-  if (source.scopeType !== 'board' || source.scopeId !== boardId
-    || !(await ownedFieldCards(records, source, boardId, [cardId])).length) throw new RelationshipError('fieldTemplate');
+type TransferFieldTarget = { id: string; boardId: string; projectId: string; rank: string;
+  destinationCardId?: string; destinationProjectId?: string };
+
+async function transferFieldCopy(records: WorkspaceRecords, source: FieldGroup,
+  { id: cardId, projectId, rank, destinationCardId = cardId, destinationProjectId }: TransferFieldTarget,
+  timestamp: string) {
   const effective = await effectiveGroup(records, source, projectId);
+  const template = destinationProjectId === projectId ? effective.template : null;
   const id = randomUUID();
-  const copy = copyDefinitions(source, id, effective.definitions, timestamp, false);
-  const values = await remapValues(records, source, id, copy.remap, timestamp, boardId, cardId);
+  const local = template ? effective.definitions.filter(({ fieldGroupId }) => fieldGroupId === source.id) : effective.definitions;
+  const copy = copyDefinitions(source, id, local, timestamp, false);
+  if (template) for (const definition of effective.definitions) {
+    if (definition.fieldGroupId === template.id) copy.remap.set(definition.id, definition.id);
+  }
+  const rows = await fieldValueRows(records, source.generationId, [source.id], [cardId]);
+  const values = rows.flatMap((value): PlannedEffect[] => {
+    const fieldDefinitionId = copy.remap.get(value.fieldDefinitionId);
+    if (!fieldDefinitionId || typeof value.value !== 'string') return [];
+    return destinationCardId === cardId
+      ? [{ kind: 'update', collection: 'fieldValues', id: value.id, revision: rowRevision(value),
+        fields: { fieldGroupId: id, fieldDefinitionId, updatedAt: timestamp } }]
+      : [{ kind: 'insert', collection: 'fieldValues', id: randomUUID(), fields: {
+        cardId: destinationCardId, fieldGroupId: id, fieldDefinitionId, value: value.value, createdAt: timestamp, updatedAt: null,
+      } }];
+  });
   const effect: PlannedEffect = { kind: 'insert', collection: 'fieldGroups', id, fields: {
-    name: effective.name, scopeType: 'card', scopeId: cardId, templateGroupId: null, rank, fieldOrderVersion: 1,
-    createdAt: timestamp, updatedAt: null,
+    name: template ? source.name ?? null : effective.name, scopeType: 'card', scopeId: destinationCardId,
+    templateGroupId: template?.id ?? null, rank, fieldOrderVersion: 1, createdAt: timestamp, updatedAt: null,
   } };
-  return { groupId: id, effects: [effect, ...copy.effects, ...values.effects] };
+  return { groupId: id, effects: [effect, ...copy.effects, ...values] };
+}
+
+/** For an already-authorized transfer, scope a board instance to the one card being transferred. */
+export async function planTransferredCardFieldGroup(records: WorkspaceRecords, source: FieldGroup, target: TransferFieldTarget, timestamp: string) {
+  const board = await records.get('boards', target.boardId);
+  if (source.scopeType !== 'board' || source.scopeId !== target.boardId || board?.projectId !== target.projectId
+    || !(await ownedFieldCards(records, source, target.boardId, [target.id])).length) throw new RelationshipError('fieldTemplate');
+  return transferFieldCopy(records, source, target, timestamp);
+}
+
+/** Move a card-owned instance in place, or give its duplicate independent local definitions and values. */
+export async function planTransferOwnedFieldGroup(records: WorkspaceRecords, source: FieldGroup, target: TransferFieldTarget, timestamp: string) {
+  if (source.scopeType !== 'card' || source.scopeId !== target.id) throw new RelationshipError('fieldTemplate');
+  if (target.destinationCardId && target.destinationCardId !== target.id) return (await transferFieldCopy(records, source, target, timestamp)).effects;
+  const template = await resolveFieldTemplate(records, source, target.projectId);
+  const keepTemplate = template && target.destinationProjectId === target.projectId;
+  if (keepTemplate || source.templateGroupId == null) return [];
+  let fields: JournalFields = { templateGroupId: null };
+  let effects: PlannedEffect[] = [];
+  if (template) {
+    const effective = await effectiveGroup(records, source, target.projectId);
+    const copy = copyDefinitions(source, source.id, effective.definitions, timestamp, true);
+    const remapped = await remapValues(records, source, source.id, copy.remap, timestamp, target.boardId, target.id);
+    fields = { ...fields, name: effective.name, fieldOrderVersion: nextFieldOrder(fieldDefinitionOrder(source)) };
+    effects = [...copy.effects, ...remapped.effects];
+  }
+  const change = touchRevision('fieldGroups', source, timestamp);
+  return [...effects, { ...change, fields: { ...change.fields, ...fields } }];
 }

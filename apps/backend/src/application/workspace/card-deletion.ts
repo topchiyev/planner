@@ -1,10 +1,9 @@
-import type { Document } from 'mongodb';
 import type { CommandPlanningContext, PlannedEffect } from '../command-journal/operation.js';
 import { fitsCommandEffect } from '../command-journal/records.js';
 import { RelationshipError, requireRevision, rowRevision, touchRevision } from './relationship-policy.js';
-import { canonicalRow, equal, together, type WorkspaceRecordName, type WorkspaceRecords, type WorkspaceRow } from './records.js';
+import { equal, together, type WorkspaceRecordName, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
-const queryBatchSize = 512;
+import { scopedWorkspaceRows } from './scoped-rows.js';
 
 type Card = WorkspaceRow<'cards'>;
 type List = WorkspaceRow<'lists'>;
@@ -12,21 +11,7 @@ const ids = (rows: readonly { id: string }[]) => rows.map(({ id }) => id);
 const keyed = <T extends { id: string }>(rows: readonly T[]) => new Map(rows.map((row) => [row.id, row]));
 
 export function createDeletionScope(records: WorkspaceRecords, generationId: string) {
-  function find<K extends WorkspaceRecordName>(collection: K, selector: Document, ...checks: Document[]) {
-    return records.find(collection, { ...selector, $expr: { $and: [canonicalRow(generationId), ...checks] } }, { id: 1 });
-  }
-  function exact<K extends WorkspaceRecordName>(collection: K, field: string, id: string) {
-    return find(collection, { [field]: id }, equal(field, id));
-  }
-  async function byIds<K extends WorkspaceRecordName>(collection: K, field: string, ids: string[], selector: Document = {}, ...checks: Document[]) {
-    const rows: WorkspaceRow<K>[] = [];
-    for (let offset = 0; offset < ids.length; offset += queryBatchSize) {
-      const batch = ids.slice(offset, offset + queryBatchSize);
-      const matches = await find(collection, { ...selector, [field]: { $in: batch } }, { $in: ['$' + field, batch] }, ...checks);
-      for (const match of matches) rows.push(match);
-    }
-    return rows;
-  }
+  const { find, exact, byIds } = scopedWorkspaceRows(records, generationId);
   const effects: PlannedEffect[] = [];
   function remove<K extends WorkspaceRecordName>(collection: K, rows: WorkspaceRow<K>[]) {
     const unique = keyed(rows);

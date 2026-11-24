@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { publicIdSchema, revisionSchema } from './storage.js';
+import { transferSummary } from './transfers.js';
 import { boardListSchema, finiteListKindSchema, listColorSchema, workspaceData } from './workspace.js';
 
 const target = z.strictObject({ id: publicIdSchema, expectedRevision: revisionSchema });
@@ -29,6 +30,8 @@ export const listLifecycleCommands = {
       toBoardId: publicIdSchema, beforeListId: publicIdSchema.nullable(),
       sourceOrderVersion: revisionSchema, destinationOrderVersion: revisionSchema,
     }),
-    output: receipt,
+    output: receipt.extend({ data: receipt.shape.data.extend({
+      sourceBoardRevision: revisionSchema.optional(), sourceBoardOrderVersion: revisionSchema.optional(), remaps: transferSummary.optional(),
+    }) }),
   },
 } as const;

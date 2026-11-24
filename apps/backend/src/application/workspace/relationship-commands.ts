@@ -14,6 +14,9 @@ import { authorizeLabelDelete, authorizeLabelEdit, authorizePaletteBoard, planLa
 import { authorizeBoardFollow, authorizeCardFollow, planPersonalFollow } from './personal-follows.js';
 import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
 import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
+import { authorizeCardTransfer, planCrossBoardCardMove, planDuplicateCard } from './card-transfer.js';
+import { finiteList } from './card-history.js';
+import { authorizeTransferReplay, captureTransferReplay } from './transfer-replay.js';
 import { authorizeFiniteListDeletion, planFiniteListDeletion } from './finite-list-deletion.js';
 import { authorizeClearTrash, planArchiveCards, planClearTrash, planListSort } from './list-maintenance.js';
 import {
@@ -123,13 +126,17 @@ export function createRelationshipJournalOperations(
     return {
       normalize: (input) => Object.fromEntries(Object.entries(parse(input)).filter(([, value]) => value !== undefined)),
       async authorize(context, input) { await authorize(await resolveActor(context), parse(input)); },
+      async authorizeReplay(context, receipt) {
+        await authorizeTransferReplay(await resolveActor(context), operation, receipt.scope, receipt.result);
+      },
       async plan(context, input) {
         const parsed = parse(input);
         const actor = await resolveActor(context);
         const access = await authorize(actor, parsed);
         const result = await plan(createWorkspaceRecords(database, context.generationId), access, parsed, context, actor);
         relationshipCommands[operation].output.parse(result.result);
-        return { ...result, audit: { ...result.audit, origin } };
+        const replayScope = await captureTransferReplay(actor, operation, input);
+        return { ...result, ...(replayScope && { replayScope }), audit: { ...result.audit, origin } };
       },
     };
   }
@@ -182,8 +189,13 @@ export function createRelationshipJournalOperations(
       (records, card, input, context) => planPersonalFollow('card', true, records, card, input.expectedRevision, context)),
     'cards.unfollow': define('cards.unfollow', (scope, input) => authorizeCardFollow(scope, input.id),
       (records, card, input, context) => planPersonalFollow('card', false, records, card, input.expectedRevision, context)),
-    'cards.move': define('cards.move', authorizeCardTransition,
-      (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.move', input }, context)),
+    'cards.move': define('cards.move', authorizeCardTransfer,
+      (records, access, input, context) => {
+        if (access.source.board.board.id !== access.destination.board.board.id) return planCrossBoardCardMove(records, access, input, context);
+        if (!finiteList(access.destination.list)) throw new RelationshipError('cardTransition');
+        return planCardTransition(database, records, { source: access.source, explicitDestination: access.destination.list }, { operation: 'cards.move', input }, context);
+      }),
+    'cards.duplicate': define('cards.duplicate', (scope, input) => authorizeCardTransfer(scope, input, true), planDuplicateCard),
     'cards.archive': define('cards.archive', authorizeCardTransition,
       (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.archive', input }, context)),
     'cards.trash': define('cards.trash', authorizeCardTransition,

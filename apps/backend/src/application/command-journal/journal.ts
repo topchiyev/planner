@@ -12,7 +12,7 @@ import {
   type PlannedEffect,
 } from './operation.js';
 import {
-  assertChanged, batches, checkCommand, checkOutboxCursor, commands, durable, packBatches, readBatches, readJournalResult,
+  assertChanged, batches, checkCommand, checkOutboxCursor, commands, durable, maximumReplayScopeBytes, packBatches, readBatches, readJournalReplayScope, readJournalResult,
   validateEffect, type CommandRecord,
 } from './records.js';
 
@@ -132,7 +132,14 @@ export class CommandJournal {
       if (command) {
         checkCommand(command);
         if (command.requestHash !== hash) throw new CommandConflict();
-        if (command.status === 'committed') return readJournalResult(command);
+        if (command.status === 'committed') {
+          const result = readJournalResult(command) as JournalValue;
+          if (operation.authorizeReplay) {
+            const scope = readJournalReplayScope(command);
+            await withReadContext(workspace, actorId, (context) => operation.authorizeReplay!(context, { request: normalized, result, scope }));
+          }
+          return result;
+        }
         if (command.status === 'prepared') return this.#finish(command);
       } else {
         const id = commandUuid(generationId, ['command', actorId, operationId, idempotencyKey]);
@@ -216,6 +223,8 @@ export class CommandJournal {
 
   async #prepare(command: CommandRecord, plan: CommandPlan) {
     const result = canonicalJournalData(plan.result);
+    const replayScope = plan.replayScope === undefined ? undefined : canonicalJournalData(plan.replayScope);
+    if (replayScope !== undefined && Buffer.byteLength(replayScope) > maximumReplayScopeBytes) throw new CommandRecoveryError('The command replay scope is too large.');
     const effects = [...plan.effects];
     effects.forEach((effect) => validateEffect(effect, false));
     if (!isCommandName(plan.audit.resourceType) || !isCommandName(plan.audit.action)
@@ -257,6 +266,7 @@ export class CommandJournal {
     }, 0n);
     const recoverySequence = encodeRank(last + 1n);
     const preparedFields = { status: 'prepared', recoverySequence, applied: 0, lastAppliedEffectId: null, manifest, result, resultHash: journalDigest(result),
+      ...(replayScope !== undefined && { replayScope, replayScopeHash: journalDigest(replayScope) }),
       eventCount, delivered: 0, lastDeliveredEventId: null, outboxPending: eventCount > 0 } as const;
     const prepared = { ...command, ...preparedFields };
     const collection = batches(this.database);

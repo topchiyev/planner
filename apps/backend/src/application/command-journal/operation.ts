@@ -14,6 +14,7 @@ export type PlannedEffect =
 export interface CommandPlan {
   effects: readonly PlannedEffect[];
   result: JournalValue;
+  replayScope?: JournalValue;
   audit: { resourceType: string; resourceId: string; action: string; detail?: JournalValue; origin?: 'web' | 'mcp' | 'operator' | 'system' };
   events?: readonly { boardId: string; kind: string; payload: JournalValue }[];
 }
@@ -35,6 +36,8 @@ export interface JournalOperation {
   normalize(input: unknown): JournalValue;
   // Check current actor and resource access. Original revision checks belong in plan.
   authorize(context: CommandContext, request: JournalValue): void | Promise<void>;
+  // Recheck the authorization scope that was recorded before effects or recover a supported legacy receipt's explicit scope.
+  authorizeReplay?(context: CommandContext, receipt: { request: JournalValue; result: JournalValue; scope: JournalValue | null }): void | Promise<void>;
   // Build deterministic declarative effects. Secrets use their dedicated storage operations.
   plan(context: CommandPlanningContext, request: JournalValue): CommandPlan | Promise<CommandPlan>;
 }
