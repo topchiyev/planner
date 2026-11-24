@@ -367,6 +367,9 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
       const source = await proof.readBatch('card', checkpoint?.lastSourceId ?? null, 2);
       return writeMigrationBatch(lease, db, identity, proof, cursors, checkpoint,
         { pass: 'reserve', table: 'card', lastSourceId: source.lastSourceId }, async () => {
+          await assert.rejects(writeMigrationBatch(lease, db, identity, proof, cursors, checkpoint,
+            { pass: 'reserve', table: 'card', lastSourceId: source.lastSourceId },
+            async () => assert.fail('Overlapping batch reached its effects')), refuses('target-write'));
           for (const row of source.rows) {
             const id = legacyPublicId(receipt.capture.source.instanceId, 'card', row.id);
             await staged.updateOne({ _id: workspaceKey(generationId, id), generationId, id },

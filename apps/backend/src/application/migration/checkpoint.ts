@@ -77,6 +77,8 @@ function comparePosition(a: MigrationPosition, b: MigrationPosition) {
   return compareSourceKeys(a.table, a.lastSourceId, b.lastSourceId);
 }
 
+const activeBatches = new WeakSet<WriterLease>();
+
 /** Apply deterministic, acknowledged effects using a verified source snapshot before advancing its exclusive source key. */
 export async function writeMigrationBatch(lease: WriterLease, db: Db, identity: ImportIdentity,
   snapshot: VerifiedSourceSnapshot, cursors: ReturnType<typeof migrationCursors>, before: MigrationCheckpoint | null, after: MigrationPosition, apply: () => Promise<void>) {
@@ -84,33 +86,37 @@ export async function writeMigrationBatch(lease: WriterLease, db: Db, identity: 
   assertVerifiedSourceSnapshot(snapshot);
   if (!isDeepStrictEqual(snapshot.fingerprint, identity.fingerprint))
     throw new MigrationError('source-changed', 'The source snapshot changed. Start a new import run.');
-  const checkpoint = (position: MigrationPosition): MigrationCheckpoint => ({
-    pass: position.pass, table: position.table, lastSourceId: position.lastSourceId,
-    token: cursors.seal({ runId: identity.runId, generationId: identity.generationId, fingerprint: identity.fingerprint.sha256,
-      pass: position.pass, table: position.table }, position.lastSourceId),
-  });
-  const next = checkpoint(after);
-  if (before && (!isDeepStrictEqual(before, checkpoint({ pass: before.pass, table: before.table, lastSourceId: before.lastSourceId }))
-    || comparePosition(before, after) >= 0)) throw invalid();
-  const installation = await readInstallation(db, identity.installationId);
-  if (installation.activeGenerationId === identity.generationId
-    || installation.setup?.enrollmentGenerationId === identity.generationId) throw invalid();
-  const key = importRunKey(identity);
-  const records = db.collection<ImportRun>('importRuns');
-  const current = await records.findOne(key);
-  if (!current || (current.state !== 'preflighted' && current.state !== 'staging')
-    || !isDeepStrictEqual(current.fingerprint, identity.fingerprint)) throw invalid();
-  if (isDeepStrictEqual(current.checkpoint, next)) return next;
-  if (!isDeepStrictEqual(current.checkpoint, before)) throw invalid();
-  await apply();
-  lease.assertHeld();
-  assertVerifiedSourceSnapshot(snapshot);
-  const match: Filter<ImportRun> = {
-    ...key, state: current.state, 'fingerprint.sha256': identity.fingerprint.sha256,
-    ...(before ? { 'checkpoint.token': before.token, 'checkpoint.pass': before.pass, 'checkpoint.table': before.table,
-      'checkpoint.lastSourceId': before.lastSourceId ?? { $type: 'null' } } : { checkpoint: { $type: 'null' } }),
-  };
-  const advanced = await records.updateOne(match, { $set: { state: 'staging', checkpoint: next, updatedAt: new Date() } }, durable);
-  if (advanced.matchedCount !== 1) throw invalid();
-  return next;
+  if (activeBatches.has(lease)) throw invalid();
+  activeBatches.add(lease);
+  try {
+    const checkpoint = (position: MigrationPosition): MigrationCheckpoint => ({
+      pass: position.pass, table: position.table, lastSourceId: position.lastSourceId,
+      token: cursors.seal({ runId: identity.runId, generationId: identity.generationId, fingerprint: identity.fingerprint.sha256,
+        pass: position.pass, table: position.table }, position.lastSourceId),
+    });
+    const next = checkpoint(after);
+    if (before && (!isDeepStrictEqual(before, checkpoint({ pass: before.pass, table: before.table, lastSourceId: before.lastSourceId }))
+      || comparePosition(before, after) >= 0)) throw invalid();
+    const installation = await readInstallation(db, identity.installationId);
+    if (installation.activeGenerationId === identity.generationId
+      || installation.setup?.enrollmentGenerationId === identity.generationId) throw invalid();
+    const key = importRunKey(identity);
+    const records = db.collection<ImportRun>('importRuns');
+    const current = await records.findOne(key);
+    if (!current || (current.state !== 'preflighted' && current.state !== 'staging')
+      || !isDeepStrictEqual(current.fingerprint, identity.fingerprint)) throw invalid();
+    if (isDeepStrictEqual(current.checkpoint, next)) return next;
+    if (!isDeepStrictEqual(current.checkpoint, before)) throw invalid();
+    await apply();
+    lease.assertHeld();
+    assertVerifiedSourceSnapshot(snapshot);
+    const match: Filter<ImportRun> = {
+      ...key, state: current.state, 'fingerprint.sha256': identity.fingerprint.sha256,
+      ...(before ? { 'checkpoint.token': before.token, 'checkpoint.pass': before.pass, 'checkpoint.table': before.table,
+        'checkpoint.lastSourceId': before.lastSourceId ?? { $type: 'null' } } : { checkpoint: { $type: 'null' } }),
+    };
+    const advanced = await records.updateOne(match, { $set: { state: 'staging', checkpoint: next, updatedAt: new Date() } }, durable);
+    if (advanced.matchedCount !== 1) throw invalid();
+    return next;
+  } finally { activeBatches.delete(lease); }
 }
