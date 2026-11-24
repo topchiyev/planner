@@ -60,7 +60,13 @@ export function BoardPage() {
     if (board && board.recipeScope !== selected.scope) { clipboard.discard(selected); return; }
     if (selected.boardId !== boardId) return;
     if (initial === null || live.phase === 'missing') { clipboard.discard(selected); return; }
-    if (clipboard.attempt || live.phase !== 'visible') return;
+    if (live.phase !== 'visible') return;
+    const permissions = board?.board.permissions;
+    if (permissions && !(selected.action === 'cut' ? permissions.canEdit : permissions.canDuplicateFrom)) {
+      clipboard.discard(selected);
+      return;
+    }
+    if (clipboard.attempt) return;
     const source = live.card?.id === selected.cardId ? live.card : board?.cardsPage?.data.find(({ id }) => id === selected.cardId);
     const permitted = source && (selected.action === 'cut' ? source.permissions.canMove : source.permissions.canDuplicateFrom);
     if (live.removed?.has(selected.cardId) || (cardId === selected.cardId && live.card === null) || (source && !permitted)) {

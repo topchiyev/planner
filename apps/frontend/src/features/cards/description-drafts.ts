@@ -12,6 +12,10 @@ export type DescriptionDraft = {
   editedAt: number;
 };
 
+export function descriptionDraftDeadline(draft: DescriptionDraft) {
+  return draft.editedAt + lifetime;
+}
+
 let opened: Promise<IDBDatabase | undefined> | undefined;
 
 function openDraftDatabase() {
@@ -35,9 +39,9 @@ function openDraftDatabase() {
 }
 
 async function draftOperation<T>(run: (store: IDBObjectStore, result: (value: T) => void) => void) {
-  const database = await openDraftDatabase();
-  if (!database) return undefined;
   try {
+    const database = await openDraftDatabase();
+    if (!database) return undefined;
     return await new Promise<T | undefined>((resolve) => {
       let value: T | undefined;
       const transaction = database.transaction(storeName, 'readwrite');

@@ -2234,6 +2234,34 @@ test('keyboard cut rechecks the source revision, cancels cleanly and reopens aft
     }
     await source.press('Control+x');
     await expect(toolbar.getByText('Card cut. Choose where to move it.')).toBeVisible();
+    const filters = editor.getByRole('search', { name: 'Board cards' });
+    await filters.getByRole('searchbox').fill('Selection is off the current page');
+    await filters.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(editor.getByText('No matching cards', { exact: true })).toBeVisible();
+    await expect(source).toHaveCount(0);
+    await expect(toolbar).toBeVisible();
+    const owner = await fixture.login(ids.privateOwner);
+    assert.equal(owner.status, 200);
+    async function changeSourceRole(role, revision) {
+      const response = await fixture.call('/api/v1/boards/' + ids.privateBoard + '/members/' + ids.firstEditor, cookieOf(owner), {
+        method: 'PATCH', headers: { Origin: origin, 'If-Match': '"' + revision + '"', 'Idempotency-Key': randomUUID(),
+          'X-CSRF-Token': owner.data.csrfToken }, body: { role, canComment: role === 'viewer' ? false : null },
+      });
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      return response.data.data.revision;
+    }
+    const readOnly = editor.waitForResponse(async (response) => {
+      if (!response.url().endsWith('/boards/' + ids.privateBoard + '/workspace') || response.status() !== 200) return false;
+      return (await response.json()).data.board.permissions.canEdit === false;
+    });
+    const demoted = await changeSourceRole('viewer', 0);
+    await readOnly;
+    await expect(editor.getByRole('heading', { name: 'Transfer source', level: 1 })).toBeVisible();
+    await expect(toolbar).toHaveCount(0);
+    await changeSourceRole('editor', demoted);
+    await filters.getByRole('button', { name: 'Clear filters' }).click();
+    await source.press('Control+x');
+    await expect(toolbar.getByText('Card cut. Choose where to move it.')).toBeVisible();
     await switchBoard('Shared fixture project', 'Transfer destination');
     const peer = await fixture.login(ids.secondEditor);
     assert.equal(peer.status, 200);
@@ -2342,6 +2370,10 @@ test('description drafts recover exact Markdown, preserve newer tab writes and r
     await expect(offer(editor)).toHaveCount(0);
     await editor.goto(target);
     await expect(offer(editor).getByRole('button', { name: 'Recover draft' })).toBeVisible();
+    const [original] = await browserDescriptionDrafts(editor);
+    const expiringTab = await editor.context().newPage();
+    await expiringTab.goto(target);
+    await expect(offer(expiringTab)).toBeVisible();
     const peerTab = await editor.context().newPage();
     await peerTab.goto(target);
     await offer(peerTab).getByRole('button', { name: 'Recover draft' }).click();
@@ -2349,6 +2381,13 @@ test('description drafts recover exact Markdown, preserve newer tab writes and r
     await expect(markdown(peerTab)).toHaveValue(exact);
     await markdown(peerTab).fill(currentDraft);
     await expect.poll(async () => (await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown)).toEqual([currentDraft]);
+    await expiringTab.clock.setFixedTime(new Date(original.editedAt + 7 * 24 * 60 * 60 * 1000));
+    await expiringTab.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await expect(offer(expiringTab)).toHaveCount(0);
+    assert.deepEqual((await browserDescriptionDrafts(expiringTab)).map(({ markdown }) => markdown), [currentDraft]);
+    await peerTab.clock.setFixedTime(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
+    await peerTab.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(markdown(peerTab)).toHaveValue(currentDraft);
     await offer(editor).getByRole('button', { name: 'Discard draft' }).click();
     assert.deepEqual((await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown), [currentDraft]);
 
@@ -2405,11 +2444,14 @@ test('description drafts recover exact Markdown, preserve newer tab writes and r
     await expect(offer(editor)).toHaveCount(0);
     assert.equal((await browserDescriptionDrafts(editor)).length, 1);
     await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').updateOne(membership, { $set: { role: 'editor' } }));
-    await editor.clock.setFixedTime(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
     await editor.reload();
-    await expect(editor.getByRole('form', { name: 'Edit card' })).toBeVisible();
-    await expect.poll(() => browserDescriptionDrafts(editor)).toEqual([]);
+    await expect(offer(editor).getByRole('button', { name: 'Recover draft' })).toBeVisible();
+    await editor.clock.setFixedTime(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
+    await editor.evaluate(() => document.querySelector('[aria-label="Saved description draft"] button').click());
     await expect(offer(editor)).toHaveCount(0);
+    const text = await markdown(editor).evaluate((element) => element instanceof HTMLTextAreaElement ? element.value : element.textContent);
+    assert.ok(!text.includes('Unsaved text for the expiry check'));
+    await expect.poll(() => browserDescriptionDrafts(editor)).toEqual([]);
     await editor.addInitScript(() => Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: undefined }));
     await editor.reload();
     await editor.getByRole('button', { name: 'Markdown', exact: true }).click();

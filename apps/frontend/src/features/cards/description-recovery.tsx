@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DescriptionDraft } from './description-drafts.js';
 
-export function DescriptionRecovery({ draft, revision, current, onRecover, onDiscard }: {
-  draft: DescriptionDraft; revision: number; current: string | null; onRecover: () => void; onDiscard: () => void;
+export function DescriptionRecovery({ draft, revision, current, busy, canUse, onRecover, onDiscard }: {
+  draft: DescriptionDraft; revision: number; current: string | null; busy: boolean; canUse: () => boolean; onRecover: () => void; onDiscard: () => void;
 }) {
   const stale = draft.baseRevision !== revision;
   const [copied, setCopied] = useState(false);
@@ -14,10 +14,11 @@ export function DescriptionRecovery({ draft, revision, current, onRecover, onDis
   }, [showCopy]);
 
   async function copyDraft() {
+    if (!canUse()) return;
     try {
       await navigator.clipboard.writeText(draft.markdown);
       setCopied(true);
-    } catch { setShowCopy(true); }
+    } catch { if (canUse()) setShowCopy(true); }
   }
 
   return <section className="project-confirm card-description-recovery" aria-label="Saved description draft">
@@ -27,9 +28,9 @@ export function DescriptionRecovery({ draft, revision, current, onRecover, onDis
       <div><dt>Current description</dt><dd>{current ? <pre>{current}</pre> : <p>Empty description</p>}</dd></div>
     </dl>}
     <div className="project-actions">
-      <button type="button" className="workspace-button" onClick={onRecover}>{stale ? 'Review draft' : 'Recover draft'}</button>
-      {stale && <button type="button" className="workspace-button" onClick={() => void copyDraft()}>Copy draft</button>}
-      <button type="button" className="workspace-button" onClick={onDiscard}>Discard draft</button>
+      <button type="button" className="workspace-button" disabled={busy} onClick={() => { if (canUse()) onRecover(); }}>{stale ? 'Review draft' : 'Recover draft'}</button>
+      {stale && <button type="button" className="workspace-button" disabled={busy} onClick={() => void copyDraft()}>Copy draft</button>}
+      <button type="button" className="workspace-button" disabled={busy} onClick={onDiscard}>Discard draft</button>
     </div>
     {copied && <p role="status">Draft copied.</p>}
     {showCopy && <label>Copy this draft<textarea readOnly ref={fallback} value={draft.markdown} /></label>}

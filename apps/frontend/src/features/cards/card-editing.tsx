@@ -127,7 +127,8 @@ function EditableCard({ card, restriction, draftScope }: Props) {
   const allowedTypes = restriction && restriction !== current.type ? [current.type, restriction] : restriction ? [restriction] :
     (['project', 'story'] as const);
   return <div className="card-editing">
-    {descriptionDraft.offer && <DescriptionRecovery draft={descriptionDraft.offer} revision={revision} current={card.description}
+    {descriptionDraft.offer && <DescriptionRecovery draft={descriptionDraft.offer} revision={revision} current={card.description} busy={action.busy}
+      canUse={() => !!descriptionDraft.offer && descriptionDraft.canUseOffer(descriptionDraft.offer)}
       onRecover={() => {
         const saved = descriptionDraft.offer!;
         descriptionDraft.recover(saved);
@@ -139,12 +140,12 @@ function EditableCard({ card, restriction, draftScope }: Props) {
       <p>The card changed while you were editing. Your edits are still here.</p>
       <details><summary>Current saved description</summary>{card.description ? <pre>{card.description}</pre> : <p>Empty description</p>}</details>
       <div className="project-actions">
-        <button type="button" className="workspace-button" onClick={() => {
+        <button type="button" className="workspace-button" disabled={action.busy} onClick={() => {
           descriptionDraft.recordEditor({ baseRevision: revision });
           setDraft(cardDraft(revision, current, draft.values));
           action.clearProblem();
         }}>Keep edits and use current revision</button>
-        <button type="button" className="workspace-button" onClick={() => {
+        <button type="button" className="workspace-button" disabled={action.busy} onClick={() => {
           descriptionDraft.clear(descriptionDraft.active?.version); setDraft(null); action.clearProblem();
         }}>Discard edits</button>
       </div>
