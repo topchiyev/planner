@@ -2066,3 +2066,235 @@ test('native browser applies verified live updates passively and preserves a dir
     await expect(peer.getByRole('heading', { name: 'Peer live title', level: 2 })).toHaveCount(0);
   }, false, { clock: () => new Date(time), heartbeatMs: 200 });
 });
+
+async function openClipboardBoard(page, projectName, boardName) {
+  const navigation = page.getByRole('navigation', { name: 'Project navigation' });
+  await navigation.getByRole('link', { name: projectName, exact: true }).click();
+  await page.getByRole('main').getByRole('link', { name: boardName, exact: true }).click();
+  await expect(page.getByRole('heading', { name: boardName, level: 1 })).toBeVisible();
+}
+
+test('board clipboard retries the exact committed copy and a deliberate second paste creates another card', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    await fixture.gate.runCommand(async () => {
+      await fixture.db.collection('boardMembers').deleteOne({ ...fixture.scope, boardId: ids.privateBoard, userId: ids.privateOwner });
+      await fixture.insert('boardMembers', fixtureId(31000), { boardId: ids.sharedBoard, userId: ids.privateOwner, role: 'editor', canComment: null });
+    });
+    const manager = await page({ width: 1440, height: 900 });
+    await signIn(manager, origin, 'private-owner');
+    await manager.goto(origin + board(ids.privateBoard) + '/cards/' + ids.activeCard);
+    const actions = manager.getByRole('region', { name: 'Card clipboard' });
+    await expect(actions.getByRole('button', { name: 'Cut card' })).toHaveCount(0);
+    await actions.getByRole('button', { name: 'Copy card' }).click();
+    await openClipboardBoard(manager, 'Shared fixture project', 'Transfer destination');
+
+    const attempts = [];
+    await manager.route('**/api/v1/cards/' + ids.activeCard + '/duplicate', async (intercepted) => {
+      const response = await intercepted.fetch();
+      const headers = intercepted.request().headers();
+      const result = await response.json();
+      attempts.push({ key: headers['idempotency-key'], revision: headers['if-match'], body: intercepted.request().postDataJSON(),
+        status: response.status(), id: result.data?.card?.id });
+      if (attempts.length === 1) await intercepted.abort('failed');
+      else await intercepted.fulfill({ response });
+    });
+    const toolbar = manager.getByRole('region', { name: 'Board clipboard' });
+    const paste = () => toolbar.getByRole('button', { name: 'Paste card', exact: true });
+    const dialog = manager.getByRole('dialog', { name: 'Paste card' });
+    await paste().click();
+    await dialog.getByLabel('Destination list').selectOption(ids.sharedActiveList);
+    await dialog.getByRole('button', { name: 'Paste card', exact: true }).click();
+    await expect(toolbar.getByRole('alert')).toHaveText('The paste response was interrupted. Retry to confirm the same paste.');
+    await expect(dialog).toHaveCount(0);
+    assert.equal(attempts[0].status, 201);
+
+    await openClipboardBoard(manager, 'Shared fixture project', 'Transfer destination');
+    await toolbar.getByRole('button', { name: 'Retry paste' }).click();
+    await expect(manager).toHaveURL(origin + board(ids.sharedBoard) + '/cards/' + attempts[0].id);
+    await expect(manager.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeFocused();
+    assert.deepEqual(attempts[1], attempts[0]);
+    assert.equal(await fixture.db.collection('cards').countDocuments({ ...fixture.scope, boardId: ids.sharedBoard, name: 'Moving an assigned card' }), 1);
+
+    await paste().click();
+    await dialog.getByLabel('Destination list').selectOption(ids.sharedActiveList);
+    await dialog.getByRole('button', { name: 'Paste card', exact: true }).click();
+    await expect.poll(() => attempts.length).toBe(3);
+    await expect(manager).toHaveURL(origin + board(ids.sharedBoard) + '/cards/' + attempts[2].id);
+    assert.notEqual(attempts[2].key, attempts[0].key);
+    assert.notEqual(attempts[2].id, attempts[0].id);
+    assert.equal(await fixture.db.collection('cards').countDocuments({ ...fixture.scope, boardId: ids.sharedBoard, name: 'Moving an assigned card' }), 2);
+    await manager.reload();
+    await expect(manager.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    await expect(toolbar).toHaveCount(0);
+  });
+});
+
+test('keyboard cut rechecks the source revision, cancels cleanly and reopens after a stale destination', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const editor = await page({ width: 390, height: 844 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(origin + board(ids.privateBoard));
+    const source = editor.getByRole('link', { name: 'Moving an assigned card', exact: true });
+    const toolbar = editor.getByRole('region', { name: 'Board clipboard' });
+    const dialog = editor.getByRole('dialog', { name: 'Paste card' });
+    const heading = editor.getByRole('heading', { name: 'Transfer destination', level: 1 });
+    async function switchBoard(projectName, name) {
+      await editor.getByRole('button', { name: 'Menu' }).click();
+      await openClipboardBoard(editor, projectName, name);
+    }
+    await source.press('Control+x');
+    await expect(toolbar.getByText('Card cut. Choose where to move it.')).toBeVisible();
+    await switchBoard('Shared fixture project', 'Transfer destination');
+    const peer = await fixture.login(ids.secondEditor);
+    assert.equal(peer.status, 200);
+    const changed = await fixture.call('/api/v1/cards/' + ids.activeCard, cookieOf(peer), { method: 'PATCH',
+      headers: { Origin: origin, 'If-Match': '"1"', 'Idempotency-Key': randomUUID(), 'X-CSRF-Token': peer.data.csrfToken },
+      body: { description: 'Peer changed the captured revision' },
+    });
+    assert.equal(changed.status, 200);
+    await heading.press('Control+v');
+    await expect(toolbar.getByRole('alert')).toContainText('The source card changed');
+    await expect(dialog).toHaveCount(0);
+
+    await switchBoard('Private fixture project', 'Transfer source');
+    await source.press('Control+x');
+    await switchBoard('Shared fixture project', 'Transfer destination');
+    await heading.focus();
+    await heading.press('Control+v');
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Destination list').press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(heading).toBeFocused();
+    assert.equal((await fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard })).boardId, ids.privateBoard);
+
+    await heading.press('Control+v');
+    await dialog.getByLabel('Destination list').selectOption(ids.sharedActiveList);
+    await fixture.gate.runCommand(() => fixture.db.collection('lists').updateOne({ ...fixture.scope, id: ids.sharedActiveList }, { $set: { orderVersion: 2 } }));
+    const stale = editor.waitForResponse((response) => response.url().endsWith('/cards/' + ids.activeCard + '/move'));
+    await dialog.getByRole('button', { name: 'Paste card', exact: true }).click();
+    assert.equal((await stale).status(), 409);
+    await expect(toolbar.getByRole('alert')).toContainText('The placement changed');
+    await toolbar.getByRole('button', { name: 'Paste card', exact: true }).click();
+    await dialog.getByLabel('Destination list').selectOption(ids.sharedActiveList);
+    await dialog.getByRole('button', { name: 'Paste card', exact: true }).click();
+    await expect(editor).toHaveURL(origin + board(ids.sharedBoard) + '/cards/' + ids.activeCard);
+    await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeFocused();
+    await expect(toolbar.getByRole('button', { name: 'Paste card', exact: true })).toHaveCount(0);
+    assert.equal((await fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard })).boardId, ids.sharedBoard);
+    assert.ok(await editor.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+  });
+});
+
+async function browserDescriptionDrafts(page) {
+  return page.evaluate(async () => {
+    if (!(await indexedDB.databases()).some(({ name }) => name === 'planner-description-drafts')) return [];
+    return new Promise((resolve, reject) => {
+      const open = indexedDB.open('planner-description-drafts');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const database = open.result;
+        const request = database.transaction('drafts', 'readonly').objectStore('drafts').getAll();
+        request.onerror = () => { database.close(); reject(request.error); };
+        request.onsuccess = () => { database.close(); resolve(request.result); };
+      };
+    });
+  });
+}
+
+test('description drafts recover exact Markdown, preserve newer tab writes and recheck account and edit access', { timeout: 150_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    await fixture.gate.runCommand(() => fixture.db.collection('cards').updateOne({ ...fixture.scope, id: ids.activeCard },
+      { $set: { description: 'Original saved description' } }));
+    const otherCard = await fixture.insert('cards', fixtureId(31020), { boardId: ids.privateBoard, listId: ids.privateActiveList,
+      name: 'Another draft scope', type: 'project', kind: 'board', rank: '2048' });
+    const editor = await page({ width: 390, height: 844 });
+    const target = origin + board(ids.privateBoard) + '/cards/' + ids.activeCard;
+    const otherTarget = origin + board(ids.privateBoard) + '/cards/' + otherCard;
+    const offer = (p) => p.getByRole('region', { name: 'Saved description draft' });
+    const markdown = (p) => p.getByRole('textbox', { name: 'Description', exact: true });
+    const exact = '  **λ**  \n\nZero 0  ';
+    const currentDraft = '  Current local λ\n\n**keep spacing**  ';
+    await editor.addInitScript(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }));
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(target);
+    await editor.getByRole('button', { name: 'Markdown', exact: true }).click();
+    await expect(markdown(editor)).toHaveValue('Original saved description');
+    assert.deepEqual(await browserDescriptionDrafts(editor), []);
+    await markdown(editor).fill(exact);
+    await expect.poll(async () => (await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown)).toEqual([exact]);
+    await editor.goto(otherTarget);
+    await expect(editor.getByRole('heading', { name: 'Another draft scope', level: 2 })).toBeVisible();
+    await expect(offer(editor)).toHaveCount(0);
+    await editor.goto(target);
+    await expect(offer(editor).getByRole('button', { name: 'Recover draft' })).toBeVisible();
+    const peerTab = await editor.context().newPage();
+    await peerTab.goto(target);
+    await offer(peerTab).getByRole('button', { name: 'Recover draft' }).click();
+    await expect(peerTab.getByRole('button', { name: 'Markdown', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(markdown(peerTab)).toHaveValue(exact);
+    await markdown(peerTab).fill(currentDraft);
+    await expect.poll(async () => (await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown)).toEqual([currentDraft]);
+    await offer(editor).getByRole('button', { name: 'Discard draft' }).click();
+    assert.deepEqual((await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown), [currentDraft]);
+
+    async function signOut() {
+      await editor.getByRole('button', { name: 'Menu' }).click();
+      await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
+      await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    }
+    await signOut();
+    await expect(peerTab.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await signIn(editor, origin, 'second-editor');
+    await editor.goto(target);
+    await expect(editor.getByRole('form', { name: 'Edit card' })).toBeVisible();
+    await expect(offer(editor)).toHaveCount(0);
+    assert.deepEqual((await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown), [currentDraft]);
+    const session = await (await editor.request.get(origin + '/api/v1/session')).json();
+    const changed = await editor.request.patch(origin + '/api/v1/cards/' + ids.activeCard, {
+      headers: { Origin: origin, 'If-Match': '"1"', 'Idempotency-Key': randomUUID(), 'X-CSRF-Token': session.csrfToken },
+      data: { description: null },
+    });
+    assert.equal(changed.status(), 200);
+    await signOut();
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(target);
+    await expect(offer(editor)).toContainText('This card changed since you wrote the local draft.');
+    assert.equal(await offer(editor).locator('pre').textContent(), currentDraft);
+    await expect(offer(editor).getByText('Empty description', { exact: true })).toBeVisible();
+    await offer(editor).getByRole('button', { name: 'Copy draft' }).click();
+    const copied = offer(editor).getByRole('textbox', { name: 'Copy this draft' });
+    await expect(copied).toHaveValue(currentDraft);
+    assert.deepEqual(await copied.evaluate((input) => [input.selectionStart, input.selectionEnd]), [0, currentDraft.length]);
+    await offer(editor).getByRole('button', { name: 'Review draft' }).click();
+    await expect(markdown(editor)).toHaveValue(currentDraft);
+    const save = editor.getByRole('button', { name: 'Save card', exact: true });
+    await expect(save).toBeDisabled();
+    await editor.getByRole('button', { name: 'Keep edits and use current revision' }).click();
+    const path = '**/api/v1/cards/' + ids.activeCard;
+    await editor.route(path, (request) => request.request().method() === 'PATCH' ? request.abort('failed') : request.continue());
+    await save.click();
+    await expect(editor.getByText('Planner could not save this change. Try again.')).toBeVisible();
+    assert.deepEqual((await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown), [currentDraft]);
+    await editor.unroute(path);
+    await save.click();
+    await expect.poll(async () => (await fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard })).description).toBe(currentDraft);
+    await expect.poll(() => browserDescriptionDrafts(editor)).toEqual([]);
+
+    await markdown(editor).fill('Unsaved text for the expiry check');
+    await expect.poll(async () => (await browserDescriptionDrafts(editor)).length).toBe(1);
+    const membership = { ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor };
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').updateOne(membership, { $set: { role: 'viewer' } }));
+    await editor.reload();
+    await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    await expect(editor.getByRole('form', { name: 'Edit card' })).toHaveCount(0);
+    await expect(offer(editor)).toHaveCount(0);
+    assert.equal((await browserDescriptionDrafts(editor)).length, 1);
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').updateOne(membership, { $set: { role: 'editor' } }));
+    await editor.clock.setFixedTime(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
+    await editor.reload();
+    await expect(editor.getByRole('form', { name: 'Edit card' })).toBeVisible();
+    await expect.poll(() => browserDescriptionDrafts(editor)).toEqual([]);
+    await expect(offer(editor)).toHaveCount(0);
+    assert.ok(await editor.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+  });
+});

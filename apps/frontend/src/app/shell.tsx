@@ -2,6 +2,7 @@ import { PLANNER_VERSION } from '@planner/contracts';
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLoaderData, useLocation, useNavigation, useRouteLoaderData } from 'react-router';
 
+import { BoardClipboardProvider } from '../features/cards/card-clipboard-state.js';
 import { clearBoardRecipes } from '../features/boards/board-filter-store.js';
 import { InboxLink } from '../features/discussions/inbox-link.js';
 import { WorkspaceSidebar } from '../features/workspace/workspace-navigation.js';
@@ -117,7 +118,8 @@ export function AppShell() {
       </aside>
       <main className="main-content" id="main-content" tabIndex={-1}>
         {navigation.state !== 'idle' && <p className="navigation-status" role="status">Loading…</p>}
-        {!changingNativePage && <Outlet context={{ deniedBoard, refuseBoard, suspendBoard } satisfies BoardReadRefusal} key={actorScope} />}
+        <BoardClipboardProvider key={actorScope}>{!changingNativePage &&
+          <Outlet context={{ deniedBoard, refuseBoard, suspendBoard } satisfies BoardReadRefusal} />}</BoardClipboardProvider>
       </main>
     </div>
   );

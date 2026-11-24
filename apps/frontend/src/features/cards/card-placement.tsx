@@ -54,8 +54,9 @@ interface PlacementPage {
   problem?: string;
 }
 
-export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
+export function CardPlacementDialog({ state, mode, onClose, onPlace, destination, title }: {
   state: CardPlacement; mode: 'move' | 'restore' | 'duplicate'; onClose: () => void;
+  destination?: string; title?: string;
   onPlace: (toListId: string, beforeCardId: string | null, destinationVersion: number, destinationBoardId: string) => void;
 }) {
   const initiallySameList = mode !== 'restore' && state.destinations.some(({ id }) => id === state.source.id);
@@ -70,8 +71,8 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   const { pathname, search } = useLocation();
   const signIn = workspaceSignInPath(pathname + search);
   const { card } = state;
-  const action = mode === 'move' ? 'Move card' : mode === 'duplicate' ? 'Duplicate card' : 'Restore card';
-  const boardId = destinationBoard?.id ?? card.boardId;
+  const action = title ?? (mode === 'move' ? 'Move card' : mode === 'duplicate' ? 'Duplicate card' : 'Restore card');
+  const boardId = destination ?? destinationBoard?.id ?? card.boardId;
   const destinations = destinationBoard === undefined ? [] : destinationBoard
     ? destinationBoard.lists.filter(({ kind }) => kind === 'active' || kind === 'closed') : state.destinations;
   const destinationVersion = destinations.find(({ id }) => id === to)?.orderVersion;
@@ -139,7 +140,7 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   return <WorkspaceDialog title={action} onClose={onClose}>
     <form className="project-form" method="post" onSubmit={submit}>
       {mode === 'restore' && <p>Choose an active or closed list before restoring.</p>}
-      {mode !== 'restore' && <TransferBoardPicker sourceBoardId={card.boardId} onPick={pickBoard} onUnavailable={() => setAccessLost(true)} />}
+      {mode !== 'restore' && !destination && <TransferBoardPicker sourceBoardId={card.boardId} onPick={pickBoard} onUnavailable={() => setAccessLost(true)} />}
       <label>Destination list<select value={to} required disabled={!destinations.length} ref={(element) => { if (element) element.autofocus = true; }}
         onChange={(event) => { setTo(event.target.value); setBefore(''); }}>
         <option value="" disabled>Choose a list</option>

@@ -24,3 +24,8 @@
 
 .card-editing-fields { display: grid; gap: .75rem; border: 0; padding: 0; margin: 0; min-width: 0; }
 .card-rich-input pre, .card-rendered-description pre { max-width: 100%; overflow: auto; }
+
+.draft-comparison { display: grid; gap: .75rem; min-inline-size: 0; }
+.draft-comparison dd { margin: .25rem 0 0; }
+.draft-comparison pre, .card-editing .project-confirm pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.card-description-recovery textarea { display: block; inline-size: 100%; }
