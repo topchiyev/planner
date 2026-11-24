@@ -3,9 +3,9 @@ import {
   type AccountApproval, type BrowserSession,
 } from '@planner/contracts';
 import { useState, type FormEvent } from 'react';
-import { useLoaderData, useRouteLoaderData, useSearchParams, type LoaderFunctionArgs } from 'react-router';
+import { useLoaderData, useRevalidator, useRouteLoaderData, useSearchParams, type LoaderFunctionArgs } from 'react-router';
 import { PageHeading } from '../../app/page-state.js';
-import { accountError, accountMutation, accountRequest } from './account-api.js';
+import { accountError, accountMutation, accountRequest, AccountRequestError } from './account-api.js';
 
 const accountsPath = '/api/v1/admin/accounts';
 const roleNames = { admin: 'Administrator', projectOwner: 'Project owner', boardUser: 'Board user' } as const;
@@ -20,6 +20,7 @@ export function loadAccountDirectory({ request }: LoaderFunctionArgs) {
 export function AccountDirectoryPage() {
   const directory = useLoaderData<typeof loadAccountDirectory>();
   const { csrfToken } = useRouteLoaderData('app-shell') as BrowserSession;
+  const { revalidate } = useRevalidator();
   const [search, setSearch] = useSearchParams();
   const [problem, setProblem] = useState('');
   const [notice, setNotice] = useState('');
@@ -31,8 +32,14 @@ export function AccountDirectoryPage() {
     setBusy(true);
     setProblem('');
     setNotice('');
-    try { await action(); } catch (error) { setProblem(accountError(error)); }
-    finally { setBusy(false); }
+    try {
+      await action();
+    } catch (error) {
+      setProblem(accountError(error));
+      if (error instanceof AccountRequestError && ['REVISION_CONFLICT', 'APPROVAL_UNAVAILABLE'].includes(String(error.code))) {
+        void revalidate();
+      }
+    } finally { setBusy(false); }
   }
 
   function provision(event: FormEvent<HTMLFormElement>) {
@@ -47,7 +54,7 @@ export function AccountDirectoryPage() {
         accountMutation('POST', csrfToken, input.data, crypto.randomUUID()));
       setNotice(`${account.name} was added. Request a password reset to enable sign-in.`);
       form.reset();
-      setSearch(new URLSearchParams(search));
+      void revalidate();
     });
   }
 
@@ -72,7 +79,7 @@ export function AccountDirectoryPage() {
       </section>}
       {directory.access === 'administration' && <section className="account-panel account-provision">
         <h2>Add an account</h2>
-        <form className="auth-form" onSubmit={provision}>
+        <form className="auth-form" method="post" onSubmit={provision}>
           <label>Full name<input name="name" required /></label>
           <label>Email<input name="email" type="email" required /></label>
           <label>Username<input name="username" /></label>
@@ -97,7 +104,7 @@ export function AccountDirectoryPage() {
             <p>{account.email}{account.username && ` · ${account.username}`}</p>
             <p>{signInNames[account.signIn]}</p>
             <div className="account-actions">
-              <form onSubmit={(event) => {
+              <form method="post" key={account.revision} onSubmit={(event) => {
                 event.preventDefault();
                 const role = siteRoleSchema.parse(new FormData(event.currentTarget).get('siteRole'));
                 if (role !== account.role) requestApproval(account.id, account.revision, { action: 'role', role });

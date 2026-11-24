@@ -5,15 +5,19 @@ import {
 import { useState, type FormEvent } from 'react';
 import { useLoaderData, useRouteLoaderData, type LoaderFunctionArgs } from 'react-router';
 import { PageHeading } from '../../app/page-state.js';
-import { accountError, accountMutation, accountRequest } from './account-api.js';
+import { accountError, accountMutation, accountRequest, AccountRequestError } from './account-api.js';
 
 const profilePath = '/api/v1/me/profile';
 const preferencesPath = '/api/v1/me/preferences';
 
-export async function loadAccountSettings({ request }: LoaderFunctionArgs) {
+export function loadAccountSettings({ request }: LoaderFunctionArgs) {
+  return readSettings(request.signal);
+}
+
+async function readSettings(signal?: AbortSignal) {
   const [profile, preferences] = await Promise.all([
-    accountRequest(profilePath, accountProfileSchema, { signal: request.signal }),
-    accountRequest(preferencesPath, accountPreferencesSchema, { signal: request.signal }),
+    accountRequest(profilePath, accountProfileSchema, { signal }),
+    accountRequest(preferencesPath, accountPreferencesSchema, { signal }),
   ]);
   return { profile, preferences: preferences.preferences };
 }
@@ -48,6 +52,7 @@ export function AccountSettingsPage() {
   const { csrfToken } = useRouteLoaderData('app-shell') as BrowserSession;
   const [profile, setProfile] = useState(initial.profile);
   const [preferences, setPreferences] = useState(initial.preferences);
+  const [preferencesRevision, setPreferencesRevision] = useState(initial.profile.revision);
   const [notice, setNotice] = useState('');
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
@@ -59,8 +64,20 @@ export function AccountSettingsPage() {
     setBusy(true);
     setNotice('');
     setProblem('');
-    try { await save(values); } catch (error) { setProblem(accountError(error)); }
-    finally { setBusy(false); }
+    try {
+      await save(values);
+    } catch (error) {
+      setProblem(accountError(error));
+      if (error instanceof AccountRequestError && error.code === 'REVISION_CONFLICT') {
+        try {
+          const latest = await readSettings();
+          setProfile(latest.profile);
+          setPreferences(latest.preferences);
+          setPreferencesRevision(latest.profile.revision);
+          setProblem('This account changed. The current settings have been loaded.');
+        } catch { setProblem('This account changed. Reload this page before trying again.'); }
+      }
+    } finally { setBusy(false); }
   }
 
   async function saveProfile(values: FormData) {
@@ -90,6 +107,7 @@ export function AccountSettingsPage() {
     const result = await accountRequest(preferencesPath, accountPreferencesSchema,
       accountMutation('PATCH', csrfToken, { revision: profile.revision, preferences: preferencesSchema.parse(next) }, crypto.randomUUID()));
     setPreferences(result.preferences);
+    setPreferencesRevision(result.revision);
     setProfile((previous) => ({ ...previous, revision: result.revision }));
     setNotice('Preferences saved.');
   }
@@ -124,7 +142,7 @@ export function AccountSettingsPage() {
         </section>
         <section className="account-panel">
           <h2>Preferences</h2>
-          <form className="auth-form" onSubmit={(event) => void submit(event, savePreferences)}>
+          <form className="auth-form" method="post" key={preferencesRevision} onSubmit={(event) => void submit(event, savePreferences)}>
             {Object.entries(preferenceChoices).map(([field, choice]) => (
               <label key={field}>{choice.label}<select name={field} defaultValue={preferences[field as keyof AccountPreferences] as string}>
                 {choice.options.map(([value, name]) => <option key={value} value={value}>{name}</option>)}

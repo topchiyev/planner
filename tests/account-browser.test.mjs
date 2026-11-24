@@ -51,10 +51,13 @@ async function signIn(page, host, email, pass) {
 test('Chromium manages accounts, completes local recovery, changes credentials and signs out', { timeout: 90_000 }, async () => {
   await withFixtureMongo(async (mongo) => {
     const f = await accountFixture(mongo);
-    const web = await tlsBridge(mongo.directory, f.startBrowser);
-    const local = await f.startOperator();
-    const browser = await chromium.launch();
+    let web;
+    let local;
+    let browser;
     try {
+      web = await tlsBridge(mongo.directory, f.startBrowser);
+      local = await f.startOperator();
+      browser = await chromium.launch();
       await f.seed('admin@example.test', { name: 'Site administrator', role: 'admin' });
       const admin = await browser.newContext({ ignoreHTTPSErrors: true });
       const page = await admin.newPage();
@@ -89,12 +92,23 @@ test('Chromium manages accounts, completes local recovery, changes credentials a
       const secondContext = await browser.newContext({ ignoreHTTPSErrors: true });
       const other = await secondContext.newPage();
       await signIn(other, web.origin, 'browser@example.test', password);
+      await other.getByRole('link', { name: 'Account settings' }).click();
+      await expect(other.getByRole('heading', { name: 'Account settings' })).toBeVisible();
       await member.getByRole('button', { name: 'Menu' }).click();
       await member.getByRole('link', { name: 'Account settings' }).click();
       await expect(member.getByRole('heading', { name: 'Account settings' })).toBeVisible();
       await member.getByLabel('Full name').fill('Updated Browser Member');
       await member.getByRole('button', { name: 'Save profile' }).click();
       await expect(member.getByRole('status')).toContainText('Profile saved');
+      await other.getByLabel('Full name').fill('Stale edit');
+      await other.getByRole('button', { name: 'Save profile' }).click();
+      await expect(other.getByRole('alert')).toContainText('The current settings have been loaded');
+      await expect(other.getByLabel('Full name')).toHaveValue('Updated Browser Member');
+      await other.getByLabel('Full name').fill('Retried edit');
+      await other.getByRole('button', { name: 'Save profile' }).click();
+      await expect(other.getByRole('status')).toContainText('Profile saved');
+      await member.reload();
+      await expect(member.getByLabel('Full name')).toHaveValue('Retried edit');
       await member.getByLabel('Projects view').selectOption('gridProjects');
       await member.getByRole('button', { name: 'Save preferences' }).click();
       await expect(member.getByRole('status')).toContainText('Preferences saved');
@@ -112,6 +126,6 @@ test('Chromium manages accounts, completes local recovery, changes credentials a
       await expect(member).toHaveURL(web.origin + '/sign-in');
       const response = await member.request.get(web.origin + '/api/v1/session');
       assert.equal(response.status(), 401);
-    } finally { await browser.close(); await local.close(); await web.close(); await f.close(); }
+    } finally { await Promise.allSettled([browser?.close(), local?.close(), web?.close(), f.close()]); }
   });
 });
