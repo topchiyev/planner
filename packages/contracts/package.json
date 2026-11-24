@@ -11,6 +11,10 @@
     "./native": {
       "types": "./dist/native-config.d.ts",
       "import": "./dist/native-config.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js"
     }
   },
   "scripts": {
