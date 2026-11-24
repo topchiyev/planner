@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "source": {
+    "release": "2.3.1",
+    "edition": "community",
+    "instanceId": "6ff68000-0000-4000-8000-000000000002",
+    "postgresVersion": "17.12",
+    "dumpSha256": "b5166a574096d36cf30fa1d583d3117631ab6d031447ea94f99bacafa2e08b3e"
+  },
+  "capturedAt": "2026-10-12T10:11:12.123Z",
+  "asset": {
+    "kind": "directory",
+    "snapshotId": "8c43ff00-0000-4000-8000-000000000002",
+    "manifestSha256": "af9330165a1479622c62c0357d6622f083a71bdd2136dc6e280f695ad81b8138"
+  }
+}
