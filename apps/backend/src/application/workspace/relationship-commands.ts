@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { relationshipCommands, type RelationshipCommand, type RelationshipCommandInput } from '@planner/contracts';
+import { relationshipCommands, type RelationshipBoardInvalidation, type RelationshipCommand, type RelationshipCommandInput } from '@planner/contracts';
 import type { Db } from 'mongodb';
 import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields, JournalOperation, PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
@@ -9,7 +9,7 @@ import {
 } from './relationship-policy.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecords } from './records.js';
 
-const invalidate = (boardId: string) => ({ boardId, kind: 'board.access-changed', payload: {} });
+const invalidate = (boardId: string): RelationshipBoardInvalidation => ({ boardId, kind: 'board.access-changed', payload: {} });
 
 async function projectEvents(records: WorkspaceRecords, generationId: string, projectId: string) {
   const boards = await records.aggregate<{ id: string }>('boards', {
@@ -70,7 +70,8 @@ export function createRelationshipJournalOperations(
   function define<K extends RelationshipCommand, Scope extends ProjectAccessContext | BoardAccessContext>(
     operation: K,
     authorize: (actor: WorkspaceAuthorization, input: RelationshipCommandInput<K>) => Promise<Scope>,
-    plan: (records: WorkspaceRecords, access: Scope, input: RelationshipCommandInput<K>, context: CommandPlanningContext) => Promise<CommandPlan>,
+    plan: (records: WorkspaceRecords, access: Scope, input: RelationshipCommandInput<K>, context: CommandPlanningContext,
+      actor: WorkspaceAuthorization) => Promise<CommandPlan>,
   ): JournalOperation {
     const parse = (input: unknown) => relationshipCommands[operation].input.parse(input) as RelationshipCommandInput<K>;
     return {
@@ -80,20 +81,22 @@ export function createRelationshipJournalOperations(
         const parsed = parse(input);
         const actor = await resolveActor(context);
         const access = await authorize(actor, parsed);
-        const result = await plan(createWorkspaceRecords(database, context.generationId), access, parsed, context);
+        const result = await plan(createWorkspaceRecords(database, context.generationId), access, parsed, context, actor);
+        relationshipCommands[operation].output.parse(result.result);
         return { ...result, audit: { ...result.audit, origin } };
       },
     };
   }
 
   return {
-    'projects.update': define('projects.update', projectEdit, async (records, access, input, context) => {
+    'projects.update': define('projects.update', projectEdit, async (records, access, input, context, actor): Promise<CommandPlan> => {
       const project = access.project;
-      const revision = requireRevision(project, input.revision, true)!;
+      const revision = requireRevision(project, input.expectedRevision, true)!;
       const fields: JournalFields = { updatedAt: context.timestamp };
       if (input.name !== undefined) fields.name = input.name;
       if (input.description !== undefined) fields.description = input.description;
       if (input.hidden !== undefined) fields.hidden = input.hidden;
+      let retainsRead = true;
       if (input.type !== undefined && input.type !== project.type) {
         fields.type = input.type;
         fields.ownerProjectManagerId = null;
@@ -101,11 +104,16 @@ export function createRelationshipJournalOperations(
           const edge = await soleEligibleManager(records, context.generationId, input.id);
           if (!edge) throw new RelationshipError('ownership');
           fields.ownerProjectManagerId = edge.id;
+          retainsRead = !!access.manager || (await actor.visibleBoards({ ...access, sharedAdmin: false })).length > 0;
         }
       }
       return {
         effects: [{ kind: 'update', collection: 'projects', id: input.id, revision, fields }],
-        result: { data: { id: input.id, revision: revision + 1 } },
+        result: { data: retainsRead ? {
+          id: input.id, revision: revision + 1, name: input.name ?? project.name,
+          description: input.description === undefined ? project.description ?? null : input.description,
+          hidden: input.hidden ?? project.hidden, type: input.type ?? project.type,
+        } : { id: input.id, applied: true } },
         audit: { action: 'projects.update', resourceId: input.id, resourceType: 'project' },
         events: await projectEvents(records, context.generationId, input.id),
       };
@@ -115,29 +123,35 @@ export function createRelationshipJournalOperations(
         if (!availableAccount(await records.get('users', input.userId), 'manager')) throw new RelationshipError('target');
         if (await records.first('projectManagers', edgeFilter('projectId', input.id, input.userId))) throw new RelationshipError('duplicate');
         const id = randomUUID();
+        const parent = touchRevision('projects', access.project, context.timestamp, input.expectedRevision);
         return {
           effects: [
             { kind: 'insert', collection: 'projectManagers', id, revision: 1,
               fields: { projectId: input.id, userId: input.userId, createdAt: context.timestamp } },
-            touchRevision('projects', access.project, context.timestamp),
+            parent,
           ],
-          result: { data: { id, revision: 1 } },
+          result: { data: {
+            id, userId: input.userId, projectId: input.id, revision: 1, parentRevision: parent.revision + 1,
+          } },
           audit: { action: 'projects.addManager', resourceId: input.id, resourceType: 'project', detail: { userId: input.userId } },
           events: await projectEvents(records, context.generationId, input.id),
         };
       }),
     'projects.removeManager': define('projects.removeManager', (scope, input) => managerAccess(scope, input.id),
-      async (records, access, input, context) => {
+      async (records, access, input, context, actor) => {
         const edge = await records.first('projectManagers', edgeFilter('projectId', input.id, input.userId));
         if (!edge) throw new WorkspaceAccessError('missing');
-        const revision = requireRevision(edge, input.revision);
+        const revision = requireRevision(edge, input.expectedRevision);
         if ((await managerEdges(records, context.generationId, input.id)).length < 2) throw new RelationshipError('lastManager');
+        const parent = touchRevision('projects', access.project, context.timestamp);
+        const retainsRead = input.userId !== context.actorId || access.sharedAdmin
+          || (await actor.visibleBoards({ ...access, manager: null })).length > 0;
         return {
           effects: [
             { kind: 'delete', collection: 'projectManagers', id: edge.id, revision },
-            touchRevision('projects', access.project, context.timestamp),
+            parent,
           ],
-          result: { data: { id: edge.id } },
+          result: { data: { parentRevision: retainsRead ? parent.revision + 1 : null } },
           audit: { action: 'projects.removeManager', resourceId: input.id, resourceType: 'project', detail: { userId: input.userId } },
           events: await projectEvents(records, context.generationId, input.id),
         };
@@ -147,14 +161,17 @@ export function createRelationshipJournalOperations(
         if (!availableAccount(await records.get('users', input.userId), 'member')) throw new RelationshipError('target');
         if (await records.first('boardMembers', edgeFilter('boardId', input.id, input.userId))) throw new RelationshipError('duplicate');
         const id = randomUUID();
+        const parent = touchRevision('boards', access.board, context.timestamp, input.expectedRevision);
         return {
           effects: [
             { kind: 'insert', collection: 'boardMembers', id, revision: 1, fields: {
               boardId: input.id, userId: input.userId, role: input.role, canComment: input.canComment, createdAt: context.timestamp,
             } },
-            touchRevision('boards', access.board, context.timestamp),
+            parent,
           ],
-          result: { data: { id, revision: 1 } },
+          result: { data: {
+            id, userId: input.userId, boardId: input.id, revision: 1, parentRevision: parent.revision + 1, role: input.role, canComment: input.canComment,
+          } },
           audit: { action: 'boards.addMember', resourceId: input.id, resourceType: 'board', detail: { userId: input.userId } },
           events: [invalidate(input.id)],
         };
@@ -162,14 +179,18 @@ export function createRelationshipJournalOperations(
     'boards.updateMember': define('boards.updateMember', (scope, input) => boardManagement(scope, input.id),
       async (records, access, input, context) => {
         const edge = await memberEdge(records, input.id, input.userId);
-        const revision = requireRevision(edge, input.revision, true);
+        const revision = requireRevision(edge, input.expectedRevision, true);
         const membership = memberPermissions(input.role ?? edge.role, input.canComment, edge.role === 'viewer' && edge.canComment === true);
+        const parent = touchRevision('boards', access.board, context.timestamp);
         return {
           effects: [
             { kind: 'update', collection: 'boardMembers', id: edge.id, revision, fields: { ...membership, updatedAt: context.timestamp } },
-            touchRevision('boards', access.board, context.timestamp),
+            parent,
           ],
-          result: { data: { id: edge.id, revision: (revision ?? 0) + 1 } },
+          result: { data: {
+            id: edge.id, userId: input.userId, boardId: input.id, ...membership, revision: (revision ?? 0) + 1,
+            parentRevision: parent.revision + 1,
+          } },
           audit: { action: 'boards.updateMember', resourceId: input.id, resourceType: 'board', detail: { userId: input.userId } },
           events: [invalidate(input.id)],
         };
@@ -177,12 +198,14 @@ export function createRelationshipJournalOperations(
     'boards.removeMember': define('boards.removeMember', boardRemoval,
       async (records, access, input, context) => {
         const edge = await memberEdge(records, input.id, input.userId);
-        const revision = requireRevision(edge, input.revision);
+        const revision = requireRevision(edge, input.expectedRevision);
         const cleanup = await planMembershipCleanup(records, context.generationId, input.id, input.userId, context.timestamp);
         const removal: PlannedEffect = { kind: 'delete', collection: 'boardMembers', id: edge.id, revision };
+        const parent = touchRevision('boards', access.board, context.timestamp);
+        const retainsRead = !!access.project.manager || access.project.sharedAdmin;
         return {
-          effects: [removal, touchRevision('boards', access.board, context.timestamp), ...cleanup],
-          result: { data: { id: edge.id } },
+          effects: [removal, parent, ...cleanup],
+          result: { data: { parentRevision: retainsRead ? parent.revision + 1 : null } },
           audit: { action: 'boards.removeMember', resourceId: input.id, resourceType: 'board', detail: { userId: input.userId } },
           events: [invalidate(input.id)],
         };

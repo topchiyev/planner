@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { relationshipReads } from '@planner/contracts';
+import { relationshipBoardInvalidation, relationshipParentRevisionHeader, relationshipReads } from '@planner/contracts';
 import { csrfToken, readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
@@ -27,10 +27,18 @@ async function signIn(f, id) {
   return cookie;
 }
 
-function mutate(f, cookie, method, path, body, { key = randomUUID(), headers = {} } = {}) {
+function mutate(f, cookie, method, path, { revision = 1, ...body }, { key = randomUUID(), headers = {} } = {}) {
   return f.call(path, cookie, { method, body, headers: {
-    Origin: origin, 'X-CSRF-Token': csrfToken(readSessionCookie(cookie)), 'Idempotency-Key': key, ...headers,
+    Origin: origin, 'X-CSRF-Token': csrfToken(readSessionCookie(cookie)), 'Idempotency-Key': key,
+    'If-Match': '"' + (revision ?? 0) + '"', ...headers,
   } });
+}
+
+async function removed(response, parentRevision) {
+  const result = await response;
+  await expectResponse(result, 204);
+  assert.equal(result.data, '');
+  assert.equal(result.headers[relationshipParentRevisionHeader], parentRevision === undefined ? undefined : String(parentRevision));
 }
 
 async function expectResponse(response, status, code) {
@@ -77,37 +85,43 @@ test('project manager changes preserve ownership, authorize every field and reco
       await expectResponse(f.call(project(ids.hiddenProject) + '/manager-candidates?cursor=' + first.page.nextCursor, admin), 422);
       await expectResponse(mutate(f, admin, 'POST', manager(ids.sharedProject), { userId: ids.viewer }), 422, 'INELIGIBLE_ACCOUNT');
 
+      await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 1, name: 'x'.repeat(129) }), 422, 'INVALID_REQUEST');
       const releaseKey = randomUUID();
       await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 1, type: 'shared' }, { key: releaseKey }), 200);
       const replay = await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 1, type: 'shared' }, { key: releaseKey }), 200);
-      assert.deepEqual(replay.data, { id: ids.privateProject, revision: 2 });
+      assert.deepEqual(replay.data, { id: ids.privateProject, revision: 2, name: 'Private fixture project', description: null,
+        type: 'shared', hidden: false });
       await expectResponse(f.call(board(sibling), admin), 200);
       await expectResponse(f.call(board(sibling), viewer), 404);
       await expectResponse(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.privateOwner), { revision: 1 }), 409, 'LAST_PROJECT_MANAGER');
-      const added = await expectResponse(mutate(f, admin, 'POST', manager(ids.privateProject), { userId: ids.createOnlyOwner }), 200);
+      const added = await expectResponse(mutate(f, admin, 'POST', manager(ids.privateProject), { userId: ids.createOnlyOwner, revision: 2 }), 201);
+      assert.equal(added.data.parentRevision, 3);
       assert.match(added.data.id, /^[\da-f-]+-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u);
       await expectResponse(mutate(f, owner, 'POST', manager(ids.privateProject), { userId: ids.createOnlyOwner }), 409, 'RELATIONSHIP_EXISTS');
       await expectResponse(f.call(board(sibling), newcomer), 200);
       await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 2, type: 'private' }), 409, 'REVISION_CONFLICT');
       await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 3, type: 'private' }), 409, 'OWNER_REQUIRES_SOLE_MANAGER');
 
-      await expectResponse(mutate(f, newcomer, 'POST', member(ids.privateBoard), { userId: ids.createOnlyOwner, role: 'viewer' }), 200);
+      await expectResponse(mutate(f, newcomer, 'POST', member(ids.privateBoard), { userId: ids.createOnlyOwner, role: 'viewer' }), 201);
       const removalKey = randomUUID();
-      await expectResponse(mutate(f, newcomer, 'DELETE', manager(ids.privateProject, ids.createOnlyOwner), { revision: 1 }, { key: removalKey }), 200);
+      await removed(mutate(f, newcomer, 'DELETE', manager(ids.privateProject, ids.createOnlyOwner), { revision: 1 }, { key: removalKey }), 4);
       await expectResponse(mutate(f, newcomer, 'DELETE', manager(ids.privateProject, ids.createOnlyOwner), { revision: 1 }, { key: removalKey }), 403);
       await expectResponse(f.call(board(sibling), newcomer), 404);
       await expectResponse(f.call(board(ids.privateBoard), newcomer), 200);
       await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 4, type: 'private' }), 403);
 
       await f.insert('projectManagers', disabledManager, { projectId: ids.privateProject, userId: ids.disabledMember });
-      await expectResponse(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.privateOwner), { revision: 1 }), 200);
+      await removed(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.privateOwner), { revision: 1 }), 5);
       await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 5, type: 'private' }), 409, 'OWNER_REQUIRES_SOLE_MANAGER');
-      await expectResponse(mutate(f, admin, 'POST', manager(ids.privateProject), { userId: ids.privateOwner }), 200);
-      await expectResponse(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.disabledMember), { revision: 1 }), 200);
+      await expectResponse(mutate(f, admin, 'POST', manager(ids.privateProject), { userId: ids.privateOwner, revision: 5 }), 201);
+      await removed(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.disabledMember), { revision: 1 }), 7);
       const sole = await list(f, admin, manager(ids.privateProject), 'projects.managers');
       assert.equal(sole.data.length, 1);
       const ownerEdge = sole.data[0].id;
-      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 7, type: 'private' }), 200);
+      const conversionKey = randomUUID();
+      const confirmation = await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 7, type: 'private' }, { key: conversionKey }), 200);
+      assert.deepEqual(confirmation.data, { id: ids.privateProject, applied: true });
+      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 7, type: 'private' }, { key: conversionKey }), 404);
       const converted = await f.db.collection('projects').findOne({ ...f.scope, id: ids.privateProject });
       assert.equal(converted.ownerProjectManagerId, ownerEdge);
       assert.equal(converted.revision, 8);
@@ -116,13 +130,21 @@ test('project manager changes preserve ownership, authorize every field and reco
       await expectResponse(f.call(card(ids.activeCard), viewer), 200);
       assert.ok(await f.db.collection('projectManagers').findOne({ generationId: f.stagedGenerationId, id: ids.privateOwnerManager }));
 
-      const changes = await f.db.collection('auditEntries').find({ ...f.scope, action: 'projects.update' }).toArray();
+      await expectResponse(mutate(f, owner, 'POST', member(ids.hiddenBoard), { userId: ids.admin, role: 'viewer' }), 201);
+      const retained = await expectResponse(mutate(f, admin, 'PATCH', project(ids.hiddenProject), { revision: 1, type: 'private' }), 200);
+      assert.deepEqual(retained.data, { id: ids.hiddenProject, revision: 2, name: 'Hidden fixture project',
+        description: null, hidden: true, type: 'private' });
+      await expectResponse(f.call(board(ids.hiddenBoard), admin), 200);
+
+      const changes = await f.db.collection('auditEntries').find({
+        ...f.scope, action: 'projects.update', resourceId: ids.privateProject,
+      }).toArray();
       assert.equal(changes.length, 2);
       for (const audit of changes) {
         const events = await f.db.collection('events').find({ ...f.scope, commandId: audit.commandId }).toArray();
         assert.deepEqual(new Set(events.map(({ boardId }) => boardId)), new Set([ids.privateBoard, sibling]));
         assert.equal(events.length, 2);
-        for (const event of events) assert.deepEqual(event.payload, {});
+        for (const { boardId, kind, payload } of events) relationshipBoardInvalidation.parse({ boardId, kind, payload });
       }
     } finally { await f.close(); }
   });
@@ -163,10 +185,19 @@ test('board membership scope respects low-role self-add, exact roster scope and 
       await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer' }, { key: 'invalid' }), 422);
       await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.disabledMember, role: 'editor' }), 422, 'INELIGIBLE_ACCOUNT');
 
+      for (const header of ['1', 'W/"1"', '"0"', '"01"', '*', '"1", "2"', '"9007199254740992"']) {
+        await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer' },
+          { headers: { 'If-Match': header } }), 422, 'INVALID_REQUEST');
+      }
+      await expectResponse(f.call(endpoint, low, { method: 'POST', body: { userId: ids.commentingViewer, role: 'viewer', revision: 1 },
+        headers: { Origin: origin, 'X-CSRF-Token': csrfToken(readSessionCookie(low)), 'Idempotency-Key': randomUUID() } }), 422);
+      await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer', expectedRevision: 1 }), 422);
       const key = randomUUID();
-      const added = await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer' }, { key }), 200);
-      const replay = await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer', canComment: false }, { key }), 200);
+      const added = await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer' }, { key }), 201);
+      const replay = await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer', canComment: false }, { key }), 201);
       assert.deepEqual(replay, added);
+      assert.equal(added.data.parentRevision, 2);
+      assert.equal(added.data.canComment, false);
       await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer', canComment: true }, { key }), 409, 'IDEMPOTENCY_CONFLICT');
       assert.equal((await expectResponse(f.call(board(ids.sharedBoard), low), 200)).data.revision, 2);
       const roster = await list(f, low, endpoint, 'boards.members');
@@ -180,7 +211,8 @@ test('board membership scope respects low-role self-add, exact roster scope and 
       assert.equal((await list(f, managerCookie, endpoint, 'boards.members')).data.find(({ id }) => id === fixtureId(106)).revision, null);
       const edit = await expectResponse(mutate(f, managerCookie, 'PATCH', endpoint + '/' + ids.firstEditor,
         { revision: null, role: 'viewer', canComment: true }), 200);
-      assert.deepEqual(edit.data, { id: fixtureId(106), revision: 1 });
+      assert.deepEqual(edit.data, { id: fixtureId(106), boardId: ids.sharedBoard, userId: ids.firstEditor,
+        revision: 1, parentRevision: 3, role: 'viewer', canComment: true });
       await expectResponse(mutate(f, managerCookie, 'PATCH', endpoint + '/' + ids.firstEditor,
         { revision: null, role: 'editor' }), 409, 'REVISION_CONFLICT');
       await expectResponse(mutate(f, managerCookie, 'PATCH', endpoint + '/' + ids.firstEditor,
@@ -191,19 +223,22 @@ test('board membership scope respects low-role self-add, exact roster scope and 
       assert.equal(after.canComment, null);
       assert.equal(after.revision, 2);
 
-      const removal = await expectResponse(mutate(f, low, 'DELETE', endpoint + '/' + ids.commentingViewer, { revision: 1 }), 200);
-      assert.deepEqual(removal.data, { id: added.data.id });
+      await removed(mutate(f, low, 'DELETE', endpoint + '/' + ids.commentingViewer, { revision: 1 }), 5);
       const surviving = await expectResponse(f.call(board(ids.sharedBoard), low), 200);
       assert.equal(surviving.data.revision, 5);
       assert.equal(surviving.data.permissions.canManage, true);
       assert.equal(surviving.data.permissions.canFollow, false);
-      const adminEdge = await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.admin, role: 'viewer' }), 200);
-      await expectResponse(mutate(f, admin, 'DELETE', endpoint + '/' + ids.admin, { revision: 1 }), 200);
+      await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.admin, role: 'viewer', revision: 4 }), 409, 'REVISION_CONFLICT');
+      const adminEdge = await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.admin, role: 'viewer', revision: 5 }), 201);
+      await removed(mutate(f, admin, 'DELETE', endpoint + '/' + ids.admin, { revision: 1 }), 7);
       assert.ok(adminEdge.data.id);
       const inherited = await expectResponse(f.call(board(ids.sharedBoard), admin), 200);
       assert.equal(inherited.data.permissions.canManage, false);
       assert.equal(inherited.data.permissions.canFollow, false);
-      await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.admin, role: 'editor' }), 200);
+      await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.admin, role: 'editor', revision: 7 }), 201);
+      const selfRemovalKey = randomUUID();
+      await removed(mutate(f, editor, 'DELETE', endpoint + '/' + ids.firstEditor, { revision: 2 }, { key: selfRemovalKey }));
+      await expectResponse(mutate(f, editor, 'DELETE', endpoint + '/' + ids.firstEditor, { revision: 2 }, { key: selfRemovalKey }), 404);
       await f.gate.runCommand(() => f.db.collection('users').updateOne({ ...f.scope, id: ids.admin }, { $set: { role: 'boardUser' } }));
       assert.equal((await expectResponse(f.call(board(ids.sharedBoard), admin), 200)).data.permissions.canEdit, true);
       await expectResponse(f.call(board(ids.hiddenBoard), admin), 404);
@@ -221,6 +256,9 @@ test('interrupted multi-batch removal replays exact cleanup without returning st
     const siblingBoard = fixtureId(829);
     const siblingList = fixtureId(836);
     const siblingCard = fixtureId(837);
+    const taskOnlyCard = fixtureId(851);
+    const taskOnlyChecklist = fixtureId(852);
+    const taskOnlyTask = fixtureId(853);
     const targetTask = fixtureId(824);
     const otherUserTask = fixtureId(825);
     const cardLinks = [ids.activeCard, ids.archivedStory, ids.trashedCard];
@@ -231,6 +269,10 @@ test('interrupted multi-batch removal replays exact cleanup without returning st
       await f.insert('lists', siblingList, { boardId: siblingBoard, kind: 'active', rank: '1024', name: 'Sibling active' });
       await f.insert('cards', siblingCard, { boardId: siblingBoard, listId: siblingList, type: 'project', kind: 'board',
         rank: '1024', name: 'Sibling card' });
+      await f.insert('cards', taskOnlyCard, { boardId: ids.privateBoard, listId: ids.privateActiveList, type: 'project', kind: 'board',
+        rank: '2048', name: 'Task assignment only' });
+      await f.insert('checklists', taskOnlyChecklist, { cardId: taskOnlyCard, name: 'Task assignment only', rank: '1024' });
+      await f.insert('tasks', taskOnlyTask, { checklistId: taskOnlyChecklist, name: 'Task assignment only', assigneeId: ids.viewer });
       await f.insert('attachments', attachment, { cardId: ids.activeCard, name: 'Private link', kind: 'link', url: 'https://example.test/fixture' });
       await f.insert('checklists', archiveChecklist, { cardId: historicalCards[0], name: 'Archived work', rank: '1024' });
       await f.insert('checklists', trashChecklist, { cardId: historicalCards[1], name: 'Trashed work', rank: '1024' });
@@ -264,7 +306,7 @@ test('interrupted multi-batch removal replays exact cleanup without returning st
       const owner = await signIn(f, ids.privateOwner);
       await expectResponse(f.call(card(ids.activeCard), viewer), 200);
       const token = readSessionCookie(viewer);
-      const commandInput = { id: ids.privateBoard, userId: ids.viewer, revision: 1 };
+      const commandInput = { id: ids.privateBoard, userId: ids.viewer, expectedRevision: 1 };
       const interruption = new Error('test interruption after first durable batch');
       const journal = new CommandJournal(f.gate, f.db, f.installationId, {
         operations: createRelationshipJournalOperations(f.db, () => resolveBrowserWorkspace(f.db, f.installationId, token, f.now())),
@@ -296,9 +338,14 @@ test('interrupted multi-batch removal replays exact cleanup without returning st
       assert.equal(own.data.revision, 2);
       assert.equal((await expectResponse(f.call(board(ids.privateBoard), owner), 200)).data.revision, 2);
       const cards = await f.db.collection('cards').find({ ...f.scope,
-        id: { $in: [...cardLinks, ids.sharedTarget, siblingCard] } }).toArray();
-      assert.equal(cards.length, 5);
-      for (const { id, revision } of cards) assert.equal(revision, cardLinks.includes(id) ? 2 : 1);
+        id: { $in: [...cardLinks, ids.sharedTarget, siblingCard, taskOnlyCard] } }).toArray();
+      assert.equal(cards.length, 6);
+      for (const { id, revision } of cards) assert.equal(revision, [...cardLinks, taskOnlyCard].includes(id) ? 2 : 1);
+      const checklists = await f.db.collection('checklists').find({ ...f.scope,
+        id: { $in: [ids.checklist, archiveChecklist, trashChecklist, otherChecklist, taskOnlyChecklist] } }).toArray();
+      assert.equal(checklists.length, 5);
+      for (const { id, revision } of checklists) assert.equal(revision, id === otherChecklist ? 1 : 2);
+      assert.equal((await f.db.collection('tasks').findOne({ ...f.scope, id: taskOnlyTask })).assigneeId, null);
 
       assert.equal(await f.db.collection('boardFollows').countDocuments({ ...departing, boardId: ids.privateBoard }), 0);
       assert.equal(await f.db.collection('boardFollows').countDocuments({ ...departing, boardId: ids.sharedBoard }), 1);
@@ -332,6 +379,35 @@ test('interrupted multi-batch removal replays exact cleanup without returning st
       const events = await f.db.collection('events').find({ ...f.scope, commandId: command.id }).toArray();
       assert.deepEqual(events.map(({ boardId, kind, payload }) => ({ boardId, kind, payload })),
         [{ boardId: ids.privateBoard, kind: 'board.access-changed', payload: {} }]);
+    } finally { await f.close(); }
+  });
+});
+
+test('relationship commands recheck the session epoch and active generation before any intent', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    let invalidate;
+    const f = await makeWorkspaceAccessFixture(mongo, {
+      async beforeAdmission({ session, gate }) {
+        if (!invalidate || session?.account.id !== ids.projectManager) return;
+        const change = invalidate;
+        invalidate = undefined;
+        await gate.runCommand(change);
+      },
+    });
+    try {
+      const endpoint = member(ids.sharedBoard);
+      const input = { userId: ids.secondEditor, role: 'editor' };
+      const first = await signIn(f, ids.projectManager);
+      invalidate = () => f.db.collection('users').updateOne({ ...f.scope, id: ids.projectManager },
+        { $inc: { 'localAuth.credentialsVersion': 1 } });
+      await expectResponse(mutate(f, first, 'POST', endpoint, input), 401, 'UNAUTHENTICATED');
+
+      const second = await signIn(f, ids.projectManager);
+      invalidate = () => f.db.collection('installation').updateOne({ _id: 'installation', installationId: f.installationId },
+        { $set: { activeGenerationId: f.stagedGenerationId } });
+      await expectResponse(mutate(f, second, 'POST', endpoint, input), 401, 'UNAUTHENTICATED');
+      assert.equal(await f.db.collection('commands').countDocuments({ operationId: 'boards.addMember' }), 0);
+      assert.equal(await f.db.collection('boardMembers').countDocuments({ boardId: ids.sharedBoard, userId: ids.secondEditor }), 0);
     } finally { await f.close(); }
   });
 });

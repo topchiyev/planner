@@ -5,26 +5,41 @@ import { workspaceData, workspacePage, workspacePageQuery, workspacePersonSchema
 const id = z.strictObject({ id: publicIdSchema });
 const target = id.extend({ userId: publicIdSchema });
 const edgeRevision = revisionSchema.nullable();
-const requiredRevision = target.extend({ revision: edgeRevision });
+const requiredRevision = target.extend({ expectedRevision: edgeRevision });
+const parentRevision = target.extend({ expectedRevision: revisionSchema });
 const role = z.enum(['editor', 'viewer']);
 
 const projectUpdate = id.extend({
-  revision: revisionSchema,
-  name: z.string().trim().min(1).max(200).optional(),
+  expectedRevision: revisionSchema,
+  name: z.string().trim().min(1).max(128).optional(),
   description: z.string().max(8000).nullable().optional(),
   hidden: z.boolean().optional(),
   type: workspaceProjectType.optional(),
 }).refine(({ name, description, hidden, type }) => [name, description, hidden, type].some((value) => value !== undefined));
 
-const boardMemberAdd = target.extend({ role, canComment: z.boolean().nullable().optional() })
+const boardMemberAdd = parentRevision.extend({ role, canComment: z.boolean().nullable().optional() })
   .refine((value) => value.role === 'viewer' ? value.canComment !== null : typeof value.canComment !== 'boolean')
   .transform((value) => ({ ...value, canComment: value.role === 'editor' ? null : value.canComment ?? false }));
 
 const boardMemberUpdate = requiredRevision.extend({ role: role.optional(), canComment: z.boolean().nullable().optional() })
   .refine((value) => value.role !== undefined || value.canComment !== undefined);
 
-const identity = workspaceData(z.strictObject({ id: publicIdSchema }));
-const changed = workspaceData(z.strictObject({ id: publicIdSchema, revision: revisionSchema }));
+export const relationshipParentRevisionHeader = 'planner-parent-revision';
+export const removedRelationship = workspaceData(z.strictObject({ parentRevision: revisionSchema.nullable() }));
+export const relationshipBoardInvalidation = z.strictObject({
+  boardId: publicIdSchema, kind: z.literal('board.access-changed'), payload: z.strictObject({}),
+});
+export type RelationshipBoardInvalidation = z.infer<typeof relationshipBoardInvalidation>;
+const changedProject = workspaceData(z.union([
+  z.strictObject({
+    id: publicIdSchema, name: z.string(), description: z.string().nullable(), type: workspaceProjectType,
+    hidden: z.boolean(), revision: revisionSchema,
+  }),
+  id.extend({ applied: z.literal(true) }),
+]));
+const changedEdge = target.extend({ revision: revisionSchema, parentRevision: revisionSchema });
+const addedManager = workspaceData(changedEdge.extend({ projectId: publicIdSchema }));
+const changedMember = workspaceData(changedEdge.extend({ boardId: publicIdSchema, role, canComment: z.boolean().nullable() }));
 const manager = z.strictObject({
   id: publicIdSchema, userId: publicIdSchema, revision: edgeRevision, person: workspacePersonSchema.nullable(),
 });
@@ -33,8 +48,10 @@ const rosterInput = id.extend(workspacePageQuery);
 const candidatesInput = rosterInput.extend({ q: z.string().trim().max(120).default('') });
 
 function command<const ID extends string, const Route extends string, const Method extends 'POST' | 'PATCH' | 'DELETE',
-  I extends z.ZodType, O extends z.ZodType>(id: ID, method: Method, path: Route, input: I, output: O) {
-  return { id, kind: 'command', method, path, input, output } as const;
+  const Status extends 200 | 201 | 204, I extends z.ZodType, O extends z.ZodType>(
+  id: ID, method: Method, path: Route, status: Status, target: 'parent' | 'edge', input: I, output: O,
+) {
+  return { id, kind: 'command', method, path, status, target, input, output } as const;
 }
 
 function read<const ID extends string, const Route extends string, I extends z.ZodType, O extends z.ZodType>(
@@ -44,12 +61,14 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 }
 
 export const relationshipCommands = {
-  'projects.update': command('projects.update', 'PATCH', '/api/v1/projects/:id', projectUpdate, changed),
-  'projects.addManager': command('projects.addManager', 'POST', '/api/v1/projects/:id/managers', target, changed),
-  'projects.removeManager': command('projects.removeManager', 'DELETE', '/api/v1/projects/:id/managers/:userId', requiredRevision, identity),
-  'boards.addMember': command('boards.addMember', 'POST', '/api/v1/boards/:id/members', boardMemberAdd, changed),
-  'boards.updateMember': command('boards.updateMember', 'PATCH', '/api/v1/boards/:id/members/:userId', boardMemberUpdate, changed),
-  'boards.removeMember': command('boards.removeMember', 'DELETE', '/api/v1/boards/:id/members/:userId', requiredRevision, identity),
+  'projects.update': command('projects.update', 'PATCH', '/api/v1/projects/:id', 200, 'parent', projectUpdate, changedProject),
+  'projects.addManager': command('projects.addManager', 'POST', '/api/v1/projects/:id/managers', 201, 'parent', parentRevision, addedManager),
+  'projects.removeManager': command('projects.removeManager', 'DELETE', '/api/v1/projects/:id/managers/:userId', 204, 'edge',
+    requiredRevision, removedRelationship),
+  'boards.addMember': command('boards.addMember', 'POST', '/api/v1/boards/:id/members', 201, 'parent', boardMemberAdd, changedMember),
+  'boards.updateMember': command('boards.updateMember', 'PATCH', '/api/v1/boards/:id/members/:userId', 200, 'edge', boardMemberUpdate, changedMember),
+  'boards.removeMember': command('boards.removeMember', 'DELETE', '/api/v1/boards/:id/members/:userId', 204, 'edge',
+    requiredRevision, removedRelationship),
 } as const;
 
 export const relationshipReads = {

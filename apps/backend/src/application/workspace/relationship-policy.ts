@@ -80,8 +80,9 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
 }
 
 export function touchRevision(
-  collection: 'projects' | 'boards' | 'cards', row: Parameters<typeof rowRevision>[0] & { revision: number }, timestamp: string,
-): PlannedEffect {
-  const revision = requireRevision(row, row.revision, true);
+  collection: 'projects' | 'boards' | 'cards' | 'checklists', row: Parameters<typeof rowRevision>[0] & { revision: number },
+  timestamp: string, expected = row.revision,
+): Extract<PlannedEffect, { kind: 'update' }> & { revision: number } {
+  const revision = requireRevision(row, expected, true)!;
   return { kind: 'update', collection, id: row.id, revision, fields: { updatedAt: timestamp } };
 }
