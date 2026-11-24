@@ -128,13 +128,36 @@ for release in 2.3.0 2.3.1; do
     cp -R "$media/planka/$release/assets" "$stage/"
     chmod -R go-rwx "$stage"
     "$node" "$media/planka/snapshot.mjs" "$release" >"$stage/source.sql"
-    tar --format=posix -C "$stage" -czf "$work/capture-$suffix.tar.gz" manifest.json asset-manifest.json source.sql assets
+    dump_name=source.sql
+    if [ "$release" = 2.3.0 ]; then
+        sql postgres -c 'CREATE DATABASE planka_custom_seed'
+        sql planka_custom_seed <"$stage/source.sql"
+        env LD_LIBRARY_PATH="$pglib" "$pgbin/pg_dump" -h "$socket" -p "$port" -U fixture_owner \
+            --format=custom --no-owner --no-acl --file="$stage/source.dump" planka_custom_seed
+        dump_name=source.dump
+        python3 - "$stage" <<'PY2'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+manifest = root / 'manifest.json'
+capture = json.loads(manifest.read_text())
+with (root / 'source.dump').open('rb') as stream:
+    capture['source']['dumpSha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+manifest.write_text(json.dumps(capture))
+PY2
+    fi
+    tar --format=posix -C "$stage" -czf "$work/capture-$suffix.tar.gz" manifest.json asset-manifest.json "$dump_name" assets
     old_archive=$(sha256sum "$work/capture-$suffix.tar.gz")
     plannerctl migration prepare --archive "$work/capture-$suffix.tar.gz" --work-dir "$work/processed" --json >"$work/prepared-$suffix.json"
     [ "$(sha256sum "$work/capture-$suffix.tar.gz")" = "$old_archive" ]
     prepared=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["directory"])' "$work/prepared-$suffix.json")
     sql postgres -c "CREATE DATABASE $db"
-    sql "$db" <"$prepared/source.sql"
+    if [ "$dump_name" = source.dump ]; then
+        env LD_LIBRARY_PATH="$pglib" "$pgbin/pg_restore" -h "$socket" -p "$port" -U fixture_owner \
+            --exit-on-error --no-owner --no-acl -d "$db" "$prepared/source.dump"
+    else
+        sql "$db" <"$prepared/source.sql"
+    fi
     sql "$db" -c "REVOKE TEMPORARY ON DATABASE $db FROM PUBLIC; GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader"
     printf '[source-%s]\nisolated=true\nhost=%s\nport=%s\ndbname=%s\nuser=fixture_reader\n' \
         "$suffix" "$socket" "$port" "$db" >>/etc/planner/migration-pg.services
