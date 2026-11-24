@@ -1,10 +1,10 @@
 import {
-  generationIdSchema, nonnegativeIntegerSchema, publicIdSchema, revisionSchema, sourceAssetIdSchema, sourceEntitySchema,
+  generationIdSchema, nonnegativeIntegerSchema, normalizedEmailSchema, parseSourceIdentity, publicIdSchema, revisionSchema,
   sourceUuidSchema, utcInstantSchema,
 } from '@planner/contracts/storage';
 import { Long, type Db, type Filter } from 'mongodb';
 import { workspaceCollections, type WorkspaceCollection } from './catalog.js';
-import { decodeRank, encodeRank, workspaceKey } from './identity.js';
+import { decodeRank, encodeRank, readLongField, readStoredInstant, signedLongFields, storedInstantFields, workspaceKey } from './identity.js';
 import { readInstallation, requireCurrentSchema, verifyStorageSchema } from './schema.js';
 
 type Value = null | boolean | number | bigint | string | Date | Value[] | { [key: string]: Value };
@@ -23,9 +23,9 @@ const versionedCollections = new Set<WorkspaceCollection>([
   'users', 'projects', 'boards', 'boardPreferences', 'lists', 'cards', 'labels', 'checklists', 'tasks',
   'fieldGroups', 'fieldDefinitions', 'fieldValues', 'comments', 'attachments', 'projectBackgrounds',
 ]);
-const integer64Fields = new Set(['rank', 'historySequence', 'recoverySequence', 'sequence']);
+const integer64Fields = new Set<string>(signedLongFields);
 const sizeFields = new Set(['byteLength', 'batch']);
-const dates = new Set(['createdAt', 'updatedAt', 'listChangedAt', 'issuedAt', 'expiresAt', 'consumedAt', 'revokedAt', 'readAt']);
+const dates = new Set<string>(storedInstantFields);
 const nullablePublicReference = publicIdSchema.nullable();
 const publicReferences = new Set([
   'actorId', 'assigneeId', 'boardId', 'cardId', 'checklistId', 'commandId', 'fieldDefinitionId', 'fieldGroupId',
@@ -40,10 +40,8 @@ function validateField(field: string) {
 }
 
 function toInstant(value: unknown) {
-  if (value === null) return null;
   if (typeof value === 'string') return new Date(utcInstantSchema.parse(value));
-  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
-  throw new TypeError('Expected a UTC instant or explicit null.');
+  return readStoredInstant(value);
 }
 
 function encodeValue(value: unknown): unknown {
@@ -60,7 +58,7 @@ function encodeValue(value: unknown): unknown {
   throw new TypeError('Expected an explicit supported workspace field value.');
 }
 
-function encodeFields(collection: WorkspaceCollection, fields: Fields) {
+function encodeFields(fields: Fields) {
   if (!fields || Object.getPrototypeOf(fields) !== Object.prototype) {
     throw new TypeError('Expected workspace fields as an object.');
   }
@@ -71,15 +69,14 @@ function encodeFields(collection: WorkspaceCollection, fields: Fields) {
     if (dates.has(field)) return [field, toInstant(value)];
     if (sizeFields.has(field)) return [field, nonnegativeIntegerSchema.parse(value)];
     if (publicReferences.has(field)) return [field, nullablePublicReference.parse(value)];
-    if (field === 'normalizedEmail' || field === 'normalizedUsername' || field === 'providerGrantId') {
-      if (typeof value !== 'string' && (value !== null || field === 'normalizedEmail')) {
+    if (field === 'normalizedEmail') return [field, normalizedEmailSchema.parse(value)];
+    if (field === 'normalizedUsername' || field === 'providerGrantId') {
+      if (typeof value !== 'string' && value !== null) {
         throw new TypeError('Expected a concrete string or an explicit optional identifier.');
       }
       return [field, value];
     }
     if (field === 'sourceInstanceId') return [field, sourceUuidSchema.parse(value)];
-    if (collection === 'importIds' && field === 'sourceId') return [field, sourceAssetIdSchema.parse(value)];
-    if (collection === 'importIds' && field === 'entity') return [field, sourceEntitySchema.parse(value)];
     return [field, encodeValue(value)];
   }));
 }
@@ -117,12 +114,18 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
       const stored = await source.findOne(filter, { promoteLongs: false });
       if (!stored) return null;
       const { _id, generationId: storedGeneration, ...logical } = stored;
-      return Object.fromEntries(Object.entries(logical).map(([field, value]) => [field, decodeValue(value)]));
+      return Object.fromEntries(Object.entries(logical).map(([field, value]) => {
+        if (integer64Fields.has(field)) return [field, readLongField(field, value)];
+        if (dates.has(field)) return [field, readStoredInstant(value)];
+        if (field === 'revision') return [field, revisionSchema.parse(value)];
+        return [field, decodeValue(value)];
+      }));
     },
     async insert(name: WorkspaceCollection, id: string, fields: Fields, revision?: number) {
       const source = collection(name);
-      const record = encodeFields(name, fields);
+      const record = encodeFields(fields);
       if (name === 'users' && !record.normalizedEmail) throw new TypeError('A user requires a normalized email.');
+      if (name === 'importIds') parseSourceIdentity(record.entity, record.sourceId);
       const preparedRevision = revision === undefined && !versionedCollections.has(name) ? undefined
         : revisionSchema.parse(revision ?? 1);
       const key = workspaceKey(generationId, id);
@@ -136,7 +139,10 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
       const filter = lookup(id);
       const revision = revisionSchema.parse(expectedRevision);
       const nextRevision = revisionSchema.parse(revision + 1);
-      const changes = encodeFields(name, fields);
+      const changes = encodeFields(fields);
+      if (name === 'importIds' && ('entity' in changes || 'sourceId' in changes)) {
+        throw new TypeError('Source mapping identities cannot be updated.');
+      }
       await checkBinding();
       const result = await source.updateOne({ ...filter, revision },
         { $set: { ...changes, revision: nextRevision } }, { writeConcern });

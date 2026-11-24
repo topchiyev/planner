@@ -6,6 +6,7 @@ const uuidEnd = '[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 export const installationIdSchema = z.string().regex(new RegExp(`^${uuid}4${uuidEnd}$`, 'u'));
 export const generationIdSchema = installationIdSchema;
 export const publicIdSchema = z.string().regex(new RegExp(`^${uuid}[45]${uuidEnd}$`, 'u'));
+export const normalizedEmailSchema = z.string().min(1).refine((value) => value === value.trim());
 export const sourceUuidSchema = z.string().regex(new RegExp(`^${uuid}[1-8]${uuidEnd}$`, 'u'));
 export const sourceEntitySchema = z.string().regex(/^[a-z][A-Za-z0-9_-]{0,63}$/u);
 
@@ -25,3 +26,9 @@ export const signedInt64TextSchema = z.string().refine((value) => {
 }, { message: 'Expected a canonical signed 64-bit decimal integer.' });
 
 export const sourceAssetIdSchema = z.union([signedInt64TextSchema, sourceUuidSchema]);
+
+export function parseSourceIdentity(entity: unknown, sourceId: unknown) {
+  const name = sourceEntitySchema.parse(entity);
+  const schema = name === 'uploaded_file' ? sourceAssetIdSchema : signedInt64TextSchema;
+  return { entity: name, sourceId: schema.parse(sourceId) };
+}

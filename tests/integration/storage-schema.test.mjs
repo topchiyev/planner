@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Long } from 'mongodb';
+import { Double, Long } from 'mongodb';
 import {
   compareHistory, comparePlacement, decodeRank, encodeRank, legacyPublicId, newPublicId, workspaceKey,
 } from '../../apps/backend/dist/storage/identity.js';
@@ -51,8 +51,11 @@ test('public UUID, int64 and UTC ordering preserve exact source values', () => {
   const namespace = '11111111-2222-4333-8444-555555555555';
   assert.equal(legacyPublicId(namespace, 'card', '9007199254740992'), '8d24e457-5c7d-523f-ad55-737610a4cafa');
   assert.equal(legacyPublicId(namespace, 'card', '9007199254740993'), 'eb220104-0a49-50da-ab41-70a10761195b');
-  assert.equal(legacyPublicId(namespace, 'attachment', '03000000-0000-4000-8000-000000000001'),
-    'd74497b5-2426-5bb9-9170-d29b561b0567');
+  const fileId = '03000000-0000-4000-8000-000000000001';
+  assert.equal(legacyPublicId(namespace, 'uploaded_file', fileId), 'ed68ec9b-86d0-518c-a52e-fcab3cc61482');
+  assert.equal(legacyPublicId(namespace, 'attachment', '9007199254740993'), '8b29b745-104d-5828-be37-68683f19a160');
+  assert.throws(() => legacyPublicId(namespace, 'card', fileId));
+  assert.throws(() => legacyPublicId(namespace, 'attachment', fileId));
   assert.throws(() => legacyPublicId(namespace, 'attachment', '/some/path'));
   assert.throws(() => legacyPublicId(namespace, 'card', '09007199254740993'));
   assert.match(newPublicId(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
@@ -163,6 +166,40 @@ test('unknown identity, newer schema and incompatible legacy or index data fail 
   });
 });
 
+test('legacy numeric rank and sequence BSON must be Long before schema publication', { timeout: 30_000 }, async () => {
+  await withFixtureMongo(async ({ db }) => {
+    const installation = db.collection('installation');
+    await installation.insertOne(olderInstallation());
+    const list = { _id: workspaceKey(activeGenerationId, higherId), id: higherId,
+      generationId: activeGenerationId, boardId: usedId, kind: 'archive', rank: null };
+    await db.collection('lists').insertOne(list);
+    for (const [collectionName, field, invalid] of [
+      ['projects', 'rank', new Double(1.5)],
+      ['cards', 'historySequence', new Double(1)],
+      ['commands', 'recoverySequence', 1],
+      ['events', 'sequence', '9007199254740993'],
+    ]) {
+      const collection = db.collection(collectionName);
+      const row = { _id: workspaceKey(activeGenerationId, usedId), id: usedId, generationId: activeGenerationId };
+      await collection.insertOne({ ...row, [field]: invalid });
+      await assert.rejects(migrateStorageSchema(db, installationId),
+        (error) => error.code === 'records' && /signed BSON Long/u.test(error.message));
+      assert.equal((await installation.findOne({})).schemaVersion, 0);
+      assert.equal((await installation.findOne({})).schemaMigration.phase, 'indexes');
+      await collection.deleteOne({ _id: row._id });
+    }
+    const rawProject = { _id: workspaceKey(activeGenerationId, usedId), id: usedId, generationId: activeGenerationId };
+    const projects = db.collection('projects');
+    await projects.insertOne({ ...rawProject, createdAt: createdAt.toISOString() });
+    await assert.rejects(migrateStorageSchema(db, installationId), /BSON Date/u);
+    await projects.updateOne({ _id: rawProject._id }, { $set: { createdAt, revision: 0 } });
+    await assert.rejects(migrateStorageSchema(db, installationId), /revision is invalid/u);
+    await projects.updateOne({ _id: rawProject._id }, { $set: { revision: 1 } });
+    await migrateStorageSchema(db, installationId);
+    assert.deepEqual(await db.collection('lists').findOne({}), list);
+  });
+});
+
 test('verified active and privileged staged stores isolate reads, writes and generation-first uniqueness', { timeout: 35_000 }, async () => {
   await withFixtureMongo(async ({ db }) => {
     await db.collection('installation').insertOne(olderInstallation());
@@ -186,6 +223,10 @@ test('verified active and privileged staged stores isolate reads, writes and gen
     assert.equal((await staged.read('projects', usedId)).name, 'Staged');
     assert.equal((await db.collection('projects').findOne({ generationId: activeGenerationId }, { promoteLongs: false })).rank.toString(),
       '9007199254740993');
+    const activeProjectKey = workspaceKey(activeGenerationId, usedId);
+    await db.collection('projects').updateOne({ _id: activeProjectKey }, { $set: { rank: new Double(1.5) } });
+    await assert.rejects(active.read('projects', usedId), /BSON Long/u);
+    await db.collection('projects').updateOne({ _id: activeProjectKey }, { $set: { rank: encodeRank('9007199254740993') } });
     assert.equal(await active.update('projects', usedId, { name: 'Updated' }, 1), true);
     assert.equal(await active.update('projects', usedId, { name: 'Stale' }, 1), false);
     assert.equal((await staged.read('projects', usedId)).revision, 1);
@@ -195,7 +236,10 @@ test('verified active and privileged staged stores isolate reads, writes and gen
     assert.equal((await staged.read('projects', usedId)).name, 'Staged');
 
     const next = newPublicId;
-    await active.insert('users', next(), { normalizedEmail: 'one@example.test', normalizedUsername: null });
+    const localUser = next();
+    await active.insert('users', localUser, { normalizedEmail: 'one@example.test', normalizedUsername: null });
+    await assert.rejects(active.update('users', localUser, { normalizedEmail: '' }, 1));
+    assert.equal((await active.read('users', localUser)).normalizedEmail, 'one@example.test');
     await assert.rejects(active.insert('users', next(), { normalizedEmail: 'invalid@example.test', normalizedUsername: ['member'] }));
     await active.insert('users', next(), { normalizedEmail: 'two@example.test', normalizedUsername: null });
     await active.insert('users', next(), { normalizedEmail: 'three@example.test', normalizedUsername: 'member' });
@@ -236,6 +280,14 @@ test('verified active and privileged staged stores isolate reads, writes and gen
       await rejectDuplicate(active.insert(collection, next(), fields));
       await staged.insert(collection, next(), fields);
     }
+    const fileId = '03000000-0000-4000-8000-000000000001';
+    const mappingId = next();
+    await assert.rejects(active.insert('importIds', next(), { entity: 'card', sourceId: fileId }));
+    await assert.rejects(active.insert('importIds', next(), { entity: 'attachment', sourceId: fileId }));
+    await active.insert('importIds', mappingId, { entity: 'uploaded_file', sourceId: fileId });
+    await active.insert('importIds', next(), { entity: 'uploaded_file', sourceId: '9007199254740993' });
+    assert.equal((await active.read('importIds', mappingId)).sourceId, fileId);
+    await assert.rejects(active.update('importIds', mappingId, { sourceId: '12' }, 1), /mapping identities/u);
 
     await db.collection('installation').updateOne({ _id: 'installation' }, { $set: { activeGenerationId: stagedGenerationId } });
     await assert.rejects(active.read('projects', usedId), /bound workspace generation/u);
