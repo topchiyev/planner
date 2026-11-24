@@ -1195,8 +1195,9 @@ test('native checklists keep keyboard editing and private linked projections in 
     await edit.getByRole('button', { name: 'Save task' }).click();
     await expect(edit).toHaveCount(0);
     await expect(dispatch.getByText('Fixture second-editor', { exact: true })).toHaveCount(0);
-    await dispatch.getByRole('checkbox', { name: 'Complete Review the handoff' }).check();
-    await expect(dispatch.getByRole('checkbox', { name: 'Complete Review the handoff' })).toBeChecked();
+    const completion = dispatch.getByRole('checkbox', { name: 'Complete Review the handoff' });
+    await completion.click();
+    await expect(completion).toBeChecked();
 
     await review.getByRole('button', { name: 'Link a card', exact: true }).click();
     const linkForm = editor.getByRole('dialog', { name: 'Link a card' });

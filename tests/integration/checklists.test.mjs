@@ -119,6 +119,29 @@ test('checklists and ordinary tasks keep independent order versions, eligible as
     assert.equal(removed.headers[relationshipParentRevisionHeader], '10');
     assert.equal((await row(f, 'cards', ids.activeCard)).checklistOrderVersion, 4);
     assert.equal((await f.db.collection('checklists').findOne({ generationId: f.stagedGenerationId, id: ids.checklist })).revision, 1);
+
+    const full = [];
+    for (let groupIndex = 0; groupIndex < 4; groupIndex++) {
+      const checklistId = fixtureId(19010 + groupIndex);
+      await f.insert('checklists', checklistId, {
+        cardId: ids.activeCard, name: 'Front group ' + groupIndex, showOnFront: true, rank: String(groupIndex),
+      });
+      const taskIds = [];
+      for (let taskIndex = 0; taskIndex < 6; taskIndex++) {
+        const id = fixtureId(19020 + groupIndex * 6 + taskIndex);
+        await f.insert('tasks', id, {
+          checklistId, name: 'Task ' + taskIndex, rank: String(taskIndex),
+          linkedCardId: null, linkedUnavailable: taskIndex % 2 === 0 ? null : false,
+        });
+        taskIds.push(id);
+      }
+      full.push([checklistId, taskIds]);
+    }
+    const groupTasks = ({ id, tasks }) => [id, tasks.map((task) => task.id)];
+    const front = (await data(f.call(board(ids.privateBoard) + '/cards', viewer))).find(({ id }) => id === ids.activeCard).frontChecklists;
+    assert.deepEqual(front.map(groupTasks), full.slice(0, 3).map(([id, taskIds]) => [id, taskIds.slice(0, 5)]));
+    assert.deepEqual((await list()).filter(({ showOnFront }) => showOnFront).map(groupTasks), full);
+    assert.ok(front.every(({ tasks }) => tasks.every(({ kind }) => kind === 'task')));
   });
 });
 
@@ -142,6 +165,16 @@ test('linked tasks keep live ACL state, track historical target completion and r
     const byAssignee = board(ids.privateBoard) + '/cards?members=' + ids.viewer;
     assert.deepEqual(await data(f.call(byAssignee, viewer)), []);
     assert.deepEqual((await data(f.call(byAssignee, editor))).map(({ id }) => id), [ownerCard]);
+    const malformed = fixtureId(19003);
+    await f.insert('tasks', malformed, {
+      checklistId: ids.checklist, linkedCardId: null, linkedUnavailable: 'legacy', completed: true,
+      name: 'Restricted legacy row', assigneeId: ids.commentingViewer, rank: '1',
+    });
+    unavailable(await findTask(editor, malformed));
+    const malformedAssignee = board(ids.privateBoard) + '/cards?members=' + ids.commentingViewer;
+    assert.deepEqual(await data(f.call(malformedAssignee, editor)), []);
+    const malformedFront = (await data(f.call(board(ids.privateBoard) + '/cards', editor))).find(({ id }) => id === ownerCard).frontChecklists;
+    unavailable(malformedFront[0].tasks.find((task) => task.id === malformed));
     const linked = { linkedCardId: target };
     await expectResponse(change(f, owner, 'POST', group(ids.checklist) + '/tasks', 1, linked), 404);
     await expectResponse(change(f, editor, 'POST', group(ids.checklist) + '/tasks', 1, { ...linked, assigneeId: null }), 422, 'INVALID_REQUEST');

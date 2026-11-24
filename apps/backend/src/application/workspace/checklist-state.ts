@@ -9,6 +9,14 @@ import { canonicalRow, equal, rankSort, type WorkspaceRecords, type WorkspaceRow
 type Card = WorkspaceRow<'cards'>;
 type Checklist = WorkspaceRow<'checklists'>;
 export type Task = WorkspaceRow<'tasks'>;
+
+export const isUnavailableTask = (task: Pick<Task, 'linkedUnavailable'>) =>
+  task.linkedUnavailable != null && task.linkedUnavailable !== false;
+
+export const liveTaskMarker = { $or: [
+  { $in: [{ $type: '$linkedUnavailable' }, ['null', 'missing']] },
+  { $eq: ['$linkedUnavailable', false] },
+] };
 export type TaskWrite = RelationshipCommandInput<'tasks.update'>;
 
 export const checklistOrderVersion = (card: Pick<Card, 'checklistOrderVersion'>) => revisionSchema.parse(card.checklistOrderVersion ?? 1);
