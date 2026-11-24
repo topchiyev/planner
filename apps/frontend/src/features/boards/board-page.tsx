@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo } from 'react';
+import { useEffect, useLayoutEffect, useMemo, type MouseEvent } from 'react';
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRouteLoaderData, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
@@ -62,10 +62,6 @@ export function BoardPage() {
     if (viewKey && explicitView) saveBoardView(viewKey, explicitView);
   }, [viewKey, explicitView]);
 
-  useLayoutEffect(() => {
-    if (viewKey && !explicitView) saveBoardEntryView(viewKey, key, view);
-  }, [viewKey, key, explicitView, view]);
-
   useEffect(() => {
     if (inspectorOpen || concealed || !board) return;
     const opener = getCardOpener(board.recipeScope, pathname, search, key, routeState?.cardReturnKey);
@@ -75,6 +71,13 @@ export function BoardPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [inspectorOpen, concealed, board?.recipeScope, pathname, search, key, routeState?.cardReturnKey]);
+
+  function preserveDepartingView(event: MouseEvent<HTMLAnchorElement>) {
+    if (viewKey && !explicitView && !event.defaultPrevented && event.button === 0
+        && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      saveBoardEntryView(viewKey, key, view);
+    }
+  }
 
   function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: BoardView) {
     const nextParams = new URLSearchParams(params);
@@ -111,12 +114,12 @@ export function BoardPage() {
         <div className="board-controls">
           <nav aria-label="Board context" className="context-nav">
             {contexts.map((item) => (
-              <Link aria-current={item.id === context.id ? 'page' : undefined} key={item.id} to={boardLocation(item.id)}>{item.name}</Link>
+              <Link aria-current={item.id === context.id ? 'page' : undefined} key={item.id} onClick={preserveDepartingView} to={boardLocation(item.id)}>{item.name}</Link>
             ))}
           </nav>
           <nav aria-label="Board view" className="view-nav">
             {availableViews.map((item) => (
-              <Link aria-current={item.id === view ? 'page' : undefined} key={item.id} to={boardLocation(context.id, item.id)}>{item.name}</Link>
+              <Link aria-current={item.id === view ? 'page' : undefined} key={item.id} onClick={preserveDepartingView} to={boardLocation(context.id, item.id)}>{item.name}</Link>
             ))}
           </nav>
         </div>

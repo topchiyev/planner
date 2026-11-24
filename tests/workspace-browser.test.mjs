@@ -428,6 +428,9 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     const href = await dispatch.getAttribute('href');
     await dispatch.click();
     await expect(main.getByRole('heading', { name: 'Morning dispatch', level: 1 })).toBeVisible();
+    await owner.reload();
+    await expect(main.getByRole('navigation', { name: 'Board view' }).getByRole('link', { name: 'Kanban' }))
+      .toHaveAttribute('aria-current', 'page');
     await main.getByRole('button', { name: 'Board settings', exact: true }).click();
     const settings = owner.getByRole('dialog', { name: 'Board settings' });
     await settings.getByLabel('Default view').selectOption('grid');
