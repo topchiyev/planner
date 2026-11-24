@@ -3,8 +3,7 @@ import { type CardStopwatch, finiteListKindSchema, type RelationshipCommandInput
 import { revisionSchema } from '@planner/contracts/storage';
 import { decodeRank, encodeRank } from '../../storage/identity.js';
 import type { CommandPlan, CommandPlanningContext, JournalFields, PlannedEffect } from '../command-journal/operation.js';
-import { availableMedia, unavailableMedia } from '../media/records.js';
-import { requireCapability, WorkspaceAccessError, type CardAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { requireCapability, type CardAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { boardPreferences, boardPreferencesRow } from './board-state.js';
 import { cardClosed, cardDto, cardDue, cardStopwatch } from './card-state.js';
 import { planLinkedCardCompletion } from './linked-card-completion.js';
@@ -103,20 +102,6 @@ function transitionStopwatch(current: CardStopwatch, action: NonNullable<CardUpd
   throw new RelationshipError('cardStopwatch');
 }
 
-async function cardCover(records: WorkspaceRecords, access: CardAccessContext, id: string | null) {
-  if (id === null) return null;
-  const reference = await records.get('attachments', id);
-  if (!reference || reference.cardId !== access.card.id || reference.kind !== 'file' || reference.deletedAt != null) {
-    throw new WorkspaceAccessError('missing');
-  }
-  if (reference.availability === unavailableMedia) return id;
-  if (reference.availability === availableMedia && reference.blobDigest && await records.first('blobs', {
-    digest: reference.blobDigest, lifecycleState: availableMedia,
-    'variants.small.digest': { $type: 'string' }, 'variants.large.digest': { $type: 'string' },
-  })) return id;
-  throw new RelationshipError('cardCover');
-}
-
 export async function planCardUpdate(records: WorkspaceRecords, access: CardAccessContext,
   input: CardUpdate, context: CommandPlanningContext,
 ): Promise<CommandPlan> {
@@ -135,8 +120,6 @@ export async function planCardUpdate(records: WorkspaceRecords, access: CardAcce
   const dueDateCompleted = dueDate === null ? null : input.dueDateCompleted ?? currentDue.dueDateCompleted ?? false;
   const currentWatch = cardStopwatch(card.stopwatch);
   const stopwatch = input.stopwatchAction ? transitionStopwatch(currentWatch, input.stopwatchAction, timestamp) : currentWatch;
-  const currentCover = card.coverAttachmentId ?? null;
-  const coverAttachmentId = input.coverAttachmentId === undefined ? currentCover : await cardCover(records, access, input.coverAttachmentId);
   const name = input.name ?? card.name;
   const fields: JournalFields = {
     ...(name !== card.name && { name }),
@@ -145,9 +128,8 @@ export async function planCardUpdate(records: WorkspaceRecords, access: CardAcce
     ...(closed !== currentClosed && { closed }),
     ...((dueDate !== currentDue.dueDate || dueDateCompleted !== currentDue.dueDateCompleted) && { dueDate, dueDateCompleted }),
     ...(input.stopwatchAction && (stopwatch?.startedAt !== currentWatch?.startedAt || stopwatch?.total !== currentWatch?.total) && { stopwatch }),
-    ...(coverAttachmentId !== currentCover && { coverAttachmentId }),
   };
-  const makeResult = (next: Parameters<typeof cardDto>[0]) => ({ data: { card: cardDto(next, board, list), stopwatch, coverAttachmentId } });
+  const makeResult = (next: Parameters<typeof cardDto>[0]) => ({ data: { card: cardDto(next, board, list), stopwatch } });
   if (!Object.keys(fields).length) return { effects: [], result: makeResult(card), audit: audit('cards.update', id) };
   const parent = touchRevision('cards', card, timestamp, revision);
   const next = { ...card, revision: revision + 1, name, type, closed, dueDate, dueDateCompleted, updatedAt: new Date(timestamp) };
