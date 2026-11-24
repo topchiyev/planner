@@ -11,7 +11,9 @@ export async function beginPasswordMfa(
 ) {
   const local = getLocalAccount(account);
   if (!local) return { status: 'invalid' } as const;
-  if (local.auth.mfa === 'none') return { status: hasPasswordOnlyAuth(account) ? 'passed' : 'invalid' } as const;
+  if (local.auth.mfa === 'none') {
+    return hasPasswordOnlyAuth(account) ? { status: 'passed' } as const : { status: 'invalid' } as const;
+  }
   const scope = mfaActorScope(installationId, account);
   if (local.auth.mfa === 'enrollment-required') {
     if (!hasPendingFactorEnrollment(account)) return { status: 'invalid' } as const;
