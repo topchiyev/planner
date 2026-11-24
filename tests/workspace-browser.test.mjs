@@ -1451,16 +1451,29 @@ test('native card media keeps files private, manages covers by revision and open
       await secondEditor.goto(path);
       await expect(file(secondEditor, 'sample.png').getByText('Cover', { exact: true })).toBeVisible();
 
-      await otherImage.getByRole('button', { name: 'Use sample.jpeg as cover' }).click();
-      await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
-      const secondImageId = (await stored()).coverAttachmentId;
-      assert.notEqual(secondImageId, firstImageId);
-      const [stale] = await Promise.all([
-        secondEditor.waitForResponse((response) =>
-          response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard)),
-        panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click(),
-      ]);
-      assert.equal(stale.status(), 409);
+      const coverRevision = (await stored()).revision;
+      const requested = Promise.withResolvers();
+      const releaseCover = Promise.withResolvers();
+      const coverPath = '**/api/v1/cards/' + ids.activeCard;
+      await secondEditor.route(coverPath, async (intercepted) => {
+        if (intercepted.request().method() === 'PATCH') {
+          requested.resolve(intercepted.request().headers()['if-match']);
+          await releaseCover.promise;
+        }
+        await intercepted.continue().catch(() => {});
+      });
+      const staleResponse = secondEditor.waitForResponse((response) =>
+        response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard));
+      try {
+        await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
+        assert.equal(await requested.promise, '"' + coverRevision + '"');
+        await otherImage.getByRole('button', { name: 'Use sample.jpeg as cover' }).click();
+        await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
+        const secondImageId = (await stored()).coverAttachmentId;
+        assert.notEqual(secondImageId, firstImageId);
+      } finally { releaseCover.resolve(); }
+      assert.equal((await staleResponse).status(), 409);
+      await secondEditor.unroute(coverPath);
       await expect(panel(secondEditor).getByRole('alert')).toContainText('Review the current information');
       await expect(file(secondEditor, 'sample.jpeg').getByText('Cover', { exact: true })).toBeVisible();
       await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
