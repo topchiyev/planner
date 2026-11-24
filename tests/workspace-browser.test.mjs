@@ -754,7 +754,9 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
     await expect(inspector.getByRole('button', { name: 'Stop stopwatch' })).toBeEnabled();
     const elapsed = inspector.getByLabel('Elapsed time');
     const watchRequests = [];
-    editor.on('request', (request) => { if (request.url().includes('/api/v1/cards/' + cardId)) watchRequests.push(request.method()); });
+    editor.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/api/v1/cards/' + cardId) watchRequests.push(request.method());
+    });
     const running = await f.db.collection('cards').findOne({ ...f.scope, id: cardId });
     await expect(elapsed).not.toHaveText('00:00:00');
     assert.deepEqual(watchRequests, []);
@@ -1646,7 +1648,7 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     await author.goto(path);
     const comments = author.getByRole('region', { name: 'Comments', exact: true });
     await comments.getByLabel('Write a comment').fill('Recheck <strong>this measurement</strong> ');
-    await comments.getByRole('button', { name: 'Mention a board member' }).click();
+    await comments.getByRole('button', { name: 'Mention someone in this comment' }).click();
     await comments.getByLabel('Find a board member').fill('second-editor');
     await comments.getByRole('button', { name: 'Find members' }).click();
     await comments.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
@@ -1660,7 +1662,7 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     await submitted.promise;
     try {
       await expect(comments.getByLabel('Write a comment')).toBeDisabled();
-      await expect(comments.getByRole('button', { name: 'Mention a board member' })).toBeDisabled();
+      await expect(comments.getByRole('button', { name: 'Mention someone in this comment' })).toBeDisabled();
     } finally { acknowledgment.resolve(); }
     const posted = comments.getByRole('listitem').filter({ hasText: 'Recheck <strong>this measurement</strong>' });
     await expect(posted.getByText('@Fixture second-editor', { exact: true })).toBeVisible();
@@ -1737,8 +1739,17 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await expect(cards.getByRole('link')).toHaveCount(2);
     await expect(editor.getByRole('list', { name: 'Board lists' }).getByText('5 cards', { exact: true })).toBeVisible();
     assert.equal(new URL(editor.url()).searchParams.get('labelsAny'), label);
-    await filters.getByRole('button', { name: 'Save filters' }).click();
-    await expect(filters.getByText('Filters saved for this tab.')).toBeVisible();
+    async function saveRecipe(name) {
+      await filters.getByRole('button', { name: 'Save filters' }).click();
+      await filters.getByRole('textbox', { name: 'Recipe name' }).fill(name);
+      await filters.getByRole('button', { name: 'Save recipe' }).click();
+      await expect(filters.getByText('Filters saved for this tab.')).toBeVisible();
+    }
+    await saveRecipe('Release quartz');
+    await filters.getByRole('searchbox').fill('A different filter');
+    await saveRecipe('Alternate recipe');
+    await expect(filters.getByRole('combobox', { name: 'Saved recipe' }).getByRole('option')).toHaveCount(2);
+    assert.equal(new URL(editor.url()).searchParams.get('q'), 'Quartz; SIGNAL');
     await editor.getByRole('navigation', { name: 'Board view' }).getByRole('link', { name: 'Grid' }).click();
     await expect(editor.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
     assert.equal(new URL(editor.url()).searchParams.get('q'), 'Quartz; SIGNAL');
@@ -1764,7 +1775,12 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await filters.getByRole('button', { name: 'Clear filters' }).click();
     await expect(filters.getByRole('searchbox')).toHaveValue('');
     await expect.poll(() => new URL(editor.url()).searchParams.has('q')).toBe(false);
-    await expect(filters.getByRole('button', { name: 'Recall last cleared filters' })).toBeVisible();
+    await filters.getByRole('button', { name: 'Recall last cleared filters' }).click();
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Alternate recipe');
+    await filters.getByRole('button', { name: 'Recall saved filters' }).click();
+    await expect(editor.getByText('No matching cards', { exact: true })).toBeVisible();
+    await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Release quartz');
     await filters.getByRole('button', { name: 'Recall saved filters' }).click();
     await expect(filters.getByRole('searchbox')).toHaveValue('Quartz; SIGNAL');
     await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
@@ -1785,6 +1801,13 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
     await expect(filters).toHaveCount(0);
+    await expect(otherTab.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(mount);
+    await expect(filters).toBeVisible();
+    await expect(filters.getByRole('button', { name: /Recall/u })).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
     await signIn(editor, origin, 'viewer');
     await editor.goto(mount);
     await expect(filters).toBeVisible();
@@ -1847,5 +1870,45 @@ test('a late card page cannot replace a newer recipe or survive current board ac
     await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
     await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toHaveCount(0);
     await expect(filters).toHaveCount(0);
+  });
+});
+
+test('a rejected filter-member read clears the board and open inspector before revalidation completes', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(origin + board(ids.privateBoard) + '/cards/' + ids.activeCard);
+    await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    const heading = editor.locator('#page-heading');
+    const oldName = await heading.textContent();
+    assert.ok(oldName?.trim());
+    const sidebarBoard = editor.getByRole('navigation', { name: 'Project navigation' }).getByRole('link', { name: oldName, exact: true });
+    await expect(sidebarBoard).toBeVisible();
+    const filters = editor.getByRole('search', { name: 'Board cards' });
+    await expect(filters).toBeVisible();
+    const held = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const overview = '**/api/v1/boards/' + ids.privateBoard + '/workspace';
+    await editor.route(overview, async (intercepted) => {
+      held.resolve();
+      await resume.promise;
+      await intercepted.continue().catch(() => {});
+    });
+    try {
+      await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
+        ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor,
+      }));
+      const denied = editor.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/filter-members'));
+      await filters.getByText('Filter by labels, members or lists').click();
+      assert.equal((await denied).status(), 404);
+      await held.promise;
+      await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+      await expect(editor.getByRole('heading', { name: oldName, exact: true })).toHaveCount(0);
+      await expect(sidebarBoard).toHaveCount(0);
+      await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toHaveCount(0);
+      await expect(editor.getByRole('navigation', { name: 'Board context' })).toHaveCount(0);
+      await expect(filters).toHaveCount(0);
+    } finally { resume.resolve(); }
+    await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
   });
 });
