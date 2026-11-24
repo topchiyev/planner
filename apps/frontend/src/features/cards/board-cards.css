@@ -19,3 +19,30 @@
 @media (max-width: 47rem) {
   .board-card-placement :is(button, .board-card-handle), .board-card-append { min-width: 2.75rem; min-height: 2.75rem; }
 }
+.workspace-list-summary.board-kanban-columns {
+  grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(min(88vw, 15.5rem), 1fr);
+  align-items: start; overflow-x: auto; padding-block-end: .45rem;
+}
+.board-kanban-columns > li { align-content: start; min-width: 0; }
+.board-card-face { display: grid; align-content: start; gap: .35rem; min-width: 0; overflow-wrap: anywhere; }
+.board-card-face > a { font-weight: 650; }
+.board-card-meta { display: flex; flex-wrap: wrap; gap: .25rem .55rem; font-size: .79rem; color: var(--muted); }
+.workspace-list-summary .board-cards > li { align-items: start; gap: .45rem; }
+.board-cards > li .board-card-face { flex: 1 1 8rem; }
+.board-cards > li > .board-card-placement { flex: 0 0 auto; justify-content: flex-end; }
+.workspace-list-summary .board-cards > li:has(.front-checklists, .card-front-fields, .card-front-cover) { flex-wrap: wrap; }
+.workspace-list-summary .board-cards > li:has(.front-checklists, .card-front-fields, .card-front-cover) .board-card-face { flex-basis: 100%; }
+.board-list-card-actions { align-items: stretch; }
+.board-card-grid { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); padding: 0; list-style: none; }
+.board-card-grid > li { display: grid; gap: .65rem; align-content: start; min-width: 0; border: 1px solid var(--line); border-radius: .65rem; padding: .8rem; background: #fff; }
+.board-card-grid > li > button { justify-self: start; }
+.board-card-table-scroll { width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: .55rem; }
+.board-card-table { width: 100%; border-collapse: collapse; background: #fff; text-align: left; }
+.board-card-table :is(th, td) { padding: .55rem .65rem; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.board-card-table tbody tr:last-child td { border-bottom: 0; }
+.board-card-table th { font-size: .86rem; background: #eef4f0; }
+.board-card-table td:first-child { width: 60%; }
+@media (max-width: 47rem) {
+  .board-card-table :is(th, td) { padding: .45rem; }
+  .board-card-table td:first-child { min-width: 8rem; }
+}

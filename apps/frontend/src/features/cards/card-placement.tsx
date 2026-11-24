@@ -1,5 +1,6 @@
+import { useBoardRefresh } from '../boards/board-refresh.js';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { useLocation, useRevalidator } from 'react-router';
+import { useLocation } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
 import { TransferBoardPicker, type TransferBoard } from '../transfers/transfer-board-picker.js';
 import type { BoardList } from '../lists/board-lists.js';
@@ -40,7 +41,7 @@ export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardI
   return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion, ...(destinationBoardId && { destinationBoardId }) };
 }
 
-function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
+export function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
   const query = new URLSearchParams({ context: 'board', listIds: listId, limit: '100' });
   if (cursor) query.set('cursor', cursor);
   return readWorkspace('boardCards', boardId, query, signal);
@@ -65,7 +66,7 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   const [loadingMore, setLoadingMore] = useState(false);
   const [accessLost, setAccessLost] = useState(false);
   const requests = useRef<AbortController>(null);
-  const revalidator = useRevalidator();
+  const refresh = useBoardRefresh();
   const { pathname, search } = useLocation();
   const signIn = workspaceSignInPath(pathname + search);
   const { card } = state;
@@ -92,9 +93,9 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   useEffect(() => {
     if (accessLost) {
       onClose();
-      void revalidator.revalidate();
+      refresh();
     }
-  }, [accessLost, onClose, revalidator]);
+  }, [accessLost, onClose, refresh]);
 
   useEffect(() => {
     setPage(undefined);

@@ -1,3 +1,4 @@
+import { useBoardRefresh } from '../boards/board-refresh.js';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRevalidator } from 'react-router';
 import { type RelationshipReadOutput } from '@planner/contracts';
@@ -31,14 +32,14 @@ function Assignee({ card, selected, choose, unavailable }: {
 }) {
   const [query, setQuery] = useState('');
   const candidates = useEligibleMemberPage(card.boardId, card.revision);
-  const revalidator = useRevalidator();
+  const refresh = useBoardRefresh();
   const { accessLost, result, cursor } = candidates;
   useEffect(() => {
     if (accessLost) {
       unavailable();
-      void revalidator.revalidate();
+      refresh();
     }
-  }, [accessLost, unavailable, revalidator]);
+  }, [accessLost, unavailable, refresh]);
   return <fieldset className="board-option-set checklist-assignees">
     <legend>Assignee</legend>
     {selected && <p>{selected.name}</p>}

@@ -1,3 +1,4 @@
+import { useBoardRefresh } from './board-refresh.js';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useLocation, useRevalidator } from 'react-router';
 import { workspaceSignInPath, type RelationshipReadOutput } from '@planner/contracts';
@@ -13,6 +14,7 @@ type MemberRole = 'editor' | 'viewer';
 
 export function BoardMembersDialog({ board, close }: { board: BoardWorkspace['board']; close: () => void }) {
   const action = useBoardMutation();
+  const refresh = useBoardRefresh();
   const revalidator = useRevalidator();
   const location = useLocation();
   const [memberCursor, setMemberCursor] = useState<string | null>(null);
@@ -38,7 +40,7 @@ export function BoardMembersDialog({ board, close }: { board: BoardWorkspace['bo
         window.location.replace(workspaceSignInPath(location.pathname + location.search));
       } else if (error instanceof WorkspaceRequestError && [403, 404].includes(error.status)) {
         close();
-        void revalidator.revalidate();
+        refresh();
       } else setResult({ scope });
     });
     return () => controller.abort();

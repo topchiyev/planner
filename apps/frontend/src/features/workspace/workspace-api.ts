@@ -1,5 +1,5 @@
 import {
-  accountPreferencesSchema, relationshipCommands, workspaceOperations, workspaceSignInPath,
+  accountPreferencesSchema, passiveSessionHeader, relationshipCommands, workspaceOperations, workspaceSignInPath,
   type WorkspaceReadOperation, type WorkspaceReadOutput,
 } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
@@ -16,7 +16,9 @@ export class WorkspaceRequestError extends Error {
 }
 
 export async function workspaceResponse(path: string, init?: RequestInit) {
-  const response = await fetch(path, { ...init, cache: 'no-store' });
+  const headers = new Headers(init?.headers);
+  if (!init?.method || init.method === 'GET' || init.method === 'HEAD') headers.set(passiveSessionHeader, '1');
+  const response = await fetch(path, { ...init, headers, cache: 'no-store' });
   if (!response.ok) {
     const body = await response.json().catch(() => undefined);
     throw new WorkspaceRequestError(response.status, body?.error?.code);

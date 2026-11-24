@@ -1,4 +1,6 @@
-import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRevalidator, useSearchParams } from 'react-router';
+import { useEffect, useLayoutEffect } from 'react';
+import type { loadBrowserSession } from '../auth/browser-session.js';
+import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRouteLoaderData, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
 
 import type { BoardReadRefusal, loadNativeBoard } from '../workspace/workspace-loaders.js';
@@ -8,7 +10,12 @@ import { BoardManagement } from './board-management.js';
 import { BoardFieldGroups } from '../fields/workspace-fields.js';
 import { ActivityFeed } from '../discussions/feed.js';
 import { BoardFilters } from './board-filters.js';
-import { BoardCards } from '../cards/board-cards.js';
+import { BoardCards, cardOpenerId, getCardOpener, type BoardView } from '../cards/board-cards.js';
+import { BoardRefreshContext } from './board-refresh.js';
+import { readBoardView, saveBoardView } from './board-filter-store.js';
+import { useLiveBoard, type LiveBoard, type LiveCard } from './use-live-board.js';
+
+export type BoardInspectorContext = { board: LiveBoard | null | undefined; liveCard: LiveCard | undefined };
 
 const contexts = [
   { id: 'board', name: 'Board', emptyTitle: 'No cards to show' },
@@ -22,23 +29,49 @@ const views = [
   { id: 'list', name: 'List' },
 ] as const;
 
-type View = (typeof views)[number]['id'];
-
 export function BoardPage() {
-  const board = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
+  const initial = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
   const [params] = useSearchParams();
   const navigation = useNavigation();
-  const revalidator = useRevalidator();
-  const { deniedBoard, refuseBoard } = useOutletContext<BoardReadRefusal>();
-  const { pathname, search, state: routeState } = useLocation();
+  const { deniedBoard, refuseBoard, presentBoard } = useOutletContext<BoardReadRefusal>();
+  const { key, pathname, search, state: routeState } = useLocation();
+  const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
   const pending = !!navigation.location && (navigation.location.pathname !== pathname || navigation.location.search !== search);
-  const inspectorOpen = useMatch('/boards/:boardId/cards/:cardId') !== null;
+  const cardId = useMatch('/boards/:boardId/cards/:cardId')?.params.cardId;
+  const inspectorOpen = !!cardId;
+  const live = useLiveBoard({ initial, actorId: session?.account.id, cardId, location: pathname + search });
+  const concealed = live.phase === 'checking' || live.phase === 'unavailable';
+  const board = live.board;
+  useLayoutEffect(() => {
+    if (initial && live.phase === 'missing') refuseBoard(initial);
+    else if (initial && deniedBoard === initial && live.phase === 'visible' && board !== initial) refuseBoard(undefined);
+    presentBoard(initial && (concealed || board !== initial)
+      ? { source: initial, board: concealed ? null : board ?? null } : undefined);
+    return () => presentBoard(undefined);
+  }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, presentBoard]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
-  const view = availableViews.find(({ id }) => id === params.get('view'))?.id ?? defaultView;
+  const viewKey = board && [board.recipeScope, board.board.id, context.id].join('/');
+  const explicitView = availableViews.find(({ id }) => id === params.get('view'))?.id;
+  const storedView = viewKey && readBoardView(viewKey);
+  const view = explicitView ?? availableViews.find(({ id }) => id === storedView)?.id ?? defaultView;
 
-  function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: View) {
+  useEffect(() => {
+    if (viewKey && explicitView) saveBoardView(viewKey, explicitView);
+  }, [viewKey, explicitView]);
+
+  useEffect(() => {
+    if (inspectorOpen || concealed || !board) return;
+    const opener = getCardOpener(board.recipeScope, pathname, search, key, routeState?.cardReturnKey);
+    if (!opener) return;
+    const frame = requestAnimationFrame(() => {
+      (document.getElementById(cardOpenerId(opener)) ?? document.getElementById('page-heading'))?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [inspectorOpen, concealed, board?.recipeScope, pathname, search, key, routeState?.cardReturnKey]);
+
+  function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: BoardView) {
     const nextParams = new URLSearchParams(params);
     nextParams.set('context', nextContext);
     if (nextContext !== context.id) {
@@ -46,15 +79,18 @@ export function BoardPage() {
       nextParams.delete('listIds');
     }
     if (nextView) nextParams.set('view', nextView);
-    else if (nextContext !== 'board' && nextParams.get('view') === 'kanban') nextParams.delete('view');
+    else if (nextContext !== context.id) nextParams.delete('view');
     return { pathname, search: `?${nextParams}` };
   }
 
-  if (board === null || (board && deniedBoard === board)) return <RouteNotFound />;
+  if (initial === null || live.phase === 'missing' || (initial && deniedBoard === initial)) return <RouteNotFound />;
   const lists = board?.lists.filter(({ kind }) => context.id === 'board' ? kind === 'active' || kind === 'closed' : kind === context.id);
 
-  return (
-    <div className="board-layout" data-inspector-open={inspectorOpen}>
+  return <BoardRefreshContext.Provider value={live.recheck}>
+    {concealed && <section className="page"><p role="status">{live.phase === 'checking' ? 'Checking board access…' : 'The board connection is unavailable.'}</p>
+      {live.phase === 'unavailable' && <button className="workspace-button" type="button" onClick={live.recheck}>Retry</button>}
+    </section>}
+    <div hidden={concealed} inert={concealed}><div className="board-layout" data-inspector-open={inspectorOpen}>
       <section className="page board-page" aria-labelledby="page-heading">
         <header className="page-header">
           <nav aria-label="Breadcrumb" className="workspace-breadcrumb">
@@ -82,16 +118,16 @@ export function BoardPage() {
         {board && lists ? <>
           <BoardFilters key={JSON.stringify([board.recipeScope, board.board.id, board.context, board.recipe])}
             workspace={board} lists={lists} loading={pending} onAccessLost={() => {
-              refuseBoard(board);
-              void revalidator.revalidate();
+              refuseBoard(initial);
+              live.recheck();
             }} />
           <div hidden={pending}>
-            <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} />
+            <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} view={view} removed={live.removed} />
           </div>
         </> : !board && <EmptyState title={context.emptyTitle} />}
-        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.board.revision} />}
+        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.latestEventSequence} removed={live.removed} />}
       </section>
-      <Outlet />
-    </div>
-  );
+      <Outlet context={{ board, liveCard: live.card } satisfies BoardInspectorContext} />
+    </div></div>
+  </BoardRefreshContext.Provider>;
 }

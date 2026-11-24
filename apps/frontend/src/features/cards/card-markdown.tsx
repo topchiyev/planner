@@ -6,7 +6,6 @@ import StarterKit from '@tiptap/starter-kit';
 import { cardMentionToken, maximumCardDescriptionLength } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { MemberPicker, type Mention } from '../affiliations/member-picker.js';
-import './card-editor.css';
 
 export type EditorMode = 'markup' | 'wysiwyg';
 
@@ -73,17 +72,17 @@ const extensions = [
 
 export function CardDescription({ description }: { description: string }) {
   const editor = useEditor({
-    extensions, content: description, contentType: 'markdown', editable: false,
+    immediatelyRender: false, extensions, content: description, contentType: 'markdown', editable: false,
     editorProps: { attributes: { class: 'card-rendered-description' } },
   });
   useEffect(() => {
-    editor?.commands.setContent(description, { contentType: 'markdown', emitUpdate: false });
+    if (editor && !editor.isDestroyed) editor.commands.setContent(description, { contentType: 'markdown', emitUpdate: false });
   }, [editor, description]);
   return <EditorContent editor={editor} />;
 }
 
-export function CardMarkdownInput({ value, original, mode, boardId, onMode, onChange }: {
-  value: string; original: string; mode: EditorMode; boardId: string;
+export function CardMarkdownInput({ value, original, mode, boardId, disabled, onMode, onChange }: {
+  value: string; original: string; mode: EditorMode; boardId: string; disabled: boolean;
   onMode: (mode: EditorMode) => void; onChange: (value: string) => void;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -92,7 +91,7 @@ export function CardMarkdownInput({ value, original, mode, boardId, onMode, onCh
       <button type="button" className="workspace-button" aria-pressed={mode === 'wysiwyg'} onClick={() => onMode('wysiwyg')}>Rich text</button>
       <button type="button" className="workspace-button" aria-pressed={mode === 'markup'} onClick={() => onMode('markup')}>Markdown</button>
     </div>
-    {mode === 'wysiwyg' ? <RichInput value={value} boardId={boardId} onChange={onChange} /> : <>
+    {mode === 'wysiwyg' ? <RichInput value={value} boardId={boardId} disabled={disabled} onChange={onChange} /> : <>
       <label>Description<textarea ref={textarea} rows={6} value={value} maxLength={Math.max(maximumCardDescriptionLength, original.length)}
         onChange={(event) => onChange(event.target.value)} /></label>
       <MemberPicker boardId={boardId} select={(person) => {
@@ -109,12 +108,13 @@ export function CardMarkdownInput({ value, original, mode, boardId, onMode, onCh
   </div>;
 }
 
-function RichInput({ value, boardId, onChange }: { value: string; boardId: string; onChange: (value: string) => void }) {
+function RichInput({ value, boardId, disabled, onChange }: { value: string; boardId: string; disabled: boolean; onChange: (value: string) => void }) {
   const emitted = useRef<string | null>(null);
   const editor = useEditor({
-    extensions, content: value, contentType: 'markdown',
+    immediatelyRender: false, extensions, content: value, contentType: 'markdown', editable: !disabled,
     editorProps: { attributes: { role: 'textbox', 'aria-label': 'Description', 'aria-multiline': 'true', class: 'card-rich-input' } },
     onUpdate: ({ editor }) => {
+      if (disabled) return;
       const source = editor.getMarkdown();
       emitted.current = source;
       onChange(source);
@@ -122,7 +122,11 @@ function RichInput({ value, boardId, onChange }: { value: string; boardId: strin
   });
 
   useEffect(() => {
-    if (!editor || value === emitted.current) return;
+    if (editor && !editor.isDestroyed) editor.setEditable(!disabled, false);
+  }, [editor, disabled]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed || value === emitted.current) return;
     editor.commands.setContent(value, { contentType: 'markdown', emitUpdate: false });
     emitted.current = value;
   }, [editor, value]);
