@@ -17,12 +17,15 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
-    "typecheck": "npm run typecheck --workspaces",
-    "verify": "npm run typecheck && npm run build && npm run test:health",
+    "typecheck": "npm run typecheck --workspaces && tsc -p tests/tsconfig.json",
+    "verify": "npm run typecheck && npm test && npm run build && npm run test:health",
     "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify",
     "test:health": "node --import tsx --test tests/health.test.mjs",
     "dev": "npm run build --workspace @planner/contracts && npm run dev --workspace @planner/frontend",
-    "test:shell": "node --test tests/shell.test.mjs"
+    "test:shell": "node --import tsx --test tests/shell.test.mjs",
+    "test": "node --import tsx --test \"tests/unit/**/*.test.{ts,mjs}\"",
+    "test:integration": "node tests/run-integration.ts",
+    "test:e2e": "npm run build && npm run test:shell"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",
