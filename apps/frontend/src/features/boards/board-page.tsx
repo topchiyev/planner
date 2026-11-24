@@ -125,7 +125,7 @@ export function BoardPage() {
             <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} view={view} removed={live.removed} />
           </div>
         </> : !board && <EmptyState title={context.emptyTitle} />}
-        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.board.revision} />}
+        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.latestEventSequence} removed={live.removed} />}
       </section>
       <Outlet context={{ board, liveCard: live.card } satisfies BoardInspectorContext} />
     </div></div>
