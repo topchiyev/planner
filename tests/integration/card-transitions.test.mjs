@@ -88,22 +88,22 @@ test('a same-board move updates closure, scoped linked completion and eligible d
     await expected(move(1, {}, undefined, viewer), 403);
     for (const beforeCardId of [ids.sharedTarget, fixtureId(5500)]) {
       const unavailable = await expected(move(1, { beforeCardId }), 409, 'CARD_ORDER_CONFLICT');
-      assert.equal(unavailable.data.error.current, undefined);
+      assert.equal(unavailable.data.error.fields, undefined);
     }
     const stale = await expected(move(1, { ...versions(2, 1) }), 409, 'CARD_ORDER_CONFLICT');
-    assert.deepEqual(stale.data.error.current, {
+    assert.deepEqual(stale.data.error.fields.current, {
       cardRevision: 1, source: { listId: source, revision: 1, orderVersion: 1 },
       destination: { listId: destination, revision: 1, orderVersion: 1 },
     });
     const foreign = await expected(move(1, { toListId: ids.sharedActiveList }), 409, 'CARD_ORDER_CONFLICT');
-    assert.equal(foreign.data.error.current, undefined);
+    assert.equal(foreign.data.error.fields, undefined);
     const key = randomUUID();
     const moved = await data(move(1, {}, key));
     assert.deepEqual(moved.card, { id: card, boardId: ids.privateBoard, listId: destination, kind: 'board', closed: false, revision: 2 });
     assert.deepEqual([moved.source.orderVersion, moved.destination.orderVersion], [2, 2]);
     assert.deepEqual(await data(move(1, {}, key)), moved);
     const outdated = await expected(move(1), 409, 'REVISION_CONFLICT');
-    assert.deepEqual(outdated.data.error.current, { cardRevision: 2, source: moved.destination, destination: moved.destination });
+    assert.deepEqual(outdated.data.error.fields.current, { cardRevision: 2, source: moved.destination, destination: moved.destination });
     const saved = await data(f.call(cardPath(card), editor));
     assert.equal(saved.type, 'project');
     assert.equal(saved.closed, false);

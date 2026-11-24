@@ -87,7 +87,7 @@ function badInput(request: FastifyRequest, reply: FastifyReply) {
 function requestError(error: unknown, request: FastifyRequest, reply: FastifyReply) {
   if (error instanceof CardPlacementConflict) {
     return reply.code(error.statusCode).send({ error: {
-      code: error.code, message: error.message, requestId: request.id, current: error.current,
+      code: error.code, message: error.message, requestId: request.id, fields: { current: error.current },
     } });
   }
   if (error instanceof WorkspaceAccessError || error instanceof RelationshipError) {
