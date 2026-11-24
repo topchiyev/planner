@@ -1,7 +1,7 @@
 import pg from 'pg';
 import type { Client } from 'pg';
 import { assetKeyKind, MigrationError, registerPath } from './manifest.js';
-import { assertSourceCatalog, sourceTables } from './source-catalog.js';
+import { assertSourceCatalog, sourceColumns, sourceTables } from './source-catalog.js';
 import { assertSourceSocket, parseSourceService } from './source-service.js';
 
 const integer = /^(?:0|[1-9][0-9]{0,30})$/u;
@@ -127,14 +127,14 @@ export async function withSourceSnapshot<T>(service: ReturnType<typeof parseSour
     const grants = await client.query<{ complete: boolean }>(`
       SELECT NOT EXISTS (
         SELECT 1
-        FROM pg_catalog.pg_class AS rel
-        JOIN pg_catalog.pg_namespace AS ns ON ns.oid = rel.relnamespace
-        JOIN pg_catalog.pg_attribute AS att ON att.attrelid = rel.oid
-        WHERE ns.nspname = 'public' AND rel.relname = ANY($1::text[])
-          AND att.attnum > 0 AND NOT att.attisdropped
-          AND NOT pg_catalog.has_column_privilege(rel.oid, att.attnum, 'SELECT')
+        FROM pg_catalog.jsonb_each($1::jsonb) AS required(table_name, columns)
+        CROSS JOIN LATERAL pg_catalog.jsonb_array_elements_text(required.columns) AS requested(column_name)
+        JOIN pg_catalog.pg_namespace AS ns ON ns.nspname = 'public'
+        JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = ns.oid AND rel.relname = required.table_name
+        JOIN pg_catalog.pg_attribute AS att ON att.attrelid = rel.oid AND att.attname = requested.column_name
+        WHERE NOT pg_catalog.has_column_privilege(rel.oid, att.attnum, 'SELECT')
       ) AS complete
-    `, [sourceTables]);
+    `, [JSON.stringify(sourceColumns)]);
     if (grants.rows[0]?.complete !== true)
       throw new MigrationError('source-role', 'The source login lacks SELECT on part of the supported catalog.');
     const value = await read(client);
