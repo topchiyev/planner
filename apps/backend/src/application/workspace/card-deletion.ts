@@ -22,8 +22,8 @@ export function createDeletionScope(records: WorkspaceRecords, generationId: str
     const rows: WorkspaceRow<K>[] = [];
     for (let offset = 0; offset < ids.length; offset += queryBatchSize) {
       const batch = ids.slice(offset, offset + queryBatchSize);
-      rows.push(...await find(collection, { ...selector, [field]: { $in: batch } },
-        { $in: ['$' + field, batch] }, ...checks));
+      const matches = await find(collection, { ...selector, [field]: { $in: batch } }, { $in: ['$' + field, batch] }, ...checks);
+      for (const match of matches) rows.push(match);
     }
     return rows;
   }
