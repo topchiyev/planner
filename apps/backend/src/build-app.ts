@@ -7,7 +7,9 @@ import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-au
 import { registerNativeMfaRoutes } from './native/mfa-routes.js';
 import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
 
-type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth };
+import { registerWorkspaceRoutes, type WorkspaceReader } from './native/workspace-routes.js';
+
+type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth; workspace?: WorkspaceReader };
 
 export type AppDependencies = {
   frontendRoot?: string;
@@ -26,6 +28,7 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
     registerNativeBrowserAuth(app, native.auth);
     if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);
     if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
+    if (native.workspace) registerWorkspaceRoutes(app, native.workspace);
   }
 
   app.get('/health/live', (request, reply) => {

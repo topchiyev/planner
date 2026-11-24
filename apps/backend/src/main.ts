@@ -16,6 +16,7 @@ import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.j
 import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
 import { readInstallationConfig } from './native/setup-state.js';
 import { createNativeCommandGate } from './native/writer.js';
+import { createNativeWorkspaceReader } from './native/workspace-routes.js';
 
 let app: ReturnType<typeof buildApp> | undefined;
 let closeAdmin: (() => Promise<void>) | undefined;
@@ -55,7 +56,7 @@ try {
     const auth = createNativeBrowserAuth(config, gate, mfaKey.key);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
-      origin: config.publicUrl, proxyToken, readAccess, auth,
+      origin: config.publicUrl, proxyToken, readAccess, auth, workspace: createNativeWorkspaceReader(config, gate),
     } };
     port = config.appPort;
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
