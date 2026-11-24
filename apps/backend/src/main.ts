@@ -5,11 +5,15 @@ import { recoverAccountChanges } from './application/auth/account-credentials.js
 import { recoverFactorChanges } from './application/auth/mfa-account.js';
 import { recoverFirstAdmin } from './application/auth/first-admin.js';
 import type { CommandGate } from './application/command-gate/gate.js';
+import { createMediaDecoder } from './application/media/decoder.js';
+import { startMediaCleanup, sweepPrivateMedia, verifyActiveMedia } from './application/media/reconcile.js';
+import { createPrivateMediaStore } from './storage/blobs/private-store.js';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
 import { createNativeBrowserAuth } from './native/browser-auth.js';
 import { startNativeCommandRecovery } from './native/command-recovery.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
+import { createNativeMedia, withNativeMediaDatabase } from './native/media-routes.js';
 import { assertNativeMfaKey, readNativeMfaKey } from './native/mfa-key.js';
 import { readProtectedFile } from './native/mongo-host.js';
 import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
@@ -24,6 +28,8 @@ let closeAdmin: (() => Promise<void>) | undefined;
 let closeProxy: (() => Promise<void>) | undefined;
 let commandGate: CommandGate | undefined;
 let stopRecovery: (() => void) | undefined;
+let stopMediaCleanup: (() => void) | undefined;
+let closeMedia: (() => Promise<void>) | undefined;
 
 try {
   const frontendRoot = fileURLToPath(new URL('../../frontend/dist/', import.meta.url));
@@ -54,18 +60,26 @@ try {
     // Apply this before binding the local operator socket, including direct service-account startup.
     process.umask(0o077);
     const mfaKey = readNativeMfaKey(config.installationId, group);
+    const mediaStore = await createPrivateMediaStore('/var/lib/planner/staging', '/var/lib/planner/blobs');
+    closeMedia = mediaStore.close;
+    const mediaDecoder = createMediaDecoder(fileURLToPath(new URL('../../../lib/decode-media.py', import.meta.url)));
     const auth = createNativeBrowserAuth(config, gate, mfaKey.key);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth, workspace: createNativeWorkspaceReader(config, gate),
       relationships: createNativeWorkspaceRelationships(config, gate),
+      media: createNativeMedia(config, gate, mediaStore, mediaDecoder),
     } };
     port = config.appPort;
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
       await recoverFirstAdmin(db, installationId);
       await recoverAccountChanges(db, installationId);
       await recoverFactorChanges(db, installationId);
+      await verifyActiveMedia(db, installationId, mediaStore);
+      await sweepPrivateMedia(db, mediaStore);
     }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey));
+    stopMediaCleanup = startMediaCleanup(gate, () => withNativeMediaDatabase(config, (db) =>
+      gate.runCommand(() => sweepPrivateMedia(db, mediaStore))));
   } else {
     const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
     if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');
@@ -83,7 +97,9 @@ try {
     shuttingDown = true;
     try {
       stopRecovery?.();
+      stopMediaCleanup?.();
       await Promise.all([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
+      await closeMedia?.();
     } catch {
       console.error('Planner could not close its listeners.');
       process.exitCode = 1;
@@ -98,7 +114,9 @@ try {
   console.log(address);
 } catch {
   stopRecovery?.();
+  stopMediaCleanup?.();
   await Promise.allSettled([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
+  await closeMedia?.().catch(() => undefined);
   console.error('Planner could not start its listeners.');
   process.exitCode = 1;
 }

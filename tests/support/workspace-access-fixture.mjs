@@ -21,7 +21,7 @@ export const origin = 'https://planner.example.test';
 export const ids = workspaceIds;
 export const fixtureId = (sequence) => `65160d3b-4e42-4023-880e-${sequence.toString(16).padStart(12, '0')}`;
 
-export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission } = {}) {
+export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia } = {}) {
   const installationId = randomUUID();
   const generationId = ids.generation;
   const stagedGenerationId = randomUUID();
@@ -93,8 +93,10 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   await new CommandJournal(gate, db, installationId).recover();
   const sessions = createBrowserSessions(db, installationId, gate, hasher, now);
   const reader = createWorkspaceReader(db, installationId, gate, now);
+  const media = await configureMedia?.({ db, directory, installationId, generationId, gate, now });
   const app = buildApp({
-    native: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }), workspace: reader,
+    native: { origin, proxyToken, readAccess: async () => gate.ready ? ({ kind: 'ready' }) : ({ kind: 'unavailable' }), workspace: reader,
+      media,
       relationships: createWorkspaceRelationships(db, installationId, gate, now), auth: {
       confirm: async () => false, login: sessions.login, revoke: sessions.revoke,
       async read(token) {
@@ -115,7 +117,7 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
     } });
   }
   return {
-    db, installationId, generationId, stagedGenerationId, scope, gate, reader, now, call, insert,
+    db, installationId, generationId, stagedGenerationId, scope, gate, reader, now, call, insert, socketPath: join(dir, 'http.sock'),
     async login(id) {
       const account = source.users.find((row) => row.id === id);
       return call('/api/v1/session/login', null, { method: 'POST', headers: { Origin: origin },

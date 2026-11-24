@@ -4,12 +4,13 @@ import Fastify from 'fastify';
 import { registerFrontendShell } from './frontend-shell.js';
 import { registerAccountRoutes } from './native/account-routes.js';
 import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-auth.js';
+import { registerMediaRoutes, type MediaAccess } from './native/media-routes.js';
 import { registerNativeMfaRoutes } from './native/mfa-routes.js';
 import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
 import { registerRelationshipRoutes, type WorkspaceRelationships } from './native/relationship-routes.js';
 import { registerWorkspaceRoutes, type WorkspaceReader } from './native/workspace-routes.js';
 
-type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth; workspace?: WorkspaceReader; relationships?: WorkspaceRelationships };
+type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth; workspace?: WorkspaceReader; relationships?: WorkspaceRelationships; media?: MediaAccess };
 
 export type AppDependencies = {
   frontendRoot?: string;
@@ -28,6 +29,7 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
     registerNativeBrowserAuth(app, native.auth);
     if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);
     if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
+    if (native.media) registerMediaRoutes(app, native.media);
     if (native.workspace) registerWorkspaceRoutes(app, native.workspace);
     if (native.relationships) registerRelationshipRoutes(app, native.relationships);
   }
