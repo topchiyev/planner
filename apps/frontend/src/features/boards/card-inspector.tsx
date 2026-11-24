@@ -3,6 +3,7 @@ import { workspaceBoardId, type loadNativeBoard, type loadNativeCard } from '../
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import { CardAffiliationControls } from '../affiliations/card-affiliation-controls.js';
 import { CardInspectorTransitions } from '../cards/card-inspector-transitions.js';
+import { CardChecklists } from '../checklists/card-checklists.js';
 import { CardEditing } from '../cards/card-editing.js';
 import { PageHeading } from '../../app/page-state.js';
 
@@ -23,6 +24,8 @@ export function CardInspector() {
       {card && workspace && <CardInspectorTransitions key={card.id} card={card} workspace={workspace} />}
       {card && workspace && <CardAffiliationControls key={`affiliations:${session?.account.id}:${card.boardId}:${card.id}`} card={card} workspace={workspace} />}
       {card && <CardEditing key={`${session?.account.id}:${card.boardId}:${card.id}`} card={card} />}
+      {card && <CardChecklists key={`checklists:${session?.account.id}:${card.boardId}:${card.id}`}
+        card={card} groups={card.checklists} expand={workspace?.preferences.expandChecklists ?? false} />}
     </aside>
   );
 }

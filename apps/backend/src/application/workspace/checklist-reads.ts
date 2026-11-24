@@ -42,7 +42,7 @@ export function createChecklistReads(records: WorkspaceRecords, access: Workspac
       const base = { ...entity(row), checklistId: row.checklistId };
       if (row.linkedUnavailable) return { ...base, kind: 'unavailable' as const };
       const assignee = row.assigneeId ? assignees.get(row.assigneeId) ?? null : null;
-      if (!row.linkedCardId) return { ...base, kind: 'task' as const, name: row.name ?? '', completed: row.completed ?? false, assignee };
+      if (row.linkedCardId == null) return { ...base, kind: 'task' as const, name: row.name ?? '', completed: row.completed ?? false, assignee };
       const target = await readableTarget(row.linkedCardId);
       if (!target) return { ...base, kind: 'unavailable' as const };
       return { ...base, kind: 'linked' as const, assignee, linkedCard: {

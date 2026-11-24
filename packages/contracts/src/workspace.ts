@@ -158,7 +158,7 @@ export const workspaceOperations = {
   })) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
   cardGet: read('cards.get', '/api/v1/cards/:id', identifier.extend({ boardId: publicIdSchema.optional() }), data(cardDetailSchema)),
   boardLabels: read('labels.list', '/api/v1/boards/:id/labels', identifier, data(z.array(boardLabelSchema))),
-  cardChecklists: read('checklists.list', '/api/v1/cards/:id/checklists', identifier, data(z.array(checklistSchema))),
+  cardChecklists: read('checklists.list', '/api/v1/cards/:id/checklists', identifier.extend({ boardId: publicIdSchema.optional() }), data(z.array(checklistSchema))),
   cardComments: read('comments.list', '/api/v1/cards/:id/comments', identifier.extend(pageQuery), page(commentSchema)),
 } as const;
 

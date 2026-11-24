@@ -38,9 +38,9 @@ function reference(value: unknown) {
   return found(id.success ? id.data : null);
 }
 
-const ownerlessSharedProject = { $expr: { $and: [
-  { $eq: ['$type', 'shared'] }, { $eq: [{ $type: '$ownerProjectManagerId' }, 'null'] },
-] } };
+const ownerlessSharedProject = (prefix = '$') => ({ $expr: { $and: [
+  { $eq: [prefix + 'type', 'shared'] }, { $eq: [{ $type: prefix + 'ownerProjectManagerId' }, 'null'] },
+] } });
 const isDirectMember = (member: WorkspaceRow<'boardMembers'> | null) => member?.role === 'editor' || member?.role === 'viewer';
 
 type Project = WorkspaceRow<'projects'>;
@@ -142,21 +142,56 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
 
   const canonical = canonicalRow(generationId);
   const exactActorEdge = [canonical, equal('userId', principal.id)];
-  const managerRow = (project: Project) => records.first('projectManagers', {
-    projectId: project.id, userId: principal.id, $expr: { $and: [...exactActorEdge, equal('projectId', project.id)] },
+  const actorManager = (projectId: string) => ({
+    userId: principal.id, $expr: { $and: [...exactActorEdge, equal('projectId', projectId)] },
   });
-  const membershipRow = (board: Board) => records.first('boardMembers', {
-    boardId: board.id, userId: principal.id, $expr: { $and: [...exactActorEdge, equal('boardId', board.id), directBoardRole] },
+  const actorMember = (boardId: string) => ({
+    userId: principal.id, $expr: { $and: [...exactActorEdge, equal('boardId', boardId), directBoardRole] },
   });
+  const managerRow = (project: Project) => records.first('projectManagers', { projectId: project.id, ...actorManager(project.id) });
+  const membershipRow = (board: Board) => records.first('boardMembers', { boardId: board.id, ...actorMember(board.id) });
+
+  // Match a linked target inside a paginated board query without inspecting private rows in the result.
+  function readableCardLookup(as: string, from: string) {
+    return records.lookup('cards', as, { targetId: from }, {
+      $expr: { $and: [canonical, equal('id', '$$targetId')] },
+    }, [
+      records.lookup('lists', 'targetPlacement', { listId: '$listId', boardId: '$boardId', cardKind: '$kind' }, {
+        $expr: { $and: [canonical, equal('id', '$$listId'), equal('boardId', '$$boardId'), {
+          $or: [
+            { $and: [{ $in: ['$kind', ['active', 'closed']] }, { $eq: ['$$cardKind', 'board'] }] },
+            { $and: [{ $in: ['$kind', ['archive', 'trash']] }, equal('kind', '$$cardKind')] },
+          ],
+        }] },
+      }, [{ $limit: 1 }]),
+      { $match: { 'targetPlacement.0': { $exists: true } } },
+      records.lookup('boards', 'readableTargetBoard', { boardId: '$boardId' }, {
+        $expr: { $and: [canonical, equal('id', '$$boardId')] },
+      }, [
+        records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, actorMember('$$boardId'), [{ $limit: 1 }]),
+        records.lookup('projects', 'targetProject', { projectId: '$projectId' }, {
+          $expr: { $and: [canonical, equal('id', '$$projectId')] },
+        }, [
+          records.lookup('projectManagers', 'actorManager', { projectId: '$id' }, actorManager('$$projectId'), [{ $limit: 1 }]),
+        ]),
+        { $unwind: '$targetProject' },
+        { $match: { $or: [
+          { 'actorMembership.0': { $exists: true } }, { 'targetProject.actorManager.0': { $exists: true } },
+          ...(roles.siteAdmin ? [ownerlessSharedProject('$targetProject.')] : []),
+        ] } },
+        { $project: { _id: 1 } },
+      ]),
+      { $match: { 'readableTargetBoard.0': { $exists: true } } },
+      { $project: { _id: 1 } },
+    ]);
+  }
 
   function visibleBoards(project: ProjectAccessContext) {
     const id = project.project.id;
     const filter = { projectId: id, $expr: { $and: [equal('projectId', id), canonical] } };
     if (project.manager || project.sharedAdmin) return records.find('boards', filter, rankSort);
     return records.aggregate<Board>('boards', filter, [
-      records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, {
-        userId: principal.id, $expr: { $and: [...exactActorEdge, { $eq: ['$boardId', '$$boardId'] }, directBoardRole] },
-      }, [{ $limit: 1 }]),
+      records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, actorMember('$$boardId'), [{ $limit: 1 }]),
       { $match: { 'actorMembership.0': { $exists: true } } },
       { $sort: rankSort },
       { $unset: 'actorMembership' },
@@ -177,19 +212,15 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     const hasBoard = { 'memberBoard.0': { $exists: true } };
     return [
       { $match: { $expr: canonical } },
-      records.lookup('projectManagers', 'actorManager', { projectId: '$id' }, {
-        userId: principal.id, $expr: { $and: [...exactActorEdge, { $eq: ['$projectId', '$$projectId'] }] },
-      }, [{ $limit: 1 }]),
+      records.lookup('projectManagers', 'actorManager', { projectId: '$id' }, actorManager('$$projectId'), [{ $limit: 1 }]),
       records.lookup('boards', 'memberBoard', { projectId: '$id' }, {
         $expr: { $and: [canonical, { $eq: ['$projectId', '$$projectId'] }] },
       }, [
-        records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, {
-          userId: principal.id, $expr: { $and: [...exactActorEdge, { $eq: ['$boardId', '$$boardId'] }, directBoardRole] },
-        }, [{ $limit: 1 }]),
+        records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, actorMember('$$boardId'), [{ $limit: 1 }]),
         { $match: { 'actorMembership.0': { $exists: true } } },
         { $limit: 1 },
       ]),
-      { $match: { $or: [hasManager, hasBoard, ...(roles.siteAdmin ? [ownerlessSharedProject] : [])] } },
+      { $match: { $or: [hasManager, hasBoard, ...(roles.siteAdmin ? [ownerlessSharedProject()] : [])] } },
       { $unset: ['actorManager', 'memberBoard'] },
     ];
   }
@@ -282,7 +313,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     generationId, actor: principal, roles,
     requireProject, requireBoard, requireList, requireCard, requireComment, requireAttachment, requireLabel,
     requireChecklist, requireTask, requireFieldGroup, requireFieldDefinition, requireCardField,
-    projectAccess, boardAccess, membershipRow, managerRow, visibleBoards, visibleProjectStages, effectiveDefinitionGroups,
+    projectAccess, boardAccess, membershipRow, managerRow, visibleBoards, visibleProjectStages, effectiveDefinitionGroups, readableCardLookup,
   });
 }
 

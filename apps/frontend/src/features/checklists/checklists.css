@@ -1,0 +1,15 @@
+.card-checklists, .card-checklist, .checklist-assignees, .front-checklists { display: grid; gap: .55rem; min-width: 0; }
+.card-checklists { border-top: 1px solid var(--line); padding-block: .85rem; }
+.card-checklist { border: 1px solid var(--line); border-radius: .55rem; padding: .6rem .7rem; }
+.card-checklist h4 { margin: 0; }
+.checklist-toggle { text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+.checklist-task-list, .front-checklist-items { list-style: none; padding: 0; margin: 0; }
+.checklist-task-list { display: grid; gap: .45rem; }
+.checklist-task-list > li { display: grid; gap: .4rem; border-top: 1px solid var(--line); padding-top: .45rem; overflow-wrap: anywhere; }
+.checklist-task-heading { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; }
+.checklist-unavailable, .checklist-status { color: var(--muted); font-size: .86rem; }
+.front-checklists { flex-basis: 100%; padding: .3rem 0; overflow-wrap: anywhere; }
+.front-checklists strong { font-size: .85rem; }
+.front-checklists .front-checklist-items > li { padding: .1rem 0; border: 0; background: none; font-size: .82rem; display: flex; flex-wrap: wrap; gap: .3rem; }
+.checklist-controls { margin-block: .4rem .6rem; }
+.checklist-task-heading input[type='checkbox'] { accent-color: #27604c; width: 1.15rem; height: 1.15rem; }

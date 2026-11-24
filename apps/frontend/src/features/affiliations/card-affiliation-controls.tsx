@@ -1,16 +1,15 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { useLocation, useRevalidator } from 'react-router';
-import { workspaceSignInPath, type RelationshipReadOutput, type WorkspaceReadOutput } from '@planner/contracts';
-import { readAffiliation, relationshipCommand } from '../projects/project-api.js';
+import { useRevalidator } from 'react-router';
+import { type WorkspaceReadOutput } from '@planner/contracts';
+import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog } from '../projects/project-controls.js';
-import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
+import { useEligibleMemberPage } from './eligible-member-page.js';
 import { LabelChip, labelName, PersonalFollow, useAffiliationMutation } from './affiliation-ui.js';
 
 type Card = WorkspaceReadOutput<'cardGet'>['data'];
 type Workspace = NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>;
 type LinkOperation = 'cards.addLabel' | 'cards.removeLabel' | 'cards.assign' | 'cards.unassign';
-type CandidatePage = RelationshipReadOutput<'boards.mentionMembers'>;
 
 export function CardAffiliationControls({ card, workspace }: { card: Card; workspace: Workspace }) {
   const action = useAffiliationMutation();
@@ -71,17 +70,9 @@ export function CardAffiliationControls({ card, workspace }: { card: Card; works
 function AssignPeople({ card, busy, problem, close, assign }: {
   card: Card; busy: boolean; problem: string; close: () => void; assign: (id: string) => void;
 }) {
-  const [query, setQuery] = useState('');
-  const [cursor, setCursor] = useState<string>();
-  const [retry, setRetry] = useState(0);
-  const scope = JSON.stringify([card.boardId, card.revision, query, cursor, retry]);
-  const [result, setResult] = useState<{ scope: string; page?: CandidatePage }>();
-  const [accessLost, setAccessLost] = useState(false);
+  const members = useEligibleMemberPage(card.boardId, card.revision);
   const revalidator = useRevalidator();
-  const { pathname, search } = useLocation();
-  const signIn = workspaceSignInPath(pathname + search);
-  const boardId = card.boardId;
-
+  const { accessLost, result: visible, cursor, setCursor } = members;
   useEffect(() => {
     if (accessLost) {
       close();
@@ -89,27 +80,10 @@ function AssignPeople({ card, busy, problem, close, assign }: {
     }
   }, [accessLost, close, revalidator]);
 
-  useEffect(() => {
-    const abort = new AbortController();
-    const params = new URLSearchParams({ q: query });
-    if (cursor) params.set('cursor', cursor);
-    void readAffiliation('boards.mentionMembers', boardId, params, abort.signal).then((page) => {
-      if (!abort.signal.aborted) setResult({ scope, page });
-    }).catch((error: unknown) => {
-      if (abort.signal.aborted) return;
-      if (error instanceof WorkspaceRequestError && error.status === 401) window.location.replace(signIn);
-      else if (error instanceof WorkspaceRequestError && (error.status === 403 || error.status === 404)) setAccessLost(true);
-      else setResult({ scope });
-    });
-    return () => abort.abort();
-  }, [boardId, query, cursor, scope, signIn]);
-
   function searchMembers(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setQuery(String(new FormData(event.currentTarget).get('member') ?? '').trim());
-    setCursor(undefined);
+    members.search(String(new FormData(event.currentTarget).get('member') ?? ''));
   }
-  const visible = result?.scope === scope && revalidator.state === 'idle' ? result : null;
   const assigned = new Set(card.assignees.map(({ id }) => id));
   const people = visible?.page?.data.filter(({ id }) => !assigned.has(id));
   return <WorkspaceDialog title="Assign people" busy={busy} onClose={close}>
@@ -119,10 +93,7 @@ function AssignPeople({ card, busy, problem, close, assign }: {
       <button className="workspace-button" type="submit" disabled={busy}>Search members</button>
     </form>
     {!visible ? <p role="status">Loading board members…</p> : !visible.page ? <p role="alert">
-      Board members couldn’t load. <button className="workspace-button" type="button" onClick={() => {
-        setCursor(undefined);
-        setRetry((value) => value + 1);
-      }}>Retry</button>
+      Board members couldn’t load. <button className="workspace-button" type="button" onClick={members.retry}>Retry</button>
     </p> : <>
       {people?.length ? <ul className="board-palette" aria-label="Eligible board members">{people.map((person) => <li key={person.id}>
         <span>{person.name}{person.username && <small className="affiliation-username">{person.username}</small>}</span>
