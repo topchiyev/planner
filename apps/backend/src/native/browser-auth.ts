@@ -1,11 +1,12 @@
 import type { KeyObject } from 'node:crypto';
 import {
-  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, sessionSchema,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, boardEventsPath, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, sessionSchema,
   type BrowserSession, type FirstAdminInput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from 'mongodb';
+import type { BoardEventStreams } from '../application/board-events/streams.js';
 import type { CommandGate } from '../application/command-gate/gate.js';
 import {
   clearSessionCookie, createLoginRateLimit, hasValidCsrf, normalizeIdentifier, readSessionCookie, sessionCookie,
@@ -38,6 +39,7 @@ export interface BrowserAuth extends Pick<BrowserSessions, 'login' | 'read' | 'r
 
 export function createNativeBrowserAuth(
   config: NativeInstallationConfig, gate: CommandGate, mfaKey: KeyObject,
+  streams?: Pick<BoardEventStreams, 'recheckActor' | 'recheckToken'>,
 ): BrowserAuth & { accountManagement: NativeAccountManagement; mfa: NativeMfa } {
   const hasher = createPasswordHasher();
   const allowFactorOwner = createLoginRateLimit();
@@ -47,10 +49,10 @@ export function createNativeBrowserAuth(
     finally { await client.close(); }
   }
   const sessions = (database: Db) => createBrowserSessions(database, config.installationId, gate, hasher, undefined, mfaKey);
-  const factors = (database: Db) => createMfaManagement(database, config.installationId, gate, mfaKey, hasher);
+  const factors = (database: Db) => createMfaManagement(database, config.installationId, gate, mfaKey, hasher, undefined, streams?.recheckActor);
 
   const directory = (database: Db) => createAccountDirectory(database, config.installationId, gate, hasher);
-  const credentials = (database: Db) => createAccountCredentials(database, config.installationId, gate, hasher);
+  const credentials = (database: Db) => createAccountCredentials(database, config.installationId, gate, hasher, undefined, undefined, streams?.recheckActor);
 
   return {
     mfa: {
@@ -80,7 +82,11 @@ export function createNativeBrowserAuth(
     confirm: (input) => withDatabase((database) => createFirstAdminEnrollment(database, config.installationId, gate, hasher)(input)),
     login: (...args) => withDatabase((database) => sessions(database).login(...args)),
     read: (token) => withDatabase((database) => sessions(database).read(token)),
-    revoke: (token) => withDatabase((database) => sessions(database).revoke(token)),
+    async revoke(token) {
+      const revoked = await withDatabase((database) => sessions(database).revoke(token));
+      if (revoked) streams?.recheckToken(token);
+      return revoked;
+    },
   };
 }
 
@@ -133,6 +139,9 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
     if (request.plannerAccess?.kind !== 'ready') return;
     const pathname = requestPath(request);
     if (isPublicBrowserRoute(request.method, pathname, !!auth.mfa)) return;
+    // The exact SSE handler validates a passive session under its own read lease.
+    if (request.method === 'GET' && request.routeOptions.url === boardEventsPath
+        && request.routeOptions.config.plannerPassiveSession) return;
     reply.header('Cache-Control', 'no-store');
 
     const read = request.method === 'GET' || request.method === 'HEAD';

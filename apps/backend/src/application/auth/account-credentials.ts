@@ -201,7 +201,7 @@ type ChangeInput = Pick<AccountChange, 'id' | 'actorId' | 'kind' | 'origin' | 'a
 
 export function createAccountCredentials(
   database: Db, installationId: string, gate: CommandGate, hasher: PasswordHasher,
-  now = () => new Date(), checkpoint?: () => void | Promise<void>,
+  now = () => new Date(), checkpoint?: () => void | Promise<void>, onAccessChanged?: (actorId: string) => void,
 ) {
   async function current(token: string, actorId: string) {
     const session = await loadCurrentBrowserSession(database, installationId, token, now());
@@ -221,6 +221,7 @@ export function createAccountCredentials(
     if (!updated) throw new CommandRecoveryError('An account changed while recording its transition.');
     await checkpoint?.();
     await finishAccountChange(database, installationId, updated);
+    onAccessChanged?.(target.id);
   }
 
   async function pendingApproval(id: string) {

@@ -13,3 +13,4 @@ export * from './accounts.js';
 export * from './mfa.js';
 export * from './workspace.js';
 export * from './relationships.js';
+export * from './board-events.js';

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boardEventCursorSchema } from './board-events.js';
 import { nullableUtcInstantSchema, publicIdSchema, revisionSchema, signedInt64TextSchema, utcInstantSchema } from './storage.js';
 
 export const workspaceProjectType = z.enum(['private', 'shared']);
@@ -70,6 +71,7 @@ export const boardWorkspaceSchema = z.strictObject({
   preferences: boardPreferencesSchema,
   orderVersion: revisionSchema,
   latestEventSequence: signedInt64TextSchema,
+  eventCursor: boardEventCursorSchema,
 });
 export const cardSummarySchema = ordered.extend({
   boardId: publicIdSchema, listId: publicIdSchema, kind: workspaceCardContext, type: workspaceCardType,
