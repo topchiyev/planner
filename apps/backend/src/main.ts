@@ -1,53 +1,55 @@
-import { setTimeout as delay } from 'node:timers/promises';
+import { lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { defaultAppPort, type NativeInstallationConfig } from '@planner/contracts';
-import { buildApp } from './build-app.js';
-import { checkMongoReadiness } from './native/mongo-readiness.js';
+import { defaultAppPort } from '@planner/contracts';
+import { buildApp, type AppDependencies } from './build-app.js';
+import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
+import { proxyTokenPattern } from './native/http-boundary.js';
+import { readProtectedFile } from './native/mongo-host.js';
+import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
 import { readInstallationConfig } from './native/setup-state.js';
 
-let nativeConfig: NativeInstallationConfig | undefined;
-const app = buildApp({
-  isReady: async () => {
-    await checkMongoReadiness(nativeConfig);
-    // Schema, recovery and setup must also complete before the workspace can become ready.
-    return false;
-  },
-  frontendRoot: fileURLToPath(new URL('../../frontend/dist/', import.meta.url)),
-});
+let app: ReturnType<typeof buildApp> | undefined;
+let closeAdmin: (() => Promise<void>) | undefined;
 
 try {
-  if (process.env.PLANNER_NATIVE_INSTALLATION === '1') {
-    nativeConfig = readInstallationConfig(process.getgid?.() ?? -1);
-    if (!nativeConfig) throw new Error('Planner native setup is incomplete.');
-    const deadline = Date.now() + 15_000;
-    for (;;) {
-      try {
-        await checkMongoReadiness(nativeConfig);
-        break;
-      } catch (error) {
-        if (Date.now() >= deadline) throw error;
-        await delay(250);
-      }
+  const frontendRoot = fileURLToPath(new URL('../../frontend/dist/', import.meta.url));
+  const native = process.env.PLANNER_NATIVE_INSTALLATION === '1';
+  let port: number;
+  let dependencies: AppDependencies;
+  if (native) {
+    const group = process.getgid?.() ?? -1;
+    const config = readInstallationConfig(group);
+    if (!config) throw new Error('Planner native setup is incomplete.');
+    const run = lstatSync('/run');
+    if (!run.isDirectory() || run.uid !== 0 || run.gid !== 0 || (run.mode & 0o022) !== 0) {
+      throw new Error('Planner runtime directory is unsafe.');
     }
-  }
-  const configuredPort = nativeConfig ? String(nativeConfig.appPort)
-    : process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
-  if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) {
-    throw new Error('Invalid Planner HTTP port');
+    const proxyToken = readProtectedFile('/etc/planner/proxy-token', group, 0o640)?.replace(/\n$/u, '');
+    if (proxyToken !== undefined && !proxyTokenPattern.test(proxyToken)) throw new Error('Invalid Planner proxy token.');
+    const readAccess = boundedRuntimeProbe(() => inspectRuntimeAccess(config));
+    // Apply this before binding the local operator socket, including direct service-account startup.
+    process.umask(0o077);
+    closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess);
+    dependencies = { frontendRoot, native: { origin: config.publicUrl, proxyToken, readAccess } };
+    port = config.appPort;
+  } else {
+    const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
+    if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');
+    dependencies = { frontendRoot, isReady: async () => false };
+    port = Number(configuredPort);
   }
 
-  const address = await app.listen({ host: '127.0.0.1', port: Number(configuredPort) });
+  app = buildApp(dependencies);
+  const address = await app.listen({ host: '127.0.0.1', port });
   let shuttingDown = false;
 
   async function shutdown() {
-    if (shuttingDown) {
-      return;
-    }
+    if (shuttingDown) return;
     shuttingDown = true;
     try {
-      await app.close();
+      await Promise.all([app?.close(), closeAdmin?.()]);
     } catch {
-      console.error('Planner could not close its HTTP listener.');
+      console.error('Planner could not close its listeners.');
       process.exitCode = 1;
     } finally {
       process.off('SIGINT', shutdown);
@@ -59,6 +61,7 @@ try {
   process.on('SIGTERM', shutdown);
   console.log(address);
 } catch {
-  console.error('Planner could not start its HTTP listener.');
+  await Promise.allSettled([app?.close(), closeAdmin?.()]);
+  console.error('Planner could not start its listeners.');
   process.exitCode = 1;
 }

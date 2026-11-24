@@ -2,14 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
 import { registerFrontendShell } from './frontend-shell.js';
+import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
 
-export interface AppDependencies {
-  isReady: () => Promise<boolean>;
+export type AppDependencies = {
   frontendRoot?: string;
-}
+} & ({ isReady: () => Promise<boolean>; native?: never } | { native: NativeHttpBoundary; isReady?: never });
 
-export function buildApp({ isReady, frontendRoot }: AppDependencies) {
+export function buildApp({ isReady, frontendRoot, native }: AppDependencies) {
   const app = Fastify({ requestIdHeader: false, genReqId: () => randomUUID() });
+  app.decorateRequest('plannerConnection', null);
+  if (native) registerNativeHttpBoundary(app, native);
 
   app.get('/health/live', (request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -23,7 +25,7 @@ export function buildApp({ isReady, frontendRoot }: AppDependencies) {
   app.get('/health/ready', async (request, reply) => {
     let status: 'ready' | 'unavailable' = 'unavailable';
     try {
-      if ((await isReady()) === true) {
+      if (native ? (await native.readAccess()).kind === 'ready' : (await isReady()) === true) {
         status = 'ready';
       }
     } catch {
@@ -38,6 +40,6 @@ export function buildApp({ isReady, frontendRoot }: AppDependencies) {
     });
   });
 
-  if (frontendRoot) registerFrontendShell(app, frontendRoot);
+  if (frontendRoot) registerFrontendShell(app, frontendRoot, native !== undefined);
   return app;
 }

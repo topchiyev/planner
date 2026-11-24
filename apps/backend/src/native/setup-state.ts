@@ -85,7 +85,7 @@ export function publishInstallationConfig(config: NativeInstallationConfig, appG
 
 type PendingAction = 'first-admin-enrollment' | 'migration-preflight';
 
-interface InstallationRecord {
+export interface InstallationRecord {
   _id: string;
   installationId: string;
   activeGenerationId?: string | null;

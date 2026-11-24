@@ -62,6 +62,44 @@ Setup and `plannerctl start` verify the dedicated MongoDB instance, start the ap
 
 Stop Planner before a package upgrade or reinstall. Once configured, the installer checks the recorded ports automatically. Package removal stops and disables the services and preserves the configuration, database and files. After reinstalling, run `sudo plannerctl start` to resume the existing installation. The setup intent and package ports are root-only files under `/etc/planner`; the application configuration is readable by the Planner service group.
 
+## HTTPS reverse proxy
+
+The installed application reads the canonical HTTPS origin and selected port from `/etc/planner/planner.json`. It listens on the IPv4 loopback interface. The origin has the scheme, authority and optional root slash. Use the same authority, including any non-default HTTPS port, in the proxy configuration and in `plannerctl setup`.
+
+Use the [nginx server configuration](../ops/proxy/planner-nginx.conf) with the operator-managed TLS certificate and edit the server name, authority check, forwarded authority and loopback port to match the installation. For a non-default HTTPS port, also change the TLS listener and include that port in the configured authorities. The sample uses the nginx real-IP module to forward the actual connection peer address. It replaces the forwarded scheme and authority and streams board events without response buffering or compression.
+
+After setup creates the Planner service group, provision the proxy credential as root. This command stores it in two protected files and prints no token.
+
+```sh
+sudo sh -c '
+  set -eu
+  umask 077
+  openssl rand -hex 32 > /etc/planner/proxy-token
+  chown root:planner /etc/planner/proxy-token
+  chmod 0640 /etc/planner/proxy-token
+  awk '\''{ printf "proxy_set_header X-Planner-Proxy-Token %s;\n", $0 }'\'' \
+    /etc/planner/proxy-token > /etc/nginx/planner-proxy-auth.conf
+  chmod 0600 /etc/nginx/planner-proxy-auth.conf
+'
+sudo plannerctl restart
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Planner accepts a single address from authenticated loopback proxy requests. It uses its configured origin for security decisions and strips forwarding headers before dispatch. Direct local requests have no asserted public client address. Keep the nginx credential include root-only and exclude the token from proxy logs. Restart Planner and reload nginx when rotating it.
+
+## Runtime status and setup access
+
+`GET /health/live` tracks the HTTP process. `GET /health/ready` returns 503 during pending setup, migration, database downtime, staging errors, schema verification or recovery. Both responses carry `status`, `version` and a generated `requestId`, with `Cache-Control: no-store`.
+
+The native application gates workspace API requests, file metadata and bytes, event streams, ordinary sessions, consent and browser deep links before handlers run. Health and packaged assets remain available. When setup has a verified fresh enrollment grant, the boundary admits the recovery page and the exact recovery request from the configured HTTPS proxy and origin. Enrollment handlers and automatic workspace activation are implemented in later tasks.
+
+Ask the running service for its protected status with this local command. The socket belongs to the Planner service UID with mode `0600` in its managed runtime directory. The status exposes a bounded access state and release version.
+
+```sh
+sudo curl --unix-socket /run/planner/admin.sock http://localhost/status
+```
+
 ## Offline acceptance
 
 The [native installation test](../tests/release/native-installation.sh) runs as root in a disposable Ubuntu guest with networking disabled. Attach a read-only ISO containing the signed candidate and its test public key at the root, plus the signed prior package and its test public key under `previous/`. The script takes the ISO mount path. It verifies both signatures, checks failed installs and upgrades, and then installs and reinstalls the candidate while an independently owned MongoDB sentinel runs on port `27017`.
@@ -69,3 +107,5 @@ The [native installation test](../tests/release/native-installation.sh) runs as 
 Run the [private database acceptance test](../tests/release/native-mongodb.sh) in the same disposable guest after the native installation test passes. It exercises initialization, interruption, restart, a collision and an installation identity mismatch through the installed entry points.
 
 Run the [operator acceptance test](../tests/release/native-setup.sh) for each setup mode in a clean offline guest. It takes the signed candidate ISO mount point and the mode. After the first phase succeeds, reboot the same guest and run it with the additional `reboot-check` argument.
+
+Run the [HTTP and proxy acceptance test](../tests/release/native-http.sh) in a separate clean offline guest. Place the signed candidate, test public key, sample nginx configuration and `native-http-fixture.mjs` at the ISO root. Put the two nginx packages pinned by the test in `nginx/`. The test uses a guest-only event source to measure streaming through TLS.
