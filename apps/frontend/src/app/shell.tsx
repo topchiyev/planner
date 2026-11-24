@@ -6,7 +6,7 @@ import { BoardClipboardProvider } from '../features/cards/card-clipboard-state.j
 import { clearBoardRecipes } from '../features/boards/board-filter-store.js';
 import { InboxLink } from '../features/discussions/inbox-link.js';
 import { WorkspaceSidebar } from '../features/workspace/workspace-navigation.js';
-import { workspaceBoardId, type BoardReadRefusal } from '../features/workspace/workspace-loaders.js';
+import { workspaceBoardId, type BoardPresentation, type BoardReadRefusal } from '../features/workspace/workspace-loaders.js';
 import { sessionPath, type loadBrowserSession } from '../features/auth/browser-session.js';
 
 function clearSignedOutTab() {
@@ -19,7 +19,7 @@ export function AppShell() {
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [suspendedBoard, suspendBoard] = useState<BoardReadRefusal['deniedBoard']>();
+  const [presentation, presentBoard] = useState<BoardPresentation>();
   const [deniedBoard, refuseBoard] = useState<BoardReadRefusal['deniedBoard']>();
   const board = useRouteLoaderData<BoardReadRefusal['deniedBoard']>(workspaceBoardId);
   const sidebarToggle = useRef<HTMLButtonElement>(null);
@@ -28,7 +28,8 @@ export function AppShell() {
   const navigation = useNavigation();
   const actorScope = session && session.account.id + '/' + session.account.role;
   const authenticated = !!session;
-  const refusedBoard = !!board && (deniedBoard === board || suspendedBoard === board);
+  const liveBoard = presentation?.source === board ? presentation?.board : undefined;
+  const refusedBoard = !!board && (deniedBoard === board || liveBoard === null);
   const changingNativePage = authenticated && !!navigation.location && navigation.location.pathname !== pathname;
 
   useEffect(() => {
@@ -101,7 +102,7 @@ export function AppShell() {
             Projects
           </NavLink>
           {session && <InboxLink key={actorScope} actorId={session.account.id} follow={() => setSidebarOpen(false)} />}
-          {session && !changingNativePage && !refusedBoard && <WorkspaceSidebar key={actorScope} onFollow={() => setSidebarOpen(false)} />}
+          {session && !changingNativePage && !refusedBoard && <WorkspaceSidebar key={actorScope} currentBoard={liveBoard ?? undefined} onFollow={() => setSidebarOpen(false)} />}
         </nav>
         {session && (
           <div className="sidebar-account">
@@ -119,7 +120,7 @@ export function AppShell() {
       <main className="main-content" id="main-content" tabIndex={-1}>
         {navigation.state !== 'idle' && <p className="navigation-status" role="status">Loading…</p>}
         <BoardClipboardProvider key={actorScope}>{!changingNativePage &&
-          <Outlet context={{ deniedBoard, refuseBoard, suspendBoard } satisfies BoardReadRefusal} />}</BoardClipboardProvider>
+          <Outlet context={{ deniedBoard, refuseBoard, presentBoard } satisfies BoardReadRefusal} />}</BoardClipboardProvider>
       </main>
     </div>
   );

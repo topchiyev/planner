@@ -78,8 +78,11 @@ export async function readNativeBoard(boardId: string, url: URL, signal: AbortSi
     return { ...base, cardsPage };
   } catch (error) {
     if (!(error instanceof WorkspaceRequestError)) throw error;
-    if (error.code === 'INVALID_CURSOR' && cursor && !live)
-      throw redirect(url.pathname + boardFilterLocation(url.search, recipe));
+    if (error.code === 'INVALID_CURSOR' && cursor) {
+      if (!live) throw redirect(url.pathname + boardFilterLocation(url.search, recipe));
+      const cardsPage = await readWorkspace('boardCards', boardId, boardFilterApiQuery(context, recipe), signal);
+      return { ...base, cardsPage, recipeCursor: null };
+    }
     if (error.status === 403 || error.status === 404) return null;
     if (error.status === 401 || live) throw error;
     return { ...base, cardsPage: null };
@@ -92,12 +95,14 @@ export function loadNativeBoard({ params, request }: LoaderFunctionArgs) {
   return loadVisible(request, () => readNativeBoard(id.data, new URL(request.url), request.signal));
 }
 
-export async function readNativeCard(boardId: string, id: string, signal: AbortSignal) {
+export async function readNativeCard(boardId: string, cardId: string | undefined, signal: AbortSignal) {
+  const id = publicIdSchema.safeParse(cardId);
+  if (!id.success) return null;
   const query = new URLSearchParams({ boardId });
   try {
-    const card = (await readWorkspace('cardGet', id, query, signal)).data;
+    const card = (await readWorkspace('cardGet', id.data, query, signal)).data;
     if (card.boardId !== boardId) return null;
-    const checklists = (await readWorkspace('cardChecklists', id, query, signal)).data;
+    const checklists = (await readWorkspace('cardChecklists', id.data, query, signal)).data;
     return { ...card, checklists };
   } catch (error) {
     if (error instanceof WorkspaceRequestError && (error.status === 403 || error.status === 404)) return null;
@@ -105,15 +110,18 @@ export async function readNativeCard(boardId: string, id: string, signal: AbortS
   }
 }
 
+type BoardSnapshot = NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>;
+
+export type BoardPresentation = { source: BoardSnapshot; board: BoardSnapshot | null };
+
 export type BoardReadRefusal = {
-  deniedBoard: Awaited<ReturnType<typeof loadNativeBoard>> | undefined;
-  refuseBoard: (board: Awaited<ReturnType<typeof loadNativeBoard>> | undefined) => void;
-  suspendBoard: (board: Awaited<ReturnType<typeof loadNativeBoard>> | undefined) => void;
+  deniedBoard: BoardSnapshot | null | undefined;
+  refuseBoard: (board: BoardSnapshot | null | undefined) => void;
+  presentBoard: (value: BoardPresentation | undefined) => void;
 };
 
 export function loadNativeCard({ params, request }: LoaderFunctionArgs) {
   const boardId = publicIdSchema.safeParse(params.boardId);
-  const id = publicIdSchema.safeParse(params.cardId);
-  if (!boardId.success || !id.success) return null;
-  return loadVisible(request, () => readNativeCard(boardId.data, id.data, request.signal));
+  if (!boardId.success) return null;
+  return loadVisible(request, () => readNativeCard(boardId.data, params.cardId, request.signal));
 }

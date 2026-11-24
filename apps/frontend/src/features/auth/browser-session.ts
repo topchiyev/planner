@@ -12,8 +12,18 @@ export async function readBrowserSession(signal: AbortSignal, activity: 'active'
   return sessionSchema.parse(await response.json());
 }
 
+let passiveDestination: { url: string } | undefined;
+
+export async function replaceBrowserLocationPassively(destination: string, replace: () => void | Promise<void>) {
+  const pending = { url: new URL(destination, window.location.origin).href };
+  passiveDestination = pending;
+  try { await replace(); }
+  finally { if (passiveDestination === pending) passiveDestination = undefined; }
+}
+
 export async function loadBrowserSession({ request }: LoaderFunctionArgs) {
-  const session = await readBrowserSession(request.signal, 'active');
+  const activity = request.url === passiveDestination?.url ? 'passive' : 'active';
+  const session = await readBrowserSession(request.signal, activity);
   if (session) return session;
   const url = new URL(request.url);
   throw redirect(workspaceSignInPath(url.pathname + url.search));

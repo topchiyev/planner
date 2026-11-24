@@ -8,13 +8,22 @@ import type { EditorMode } from './card-markdown.js';
 import { clearDescriptionDraft } from './description-drafts.js';
 import { DescriptionRecovery } from './description-recovery.js';
 import { useDescriptionDraft } from './use-description-draft.js';
+import './card-editor.css';
 
 const CardDescription = lazy(async () => ({ default: (await import('./card-markdown.js')).CardDescription }));
 const CardMarkdownInput = lazy(async () => ({ default: (await import('./card-markdown.js')).CardMarkdownInput }));
 
 type Card = WorkspaceReadOutput<'cardGet'>['data'];
 type Update = Omit<RelationshipCommandInput<'cards.update'>, 'id' | 'expectedRevision'>;
-type Draft = { revision: number; values: Update };
+type CardFields = Required<Pick<Update, 'name' | 'type' | 'description' | 'dueDate' | 'dueDateCompleted' | 'closed'>>;
+type Draft = { revision: number; baseline: CardFields; values: Partial<CardFields> };
+
+function cardDraft(revision: number, baseline: CardFields, values: Partial<CardFields>): Draft | null {
+  const changed = Object.fromEntries(Object.entries(values)
+    .filter(([key, value]) => value !== baseline[key as keyof CardFields])) as Partial<CardFields>;
+  if ((changed.dueDate === undefined ? baseline.dueDate : changed.dueDate) === null) delete changed.dueDateCompleted;
+  return Object.keys(changed).length ? { revision, baseline, values: changed } : null;
+}
 const options = { project: 'Project', story: 'Story' } as const;
 const errors = new Map([
   ['CARD_TYPE_RESTRICTED', 'This board does not allow the selected card type.'],
@@ -81,7 +90,7 @@ function EditableCard({ card, restriction, draftScope }: Props) {
   const { id, revision } = card;
   const draftKey = draftScope ? draftScope + '/' + id : undefined;
   const descriptionDraft = useDescriptionDraft(draftKey);
-  const current = {
+  const current: CardFields = {
     name: card.name, type: card.type, description: card.description, dueDate: card.dueDate, dueDateCompleted: card.dueDateCompleted ?? false, closed: card.closed,
   };
   const effective = { ...current, ...dirty };
@@ -95,8 +104,8 @@ function EditableCard({ card, restriction, draftScope }: Props) {
   if (effective.dueDate == null) delete dirtyValues.dueDateCompleted;
   const valid = dirtyValues.name !== '' && (dirtyValues.name?.length ?? 0) <= 128
     && (dirtyValues.description?.length ?? 0) <= maximumCardDescriptionLength;
-  const edit = <K extends keyof Update>(key: K, value: Update[K]) => {
-    setDraft((old) => ({ revision: old?.revision ?? revision, values: { ...old?.values, [key]: value } }));
+  const edit = <K extends keyof CardFields>(key: K, value: CardFields[K]) => {
+    setDraft((old) => cardDraft(old?.revision ?? revision, old?.baseline ?? current, { ...old?.values, [key]: value }));
   };
 
   function update(body: Update, expected: number, done: (revision: number) => void, storedVersion?: string) {
@@ -123,7 +132,7 @@ function EditableCard({ card, restriction, draftScope }: Props) {
         const saved = descriptionDraft.offer!;
         descriptionDraft.recover(saved);
         setEditorMode(saved.mode);
-        setDraft((old) => ({ revision: saved.baseRevision, values: { ...old?.values, description: saved.markdown || null } }));
+        setDraft((old) => cardDraft(saved.baseRevision, old?.baseline ?? current, { ...old?.values, description: saved.markdown || null }));
       }} onDiscard={() => descriptionDraft.clear(descriptionDraft.offer?.version)} />}
     {action.problem && (!stale || action.problemCode !== 'REVISION_CONFLICT') && <p className="workspace-problem" role="alert">{action.problem}</p>}
     {stale && <div className="project-confirm">
@@ -131,7 +140,9 @@ function EditableCard({ card, restriction, draftScope }: Props) {
       <details><summary>Current saved description</summary>{card.description ? <pre>{card.description}</pre> : <p>Empty description</p>}</details>
       <div className="project-actions">
         <button type="button" className="workspace-button" onClick={() => {
-          descriptionDraft.recordEditor({ baseRevision: revision }); setDraft({ ...draft, revision }); action.clearProblem();
+          descriptionDraft.recordEditor({ baseRevision: revision });
+          setDraft(cardDraft(revision, current, draft.values));
+          action.clearProblem();
         }}>Keep edits and use current revision</button>
         <button type="button" className="workspace-button" onClick={() => {
           descriptionDraft.clear(descriptionDraft.active?.version); setDraft(null); action.clearProblem();
@@ -158,9 +169,14 @@ function EditableCard({ card, restriction, draftScope }: Props) {
             onChange={(event) => edit('dueDateCompleted', event.target.checked)} />Due date complete</label>}
         </fieldset>}
         <Suspense fallback={<p role="status">Loading description editor…</p>}>
-          <CardMarkdownInput value={effective.description ?? ''} original={current.description ?? ''} mode={editor} boardId={card.boardId}
+          <CardMarkdownInput value={effective.description ?? ''} original={current.description ?? ''} mode={editor} boardId={card.boardId} disabled={action.busy}
             onMode={(mode) => { setEditorMode(mode); descriptionDraft.recordEditor({ mode }); }}
-            onChange={(value) => { descriptionDraft.write(value, draft?.revision ?? revision, editor); edit('description', value || null); }} />
+            onChange={(value) => {
+              const next = value || null;
+              if ((draft ? draft.baseline.description : current.description) === next) descriptionDraft.clear(descriptionDraft.active?.version);
+              else descriptionDraft.write(value, draft?.revision ?? revision, editor);
+              edit('description', next);
+            }} />
         </Suspense>
       </fieldset>
       {!valid && <p className="workspace-problem" role="status">Use up to 128 characters in the title and {maximumCardDescriptionLength} in the description.</p>}
@@ -169,7 +185,7 @@ function EditableCard({ card, restriction, draftScope }: Props) {
         setDraft((old) => {
           if (!old) return old;
           const { description: _description, ...values } = old.values;
-          return Object.keys(values).length ? { ...old, values } : null;
+          return cardDraft(old.revision, old.baseline, values);
         });
       }}>Discard description draft</button>}
       <button type="submit" className="workspace-button workspace-button-primary"

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { boardEventsPath, boardEventCursorSchema, boardEventFrameSchema, workspaceSignInPath } from '@planner/contracts';
-import { readBrowserSession } from '../auth/browser-session.js';
+import { useNavigate } from 'react-router';
+import { readBrowserSession, replaceBrowserLocationPassively } from '../auth/browser-session.js';
+import { boardFilterLocation } from '../workspace/board-filter-route.js';
 import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import { readNativeBoard, readNativeCard } from '../workspace/workspace-loaders.js';
 
@@ -29,6 +31,7 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
   cardId?: string;
   location: string;
 }) {
+  const navigate = useNavigate();
   const boardId = initial?.board.id;
   const recipeScope = initial?.recipeScope;
   const scope = useMemo(() => Symbol(), [actorId, recipeScope, boardId, location]);
@@ -178,6 +181,11 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
         const board = await readNativeBoard(boardId, url, signal, true);
         if (superseded()) return;
         if (board === null || board.recipeScope !== recipeScope) { stop('missing'); return; }
+        if (url.searchParams.has('cursor') && board.recipeCursor === null) {
+          const destination = url.pathname + boardFilterLocation(url.search, board.recipe);
+          await replaceBrowserLocationPassively(destination, () => navigate(destination, { replace: true }));
+          return;
+        }
         const card = cardId ? await readNativeCard(boardId, cardId, signal) : undefined;
         if (superseded()) return;
         result = { source: baseline, board, card };
@@ -227,7 +235,7 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
       refresh?.abort();
       manual.current = () => {};
     };
-  }, [scope, boardId, actorId, recipeScope, cardId, location]);
+  }, [scope, boardId, actorId, recipeScope, cardId, location, navigate]);
 
   const recheck = useCallback(() => manual.current(), []);
   return {

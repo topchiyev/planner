@@ -38,7 +38,7 @@ export function BoardPage() {
   const clipboard = useBoardClipboard();
   const paste = useRef<HTMLButtonElement>(null);
   const navigation = useNavigation();
-  const { deniedBoard, refuseBoard, suspendBoard } = useOutletContext<BoardReadRefusal>();
+  const { deniedBoard, refuseBoard, presentBoard } = useOutletContext<BoardReadRefusal>();
   const { key, pathname, search, state: routeState } = useLocation();
   const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
   const pending = !!navigation.location && (navigation.location.pathname !== pathname || navigation.location.search !== search);
@@ -50,30 +50,16 @@ export function BoardPage() {
   useLayoutEffect(() => {
     if (initial && live.phase === 'missing') refuseBoard(initial);
     else if (initial && deniedBoard === initial && live.phase === 'visible' && board !== initial) refuseBoard(undefined);
-    if (initial && concealed) suspendBoard(initial);
-    else suspendBoard(undefined);
-    return () => suspendBoard(undefined);
-  }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, suspendBoard]);
+    presentBoard(initial && (concealed || board !== initial)
+      ? { source: initial, board: concealed ? null : board ?? null } : undefined);
+    return () => presentBoard(undefined);
+  }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, presentBoard]);
   useEffect(() => {
     const selected = clipboard?.selected;
     if (!selected) return;
     if (board && board.recipeScope !== selected.scope) { clipboard.discard(selected); return; }
     if (clipboard.attempt || selected.boardId !== boardId) return;
-    function clipboardKeys(event: KeyboardEvent<HTMLElement>) {
-    if (!board || !clipboard || clipboard.busy || concealed || pending) return;
-    const shortcut = clipboardShortcut(event);
-    if (!shortcut) return;
-    if (shortcut === 'paste') {
-      if (paste.current && !paste.current.disabled) { event.preventDefault(); paste.current.click(); }
-      return;
-    }
-    const target = event.target as HTMLElement;
-    const id = target.closest<HTMLElement>('[data-clipboard-card]')?.dataset.clipboardCard;
-    const card = board.cardsPage?.data.find((item) => item.id === id);
-    if (card && selectClipboardCard(shortcut, card, board.recipeScope, clipboard.select)) event.preventDefault();
-  }
-
-  if (initial === null || live.phase === 'missing' || (cardId === selected.cardId && live.card === null)) clipboard.discard(selected);
+    if (initial === null || live.phase === 'missing' || (cardId === selected.cardId && live.card === null)) clipboard.discard(selected);
   }, [clipboard, board, boardId, initial, live.phase, cardId, live.card]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
@@ -107,6 +93,20 @@ export function BoardPage() {
     if (nextView) nextParams.set('view', nextView);
     else if (nextContext !== context.id) nextParams.delete('view');
     return { pathname, search: `?${nextParams}` };
+  }
+
+  function clipboardKeys(event: KeyboardEvent<HTMLElement>) {
+    if (!board || !clipboard || clipboard.busy || concealed || pending) return;
+    const shortcut = clipboardShortcut(event);
+    if (!shortcut) return;
+    if (shortcut === 'paste') {
+      if (paste.current && !paste.current.disabled) { event.preventDefault(); paste.current.click(); }
+      return;
+    }
+    const target = event.target as HTMLElement;
+    const id = target.closest<HTMLElement>('[data-clipboard-card]')?.dataset.clipboardCard;
+    const card = board.cardsPage?.data.find((item) => item.id === id);
+    if (card && selectClipboardCard(shortcut, card, board.recipeScope, clipboard.select)) event.preventDefault();
   }
 
   if (initial === null || live.phase === 'missing' || (initial && deniedBoard === initial)) return <RouteNotFound />;
@@ -152,7 +152,7 @@ export function BoardPage() {
             <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} view={view} removed={live.removed} />
           </div>
         </> : !board && <EmptyState title={context.emptyTitle} />}
-        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.board.revision} />}
+        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.latestEventSequence} removed={live.removed} />}
       </section>
       <Outlet context={{ board, liveCard: live.card } satisfies BoardInspectorContext} />
     </div></div>

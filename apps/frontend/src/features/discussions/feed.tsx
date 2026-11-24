@@ -11,7 +11,7 @@ export function feedCardHref(card: FeedCard) {
   return `/boards/${card.boardId}/cards/${card.id}` + (card.kind === 'board' ? '' : '?context=' + card.kind);
 }
 
-export function useScopedFeed<K extends Feed>(operation: K, id: string, version: number, boardId?: string, enabled = true) {
+export function useScopedFeed<K extends Feed>(operation: K, id: string, version: number | string, boardId?: string, enabled = true) {
   const { pathname, search } = useLocation();
   const revalidator = useRevalidator();
   const [cursor, setCursor] = useState<string>();
@@ -58,19 +58,22 @@ const activityTitles = {
   unassignCard: 'unassigned a member', completeTask: 'completed a task', uncompleteTask: 'reopened a task',
 };
 
-export function ActivityFeed({ id, revision, boardId }: { id: string; revision: number; boardId?: string }) {
+export function ActivityFeed({ id, revision, boardId, removed }: {
+  id: string; revision: number | string; boardId?: string; removed?: ReadonlySet<string>;
+}) {
   const [open, setOpen] = useState(false);
   const { result, cursor, setCursor, retry } = useScopedFeed(boardId ? 'cardActivity' : 'boardActivity', id, revision, boardId, open);
   const data = result?.data;
+  const entries = data?.data.filter((entry) => !removed?.has(entry.card.id)) ?? [];
   return <details className="workspace-feed activity-feed" aria-label={boardId ? 'Card activity' : 'Board activity'}
     open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>{boardId ? 'Card activity' : 'Board activity'}</summary>
     {open && (!result ? <p role="status">Loading activity…</p> : !data
       ? <p role="alert">Activity couldn’t load. <button className="workspace-button" type="button" onClick={retry}>Retry</button></p>
       : <>
-        {data.data.length === 0 && <p>No activity.</p>}
+        {entries.length === 0 && <p>No activity.</p>}
         <ol className="feed-entries">
-          {data.data.map((event) => <li key={event.id}>
+          {entries.map((event) => <li key={event.id}>
             <p><strong>{event.actor?.name ?? 'Unknown account'}</strong> {activityTitles[event.kind]}.</p>
             {!boardId && <Link to={feedCardHref(event.card)}>{event.card.name}</Link>}
             <FeedTime value={event.createdAt} />
