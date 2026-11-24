@@ -88,7 +88,7 @@ export function cardPermissions(board: BoardAccessContext, list: List): CardAcce
     canArchive: ordinary && edit,
     canTrash: list.kind !== 'trash' && edit,
     canRestore: !ordinary && edit,
-    canPurge: list.kind === 'trash' && board.permissions.canClearTrash,
+    canPurge: list.kind === 'trash' && edit,
   };
 }
 

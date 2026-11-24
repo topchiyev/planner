@@ -33,7 +33,10 @@ test('protected workspace endpoints enforce ownership, hidden context, independe
   await withFixtureMongo(async (mongo) => {
     const f = await makeWorkspaceAccessFixture(mongo);
     const sibling = fixtureId(700);
+    const sharedTrashCard = fixtureId(705);
     try {
+      await f.insert('cards', sharedTrashCard, { boardId: ids.sharedBoard, listId: ids.sharedTrash,
+        type: 'project', kind: 'trash', rank: null, name: 'Shared historical card' });
       await f.insert('boards', sibling, { projectId: ids.privateProject, name: 'Private sibling secret', rank: '2048' });
       await f.insert('projectFavorites', fixtureId(703), { projectId: ids.hiddenProject, userId: ids.admin });
       const admin = await actor(f, ids.admin);
@@ -91,6 +94,11 @@ test('protected workspace endpoints enforce ownership, hidden context, independe
       assert.equal(managed.permissions.canEdit, false);
       assert.equal(managed.permissions.canComment, false);
       assert.equal(managed.permissions.canDuplicateFrom, true);
+      assert.equal(managed.permissions.canClearTrash, true);
+      const managerTrash = (await verified(f, cardPath(sharedTrashCard), manager, 'cardGet')).data.data.permissions;
+      const editorTrash = (await verified(f, cardPath(sharedTrashCard), editor, 'cardGet')).data.data.permissions;
+      assert.deepEqual([managerTrash.canMove, managerTrash.canRestore, managerTrash.canPurge], [false, false, false]);
+      assert.deepEqual([editorTrash.canMove, editorTrash.canRestore, editorTrash.canPurge], [true, true, true]);
       const ownerList = (await verified(f, projects, createOnly, 'projectsList')).data;
       assert.equal(ownerList.permissions.canCreate, true);
       assert.deepEqual(ownerList.data, []);
