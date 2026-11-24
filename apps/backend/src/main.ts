@@ -1,6 +1,10 @@
+import { fileURLToPath } from 'node:url';
 import { buildApp } from './build-app.js';
 
-const app = buildApp({ isReady: async () => false });
+const app = buildApp({
+  isReady: async () => false,
+  frontendRoot: fileURLToPath(new URL('../../frontend/dist/', import.meta.url)),
+});
 
 try {
   const configuredPort = process.env.PLANNER_HTTP_PORT ?? '27430';

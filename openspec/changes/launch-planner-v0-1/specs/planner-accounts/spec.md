@@ -19,7 +19,7 @@ Planner SHALL let a fresh installation establish an administrator and let admini
 - **THEN** that browser session can no longer read or mutate authenticated resources.
 
 ### Requirement: Enforce workspace membership rules
-Planner SHALL enforce workspace, project and board roles on the server for reads, writes, attachments and event delivery. Access SHALL reflect the current account and resource memberships.
+Planner SHALL enforce workspace, project and board roles in the backend for reads, writes, attachments and event delivery. Access SHALL reflect the current account and resource memberships.
 
 #### Scenario: A viewer attempts to modify a board
 - **WHEN** a user with read-only board access attempts to move a card through a supported client

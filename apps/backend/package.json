@@ -1,5 +1,5 @@
 {
-  "name": "@planner/server",
+  "name": "@planner/backend",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@fastify/static": "10.1.12",
     "@modelcontextprotocol/fastify": "2.0.1",
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0",
