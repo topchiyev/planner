@@ -58,9 +58,16 @@ test('a same-board move updates closure, scoped linked completion and eligible d
     const hiddenOwner = fixtureId(5001);
     const hiddenChecklist = fixtureId(5002);
     const hiddenTask = fixtureId(5003);
+    const left = fixtureId(5005);
+    const localChecklist = fixtureId(5006);
+    const localTask = fixtureId(5007);
     await f.db.collection('cards').updateOne({ ...f.scope, id: card }, { $set: { listId: source, closed: true } });
     await f.insert('cards', anchor, { boardId: ids.privateBoard, listId: destination, name: 'Anchor',
-      kind: 'board', type: 'story', closed: false, rank: '2048' });
+      kind: 'board', type: 'story', closed: false, rank: '9007199254740996' });
+    await f.insert('cards', left, { boardId: ids.privateBoard, listId: destination, name: 'Dense left',
+      kind: 'board', type: 'story', closed: false, rank: '9007199254740995' });
+    await f.insert('checklists', localChecklist, { cardId: anchor, name: 'Local checklist', rank: '1024' });
+    await f.insert('tasks', localTask, { checklistId: localChecklist, linkedCardId: card, completed: false, rank: '1024' });
     await f.insert('cards', hiddenOwner, { boardId: ids.hiddenBoard, listId: ids.hiddenActiveList, name: 'Hidden owner card',
       kind: 'board', type: 'story', closed: false, rank: '2048' });
     await f.insert('checklists', hiddenChecklist, { cardId: hiddenOwner, name: 'Hidden checklist', rank: '1024' });
@@ -93,12 +100,19 @@ test('a same-board move updates closure, scoped linked completion and eligible d
     assert.deepEqual(await f.db.collection('tasks').findOne({ ...f.scope, id: hiddenTask }, { projection: { _id: 0, completed: 1, revision: 1 } }),
       { completed: false, revision: 2 });
     assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: hiddenOwner })).revision, 2);
+    const rankedOwner = await f.db.collection('cards').findOne({ ...f.scope, id: anchor }, { promoteLongs: false });
+    assert.deepEqual([rankedOwner.rank.toBigInt(), rankedOwner.revision], [3072n, 2]);
+    assert.equal((await f.db.collection('checklists').findOne({ ...f.scope, id: localChecklist })).revision, 2);
+    assert.equal((await f.db.collection('tasks').findOne({ ...f.scope, id: localTask })).revision, 2);
     const [activity] = await f.db.collection('activities').find({ ...f.scope, cardId: card, kind: 'moveCard' }).toArray();
     assert.deepEqual([activity.fromListId, activity.toListId], [source, destination]);
     const notices = await f.db.collection('notifications').find({ ...f.scope, cardId: card }).sort({ recipientId: 1 }).toArray();
     assert.deepEqual(notices.map(({ recipientId, activityId }) => [recipientId, activityId]), [[ids.secondEditor, activity.id], [ids.viewer, activity.id]]);
     const hiddenEvents = await f.db.collection('events').find({ ...f.scope, boardId: ids.hiddenBoard, commandId: activity.commandId }).toArray();
     assert.deepEqual(hiddenEvents.map(({ kind, payload }) => [kind, payload]), [['board.invalidated', {}]]);
+    const localEvents = await f.db.collection('events').find({ ...f.scope, boardId: ids.privateBoard, commandId: activity.commandId })
+      .sort({ sequence: 1 }).toArray();
+    assert.deepEqual(localEvents.map(({ kind, payload }) => [kind, payload]), [['card.changed', { id: card, revision: 2 }], ['board.invalidated', {}]]);
     assert.equal(await f.db.collection('activities').countDocuments({ ...f.scope, cardId: card }), 1);
 
     await expected(mutate(f, manager, 'PATCH', boardPath(ids.privateBoard) + '/members/' + ids.firstEditor, 1,
