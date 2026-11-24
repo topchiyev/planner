@@ -6,6 +6,7 @@ import { invalidBaseRow } from './base-fields.js';
 import { baseRelationshipTables, baseWorkspaceTables, reserveSourceRecord, writeBaseRelationship, writeBaseRow } from './base-workspace.js';
 import { importRunKey, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint,
   type migrationCursors } from './checkpoint.js';
+import { discussionTables, writeImportedDiscussion } from './discussion-stage.js';
 import { MigrationError } from './manifest.js';
 import { assertVerifiedSourceSnapshot, type VerifiedSourceSnapshot } from './preflight.js';
 import { maximumSourceBatch, projectedSourceTables } from './source-projections.js';
@@ -18,6 +19,7 @@ const stageTables = [
   { pass: 'base', tables: baseWorkspaceTables },
   { pass: 'edges', tables: baseRelationshipTables },
   { pass: 'deferred', tables: workspaceRelationshipTables },
+  { pass: 'projections', tables: discussionTables },
 ] as const;
 const rankTables = new Set(['project', 'board', 'list', 'card', ...relationshipRankTables]);
 const passOrdinal = ['reserve', 'base', 'edges', 'deferred', 'projections'];
@@ -69,6 +71,8 @@ export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: I
                 } else if (pass === 'deferred') {
                   await writeWorkspaceRelationship(records, capturedAt, { table, row } as Parameters<typeof writeWorkspaceRelationship>[2],
                     await rank?.take(row.id) ?? null);
+                } else if (pass === 'projections') {
+                  await writeImportedDiscussion(records, identity.runId, capturedAt, { table, row } as Parameters<typeof writeImportedDiscussion>[3]);
                 } else {
                   if (table === 'board') await assertBoardSystemLists(db, generationId, row.id);
                   const position = await rank?.take(row.id) ?? null;
