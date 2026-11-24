@@ -8,6 +8,7 @@ import { createBoardEventStore } from '../board-events/store.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { attachmentFiles, cardAttachmentRows, coverForCard, cardCovers } from './card-media.js';
 import { cardDto, cardStopwatch } from './card-state.js';
 import { createChecklistReads } from './checklist-reads.js';
 import { checklistOrderVersion } from './checklist-state.js';
@@ -19,7 +20,6 @@ import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersi
 import { boardListOrderVersion, listDto } from './list-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
-import { availableMedia, unavailableMedia } from '../media/records.js';
 import { availableProjectImage, effectiveProjectBackground } from './project-background.js';
 import { canonicalRow, createWorkspaceRecords, equal, publicIdField, rankSort, together, type WorkspaceRow } from './records.js';
 import { projectFavoriteFilter, projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
@@ -67,21 +67,6 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
   async function visiblePeople(ids: string[]) {
     return (await records.find('users', { id: { $in: ids }, $expr: canonical }, { id: 1 })).map(person);
-  }
-
-  async function blobAvailable(blobDigest?: string | null, image = false) {
-    return !!blobDigest && !!await records.first('blobs', {
-      digest: blobDigest, lifecycleState: availableMedia,
-      ...(image && { 'variants.small.digest': { $type: 'string' }, 'variants.large.digest': { $type: 'string' } }),
-    });
-  }
-
-  async function attachment(row: WorkspaceRow<'attachments'>) {
-    const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
-    return {
-      ...entity(row), name: row.name, cardId: row.cardId, kind: row.kind,
-      available: row.kind === 'link' ? !!url : row.availability === availableMedia && await blobAvailable(row.blobDigest), byteLength: row.byteLength ?? null, url,
-    };
   }
 
   async function fieldGroups(groups: FieldGroup[], projectId: string) {
@@ -272,9 +257,11 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         return { listChangedAt: iso(row.listChangedAt), historySequence: rank(row.historySequence), id: row.id };
       });
       const ids = selected.map(({ id }) => id);
-      const [front, fields] = await together([checklistReads.front(ids, board.board.id), frontFields(board, ids)]);
+      const [front, fields, covers] = await together([
+        checklistReads.front(ids, board.board.id), frontFields(board, ids), cardCovers(records, generationId, selected),
+      ]);
       return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front.get(row.id) ?? [],
-        frontFields: fields.get(row.id) ?? [] })),
+        frontFields: fields.get(row.id) ?? [], cover: covers.get(row.id) ?? null })),
         page, searchValidation: 'ok' as const };
     },
 
@@ -286,16 +273,22 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         records.find('cardLabels', { cardId: id, ...cardLabelJoinFilter(generationId, id) }),
         records.find('cardAssignees', { cardId: id,
           $expr: { $and: [canonical, equal('cardId', id), publicIdField('userId')] } }),
-        records.find('attachments', { cardId: id, deletedAt: null, kind: { $in: ['file', 'link'] } }, { createdAt: 1, id: 1 }),
+        cardAttachmentRows(records, generationId, id),
         previousList(context), cardFields(context),
         context.permissions.canFollow ? personalFollow(records, generationId, 'card', id, actor.id) : null,
       ]);
       const labels = await scopedLabels(records, generationId, boardId, links.map(({ labelId }) => labelId));
       const assignees = await eligibleBoardPeople(records, generationId, boardId, { id: { $in: assignments.map(({ userId }) => userId) } }, [{ $sort: { id: 1 } }]);
-      const visibleAttachments = await together(attachments.map(attachment));
-      const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file');
-      const coverAttachmentId = cover && (cover.availability === unavailableMedia
-        || (cover.availability === availableMedia && await blobAvailable(cover.blobDigest, true))) ? cover.id : null;
+      const files = await attachmentFiles(records, generationId, attachments);
+      const visibleAttachments = attachments.map((row) => {
+        const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
+        const file = files.get(row.id);
+        const { byteLength: length } = row;
+        const byteLength = row.kind === 'file' && typeof length === 'number' && Number.isSafeInteger(length) && length >= 0 ? length : null;
+        return { ...entity(row), name: row.name, cardId: row.cardId, kind: row.kind,
+          available: !!url || !!file, hasThumbnail: file?.hasThumbnail ?? false, byteLength, url };
+      });
+      const coverAttachmentId = coverForCard(card, attachments.find(({ id }) => id === card.coverAttachmentId), files)?.attachmentId ?? null;
       return { data: { ...cardDto(card, board, list), description: card.description ?? null, stopwatch: cardStopwatch(card.stopwatch), checklistOrderVersion: checklistOrderVersion(card), previousListId, labels: labels.map(labelDto),
         assignees, following: !!follow, automaticFollow: !!follow && 'isPermanent' in follow && follow.isPermanent === false,
         attachments: visibleAttachments,

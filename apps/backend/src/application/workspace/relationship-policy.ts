@@ -13,6 +13,7 @@ const failures = {
   cardOrder: [409, 'CARD_ORDER_CONFLICT', 'The card order changed. Review the current list and try again.'],
   cardType: [422, 'CARD_TYPE_RESTRICTED', 'This board does not allow the selected card type.'],
   cardDue: [422, 'CARD_DUE_DATE_REQUIRED', 'Set a due date before changing its completion.'],
+  cardCover: [422, 'INVALID_CARD_COVER', 'Choose an available image from this card.'],
   cardStopwatch: [422, 'CARD_STOPWATCH_STATE', 'The stopwatch cannot make that change in its current state.'],
   archiveCardsSource: [422, 'ARCHIVE_CARDS_SOURCE', 'Choose a closed list to archive its cards.'],
   trashDeleteData: [422, 'TRASH_CLEAR_DATA_LIMIT', 'This trash contains imported data too large to preserve while clearing it.'],

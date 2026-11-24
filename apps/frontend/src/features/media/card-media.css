@@ -1,0 +1,10 @@
+.card-attachments { display: grid; gap: .55rem; min-width: 0; border-top: 1px solid var(--line); padding-block: .85rem; }
+.card-attachments h3 { margin: 0; }
+.card-attachment-list { display: grid; gap: .6rem; padding: 0; margin: 0; list-style: none; }
+.card-attachment-list > li { display: grid; gap: .45rem; border: 1px solid var(--line); border-radius: .55rem; padding: .65rem; min-width: 0; }
+.attachment-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem .6rem; overflow-wrap: anywhere; min-width: 0; }
+.attachment-status, .card-cover-unavailable { color: var(--muted); font-size: .86rem; }
+.attachment-thumbnail { display: block; max-width: 100%; width: 10rem; max-height: 7rem; object-fit: contain; object-position: left center; border-radius: .35rem; }
+.card-front-cover { flex-basis: 100%; width: 100%; max-height: 8rem; object-fit: cover; border-radius: .35rem; }
+.board-cards > li > .card-cover-unavailable { flex-basis: 100%; }
+.workspace-list-summary .board-cards > li:has(> .card-front-cover, > .card-cover-unavailable) { flex-wrap: wrap; }

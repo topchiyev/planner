@@ -192,7 +192,7 @@ export function createRelationshipJournalOperations(
       (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.restore', input }, context)),
     'lists.delete': define('lists.delete', (scope, input) => authorizeFiniteListDeletion(database, scope, input, idempotencyKey), planFiniteListDeletion),
     'cards.create': define('cards.create', (scope, input) => authorizeCardCreate(scope, input.id), planCardCreate),
-    'cards.update': define('cards.update', (scope, input) => authorizeCardUpdate(scope, input.id), planCardUpdate),
+    'cards.update': define('cards.update', (scope, input) => authorizeCardUpdate(database, scope, input), planCardUpdate),
     'boards.create': define('boards.create', (scope, input) => authorizeBoardCreate(scope, input.id),
       (_records, project, input, context, scope) => planBoardCreate(project, input, context, scope)),
     'boards.move': define('boards.move', (scope, input) => authorizeBoardManage(scope, input.id),

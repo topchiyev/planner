@@ -23,10 +23,10 @@ export const cardLifecycleCommands = {
     input: target.extend({
       name: title.optional(), type: workspaceCardType.optional(), description: cardDescriptionWriteSchema.optional(),
       dueDate: nullableUtcInstantSchema.optional(), dueDateCompleted: z.boolean().optional(), closed: z.boolean().optional(),
-      stopwatchAction: stopwatchAction.optional(),
+      stopwatchAction: stopwatchAction.optional(), coverAttachmentId: publicIdSchema.nullable().optional(),
     }).refine(({ id: _id, expectedRevision: _revision, ...values }) => Object.values(values).some((value) => value !== undefined)),
     output: workspaceData(z.strictObject({
-      card: cardSummarySchema, stopwatch: cardStopwatchSchema,
+      card: cardSummarySchema, stopwatch: cardStopwatchSchema, coverAttachmentId: publicIdSchema.nullable().optional(),
     })),
   },
 } as const;
