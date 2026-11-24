@@ -1,0 +1,24 @@
+.card-fields {
+  display: grid;
+  gap: .75rem;
+  padding: .875rem;
+  overflow-wrap: anywhere;
+}
+
+.card-fields > :is(h3, p, button) { margin: 0; justify-self: start; }
+
+.workspace-field-settings { position: relative; margin-block: .5rem; }
+.workspace-field-settings > summary { display: list-item; inline-size: fit-content; }
+.workspace-field-settings > button { margin-block: .5rem; }
+.field-group { padding: .625rem; margin-block: .5rem; border: 1px solid var(--border, #d6dbe2); border-radius: .5rem; min-inline-size: 0; overflow-wrap: anywhere; }
+.field-group > h4 { margin: 0 0 .375rem; }
+.field-group .project-actions { display: flex; flex-wrap: wrap; gap: .375rem; }
+.field-note { margin: 0 0 .375rem; font-size: .8rem; }
+.field-heading { display: flex; flex-wrap: wrap; gap: .125rem .5rem; align-items: baseline; }
+.field-definitions { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .625rem; }
+.field-definitions > li { display: grid; gap: .25rem; min-inline-size: 0; }
+.field-value-form { margin: 0 0 .25rem; }
+.field-value-form textarea { inline-size: 100%; }
+.field-value, .card-front-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.card-front-fields { display: grid; gap: .25rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
+.card-front-fields dt { font-weight: 600; }

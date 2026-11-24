@@ -1,3 +1,4 @@
+import { fieldCommands, fieldTemplateOptionSchema } from './custom-fields.js';
 import { z } from 'zod';
 import { affiliationCommands } from './affiliations.js';
 import { cardTransitionCommands } from './card-transitions.js';
@@ -77,6 +78,7 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 
 export const relationshipCommands = {
   ...checklistCommands,
+  ...fieldCommands,
   ...affiliationCommands,
   ...listMaintenanceCommands,
   ...cardLifecycleCommands,
@@ -98,6 +100,7 @@ export const relationshipCommands = {
 } as const;
 
 export const relationshipReads = {
+  'fields.templateOptions': read('fields.templateOptions', '/api/v1/boards/:id/field-template-options', rosterInput, workspacePage(fieldTemplateOptionSchema)),
   'projects.managers': read('projects.managers', '/api/v1/projects/:id/managers', rosterInput, workspacePage(manager)),
   'projects.managerCandidates': read('projects.managerCandidates', '/api/v1/projects/:id/manager-candidates', candidatesInput,
     workspacePage(workspacePersonSchema)),

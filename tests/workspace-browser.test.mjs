@@ -1237,3 +1237,120 @@ test('native checklists keep keyboard editing and private linked projections in 
     assert.ok(await viewer.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
   });
 });
+
+test('project, board and card fields share templates and preserve exact values through detach and promotion', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ origin, page }) => {
+    const owner = await page({ width: 1440, height: 900 });
+    const editor = await page({ width: 390, height: 844 });
+    const viewer = await page({ width: 390, height: 844 });
+    const boardPath = origin + board(ids.privateBoard) + '?view=list';
+    const cardPath = origin + board(ids.privateBoard) + '/cards/' + ids.activeCard + '?view=list';
+    await signIn(owner, origin, 'private-owner');
+    await owner.goto(origin + project(ids.privateProject));
+    await owner.getByRole('button', { name: 'Project settings', exact: true }).click();
+    const settings = owner.getByRole('dialog', { name: 'Project settings' });
+    await settings.getByText('Custom field templates', { exact: true }).click();
+    await settings.getByRole('button', { name: 'Add field template' }).click();
+    let dialog = owner.getByRole('dialog', { name: 'Add field template' });
+    await dialog.getByLabel('Template name').fill('Release window');
+    await dialog.getByRole('button', { name: 'Create template' }).click();
+    const template = settings.getByRole('region', { name: 'Release window', exact: true });
+    await template.getByRole('button', { name: 'Add field', exact: true }).click();
+    dialog = owner.getByRole('dialog', { name: 'Add field' });
+    await dialog.getByLabel('Field name').fill('Deployment note');
+    await dialog.getByLabel('Show on card front').check();
+    await dialog.getByRole('button', { name: 'Create field' }).click();
+    await expect(template.getByText('Deployment note', { exact: true })).toBeVisible();
+
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(boardPath);
+    await editor.getByText('Board fields', { exact: true }).click();
+    await editor.getByRole('button', { name: 'Add field group' }).click();
+    dialog = editor.getByRole('dialog', { name: 'Add field group' });
+    await dialog.getByLabel('Project template').selectOption({ label: 'Release window' });
+    await dialog.getByRole('button', { name: 'Create group' }).click();
+    await expect(editor.getByRole('region', { name: 'Release window', exact: true }).getByText('Deployment note')).toBeVisible();
+
+    await editor.goto(cardPath);
+    const fields = editor.getByRole('region', { name: 'Custom fields' });
+    await fields.getByRole('button', { name: 'Add field group' }).click();
+    dialog = editor.getByRole('dialog', { name: 'Add field group' });
+    await dialog.getByLabel('Project template').selectOption({ label: 'Release window' });
+    await dialog.getByLabel('Group name (optional)').fill('Local release window');
+    await dialog.getByRole('button', { name: 'Create group' }).click();
+    const boardFields = fields.getByRole('region', { name: 'Release window', exact: true });
+    const local = fields.getByRole('region', { name: 'Local release window', exact: true });
+    await expect(local.getByLabel('Deployment note value')).toBeVisible();
+    await expect(boardFields.getByRole('button', { name: 'Edit field Deployment note' })).toHaveCount(0);
+    const original = '  blue / λ  ';
+    await boardFields.getByLabel('Deployment note value').fill(original);
+    const written = editor.waitForResponse((response) =>
+      response.request().method() === 'PUT' && response.url().includes('/field-values/'));
+    await boardFields.getByRole('button', { name: 'Save value' }).click();
+    const response = await written;
+    assert.equal(response.status(), 200, await response.text());
+    await expect(boardFields.getByRole('button', { name: 'Clear value' })).toBeVisible();
+    await local.getByLabel('Deployment note value').fill('0\n');
+    await local.getByRole('button', { name: 'Save value' }).click();
+    await expect(local.getByRole('button', { name: 'Clear value' })).toBeVisible();
+    await local.getByRole('button', { name: 'Detach', exact: true }).click();
+    await editor.getByRole('dialog', { name: 'Detach field group' }).getByRole('button', { name: 'Detach field group', exact: true }).click();
+    await expect(local.getByRole('button', { name: 'Edit field Deployment note' })).toBeVisible();
+    await expect(local.getByLabel('Deployment note value')).toHaveValue('0\n');
+    await expect(boardFields.getByLabel('Deployment note value')).toHaveValue(original);
+    assert.ok(await editor.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+
+    await owner.goto(cardPath);
+    const ownerLocal = owner.getByRole('region', { name: 'Custom fields' }).getByRole('region', { name: 'Local release window' });
+    await ownerLocal.getByRole('button', { name: 'Save as project template' }).click();
+    await owner.getByRole('dialog', { name: 'Save as project template' }).getByRole('button', { name: 'Save as project template' }).click();
+    await expect(owner.getByRole('dialog', { name: 'Save as project template' })).toHaveCount(0);
+    await expect(ownerLocal.getByLabel('Deployment note value')).toHaveValue('0\n');
+
+    const dirty = '  draft / λ  ';
+    await boardFields.getByLabel('Deployment note value').fill(dirty);
+    const ownerBoard = owner.getByRole('region', { name: 'Custom fields' }).getByRole('region', { name: 'Release window', exact: true });
+    await ownerBoard.getByLabel('Deployment note value').fill('Colleague update');
+    const changed = owner.waitForResponse((response) =>
+      response.request().method() === 'PUT' && response.url().includes('/field-values/'));
+    await ownerBoard.getByRole('button', { name: 'Save value' }).click();
+    assert.equal((await changed).status(), 200);
+    await editor.getByRole('button', { name: 'Follow card', exact: true }).click();
+    await expect(boardFields.getByRole('alert')).toContainText('Current value: Colleague update');
+    await expect(boardFields.getByLabel('Deployment note value')).toHaveValue(dirty);
+    await expect(boardFields.getByRole('button', { name: 'Save value' })).toBeDisabled();
+    await boardFields.getByRole('button', { name: 'Keep draft' }).click();
+    const reapplied = editor.waitForResponse((response) =>
+      response.request().method() === 'PUT' && response.url().includes('/field-values/'));
+    await boardFields.getByRole('button', { name: 'Save value' }).click();
+    assert.equal((await reapplied).status(), 200);
+    await expect(boardFields.getByRole('button', { name: 'Save value' })).toBeDisabled();
+
+    await local.getByRole('button', { name: 'Edit field Deployment note' }).click();
+    const editorDefinition = editor.getByRole('dialog', { name: 'Edit field', exact: true });
+    await editorDefinition.getByLabel('Field name').fill('Revised deployment note');
+    await ownerLocal.getByRole('button', { name: 'Edit field Deployment note' }).click();
+    const ownerDefinition = owner.getByRole('dialog', { name: 'Edit field', exact: true });
+    await ownerDefinition.getByLabel('Show on card front').uncheck();
+    await ownerDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(ownerLocal.getByText('Inspector only')).toBeVisible();
+    await editorDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(editorDefinition.getByRole('alert')).toContainText('Inspector only');
+    await expect(editorDefinition.getByLabel('Field name')).toHaveValue('Revised deployment note');
+    await expect(editorDefinition.getByLabel('Show on card front')).not.toBeChecked();
+    await expect(editorDefinition.getByRole('button', { name: 'Save field' })).toBeDisabled();
+    await editorDefinition.getByRole('button', { name: 'Review current version' }).click();
+    await editorDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(local.getByLabel('Revised deployment note value')).toHaveValue('0\n');
+    await expect(local.getByText('Inspector only')).toBeVisible();
+
+    await signIn(viewer, origin, 'viewer');
+    await viewer.goto(cardPath);
+    const readOnly = viewer.getByRole('region', { name: 'Custom fields' });
+    await expect(readOnly.getByRole('region', { name: 'Release window', exact: true }).locator('.field-value')).toHaveJSProperty('textContent', dirty);
+    await expect(readOnly.getByRole('button', { name: 'Save value' })).toHaveCount(0);
+    await viewer.getByRole('link', { name: 'Close card' }).click();
+    await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(1);
+    await expect(viewer.locator('.card-front-fields').getByText('Revised deployment note')).toHaveCount(0);
+  });
+});

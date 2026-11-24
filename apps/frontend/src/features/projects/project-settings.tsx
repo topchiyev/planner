@@ -3,6 +3,7 @@ import { useNavigate, useRevalidator } from 'react-router';
 import { projectGradientSchema, type ProjectBackground } from '@planner/contracts';
 import { ConfirmResourceName, resourceNameConfirmation } from '../workspace/confirm-resource-name.js';
 import type { loadNativeProject } from '../workspace/workspace-loaders.js';
+import { ProjectFieldTemplates } from '../fields/workspace-fields.js';
 import { ProjectDialog, useProjectAction } from './project-controls.js';
 import { ProjectManagersDialog } from './project-managers.js';
 import { projectBackgroundImage, projectCommand, removeProjectBackground, uploadProjectBackground } from './project-api.js';
@@ -93,6 +94,7 @@ function SettingsDialog({ project, close }: { project: Project; close: () => voi
         Save project details
       </button>
     </form>}
+    {permissions.canEdit && <ProjectFieldTemplates project={project} />}
     {(permissions.canToggleHidden || permissions.canChangeOwnership) && <section className="project-settings-section" aria-label="Project access">
       <h3>Project access</h3>
       <p>{project.type === 'private' ? 'Private project' : 'Shared project'}{project.hidden ? ' · Hidden' : ''}</p>
