@@ -1,3 +1,4 @@
+import { generationIdSchema } from '@planner/contracts/storage';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import { readStagedMfaEnrollment } from '../application/auth/mfa-account.js';
 import { firstAdminBinding, hasFirstAdminGrant } from '../application/auth/first-admin.js';
@@ -46,6 +47,13 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
       const database = client.db(databaseName);
       const installation = await verifyStorageSchema(database, config.installationId);
       if (installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
+      const restored = (installation as typeof installation & { restoration?: { phase?: unknown; generationId?: unknown; fingerprint?: unknown } }).restoration;
+      if (restored !== undefined) {
+        return restored?.phase === 'active' && generationIdSchema.safeParse(restored.generationId).success
+          && restored.generationId === installation.activeGenerationId && typeof restored.fingerprint === 'string'
+          && /^[a-f0-9]{64}$/u.test(restored.fingerprint) && installation.setup.pendingAction === 'complete'
+          ? { kind: 'ready' } : { kind: 'unavailable', reason: 'setup' };
+      }
       if (config.mode === 'import') {
         const staged = await readStagedMfaEnrollment(database, config.installationId, new Date());
         return staged

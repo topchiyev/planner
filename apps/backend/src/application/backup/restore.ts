@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { FileHandle } from 'node:fs/promises';
 import { nativeInstallationConfig } from '@planner/contracts/native';
 import { BSON, type Db, type Document } from 'mongodb';
-import { isDeepStrictEqual } from 'node:util';
 import { migrateStorageSchema, verifyStorageSchema } from '../../storage/schema.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
+import { accounts } from '../auth/accounts.js';
+import { usableAdmin } from '../auth/account-policy.js';
 import { durable } from '../command-journal/records.js';
 import type { BlobIdentity } from '../../storage/blobs/private-store.js';
 import { BackupError, backupCollections, digestPattern, fileChunks, openBackup, sha256,
@@ -15,7 +17,9 @@ type StoredDocument = Document & { _id: string };
 
 type Restoration = {
   fingerprint: string; installationDigest: string; phase: 'staging' | 'staged' | 'active'; generationId: string;
-  inventory?: CollectionPart[]; blobs?: Part[];
+  proof?: string;
+  collections?: CollectionPart[];
+  media?: { count: number; sha256: string };
 };
 type Checkpoint = (name: 'row' | 'blob' | 'staged' | 'activated', id: string) => void | Promise<void>;
 type RestoreMedia = {
@@ -29,9 +33,15 @@ function installationDigest(record: Document) {
   return sha256(BSON.serialize(stable));
 }
 
-function verificationProof(marker: Pick<Restoration, 'fingerprint' | 'generationId' | 'installationDigest' | 'inventory' | 'blobs'>) {
+function mediaDigest(blobs: Part[]) {
+  const hash = createHash('sha256');
+  for (const { sha256, byteLength } of blobs) hash.update(`${sha256} ${byteLength}\n`);
+  return { count: blobs.length, sha256: hash.digest('hex') };
+}
+
+function verificationProof(marker: Pick<Restoration, 'fingerprint' | 'generationId' | 'installationDigest'> & { collections: CollectionPart[]; media: ReturnType<typeof mediaDigest> }) {
   return sha256(Buffer.from(JSON.stringify({ fingerprint: marker.fingerprint, generationId: marker.generationId,
-    installationDigest: marker.installationDigest, inventory: marker.inventory, blobs: marker.blobs }), 'utf8'));
+    installationDigest: marker.installationDigest, collections: marker.collections, media: marker.media }), 'utf8'));
 }
 
 export async function inspectBackup(path: string, owner: Owner, fingerprint: string) {
@@ -94,7 +104,7 @@ export async function inspectBackup(path: string, owner: Owner, fingerprint: str
       } finally { await file.close(); }
     }
     const proof = verificationProof({ fingerprint, generationId: manifest.activeGenerationId,
-      installationDigest: installationDigest(source), inventory, blobs: manifest.blobs });
+      installationDigest: installationDigest(source), collections: inventory, media: mediaDigest(manifest.blobs) });
     return { archive, source, config, key: snapshotKey, fingerprint, inventory, proof,
       close: async () => { snapshotKey.fill(0); await archive.close(); } };
   } catch (error) { key?.fill(0); await archive.close(); throw error; }
@@ -109,22 +119,30 @@ async function checkCollections(db: Db) {
   if (names.some(({ name }) => !backupCollections.includes(name))) throw new BackupError('The restore destination contains foreign MongoDB collections.');
 }
 
-async function verifyStaged(db: Db, media: RestoreMedia, marker: Restoration) {
-  if (!Array.isArray(marker.inventory) || !Array.isArray(marker.blobs)) throw new BackupError('The staged restore has no verified inventory.');
+async function verifyStaged(db: Db, media: RestoreMedia, marker: Restoration, expectedProof: string) {
   await checkCollections(db);
   const collections = backupCollections.filter((name) => name !== 'installation');
   const actual: CollectionPart[] = [];
   for (const name of collections) actual.push(await digestRawRows(db, name));
-  if (!isDeepStrictEqual(actual, marker.inventory)) throw new BackupError('The staged MongoDB rows differ from the verified restore inventory.');
+  let hasAdministrator = false;
+  for await (const user of accounts(db).find({ generationId: marker.generationId, role: 'admin', disabledAt: { $type: 'null' } })) {
+    if (usableAdmin(user)) { hasAdministrator = true; break; }
+  }
+  if (!hasAdministrator) throw new BackupError('The restored generation has no usable administrator.');
   const inventory = await mediaInventory(db, marker.generationId);
-  if (!isDeepStrictEqual(inventoryParts(inventory), marker.blobs)) throw new BackupError('The staged media references differ from the verified restore inventory.');
-  await media.assertInventory(marker.blobs);
+  const blobs = inventoryParts(inventory);
+  const aggregate = mediaDigest(blobs);
+  if (!isDeepStrictEqual(actual, marker.collections) || !isDeepStrictEqual(aggregate, marker.media)
+      || verificationProof({ ...marker, collections: actual, media: aggregate }) !== expectedProof) {
+    throw new BackupError('The staged database or media differs from the verified restore inventory.');
+  }
+  await media.assertInventory(blobs);
   for (const identity of inventory) await media.verifyBlob(identity);
 }
 
 export async function stageRestore(db: Db, writer: WriterLease, media: RestoreMedia, backup: VerifiedBackup, checkpoint?: Checkpoint) {
   writer.assertHeld();
-  const { archive, source, fingerprint, inventory } = backup;
+  const { archive, source, fingerprint, proof, inventory } = backup;
   const { manifest } = archive;
   const key = { _id: 'installation', installationId: manifest.installationId } as const;
   const collection = db.collection<StoredDocument>('installation');
@@ -180,8 +198,8 @@ export async function stageRestore(db: Db, writer: WriterLease, media: RestoreMe
     try { await media.writeBlob(file, entry); } finally { await file.close(); }
     await checkpoint?.('blob', entry.sha256);
   }
-  const verified = { ...marker, phase: 'staged' as const, inventory, blobs: manifest.blobs };
-  await verifyStaged(db, media, verified);
+  const verified = { ...marker, phase: 'staged' as const, proof, collections: inventory, media: mediaDigest(manifest.blobs) };
+  await verifyStaged(db, media, verified, proof);
   const result = await collection.updateOne({ ...key, activeGenerationId: { $type: 'null' },
     'restoration.fingerprint': fingerprint, 'restoration.generationId': marker.generationId, 'restoration.phase': { $in: ['staging', 'staged'] } },
   { $set: { restoration: verified } }, durable);
@@ -190,24 +208,37 @@ export async function stageRestore(db: Db, writer: WriterLease, media: RestoreMe
   return { manifestSha256: fingerprint, installationId: manifest.installationId, generationId: marker.generationId, state: 'staged' } as const;
 }
 
+export async function readActivatedRestore(db: Db, installationId: string, fingerprint: string, expectedProof: string,
+  verifyKey: (digest: string | undefined) => void) {
+  const installation = await verifyStorageSchema(db, installationId);
+  const marker = (installation as typeof installation & { restoration?: Restoration }).restoration;
+  if (!marker || marker.phase !== 'active' || marker.fingerprint !== fingerprint || marker.proof !== expectedProof
+    || installation.activeGenerationId !== marker.generationId) throw new BackupError('The activated restore identity is inconsistent.');
+  verifyKey(installation.mfaKeyDigest);
+  return { manifestSha256: fingerprint, installationId, generationId: marker.generationId, state: 'active' } as const;
+}
+
 export async function activateRestore(db: Db, writer: WriterLease, media: RestoreMedia, installationId: string,
-  fingerprint: string, expectedProof: string, verifyKey: (digest: string | undefined) => void, checkpoint?: Checkpoint) {
+  fingerprint: string, expectedProof: string, verifyKey: (digest: string | undefined) => void, checkpoint?: Checkpoint,
+  verifyUnpublished = false) {
   writer.assertHeld();
   const installation = await verifyStorageSchema(db, installationId);
   const marker = (installation as typeof installation & { restoration?: Restoration }).restoration;
-  if (!marker || marker.fingerprint !== fingerprint || verificationProof(marker) !== expectedProof || !['staged', 'active'].includes(marker.phase)) {
+  if (!marker || marker.fingerprint !== fingerprint || marker.proof !== expectedProof || !['staged', 'active'].includes(marker.phase)) {
     throw new BackupError('A matching verified staged backup is required for activation.');
   }
   verifyKey(installation.mfaKeyDigest);
-  if (marker.phase === 'active') {
-    if (installation.activeGenerationId !== marker.generationId) throw new BackupError('The activated restore identity is inconsistent.');
-  } else {
-    if (installation.activeGenerationId !== null) throw new BackupError('Refusing to replace an active Planner installation.');
+  if (marker.phase === 'active' ? installation.activeGenerationId !== marker.generationId : installation.activeGenerationId !== null) {
+    throw new BackupError('The restored generation or its activation state does not match.');
+  }
+  if (marker.phase === 'staged' || verifyUnpublished) {
     const raw = await db.collection<StoredDocument>('installation').findOne<Buffer>({ _id: 'installation', installationId }, { raw: true });
     if (!raw || installationDigest(BSON.deserialize(raw, { promoteValues: false })) !== marker.installationDigest) {
       throw new BackupError('The staged installation metadata differs from the backup.');
     }
-    await verifyStaged(db, media, marker);
+    await verifyStaged(db, media, marker, expectedProof);
+  }
+  if (marker.phase === 'staged') {
     const result = await db.collection<StoredDocument>('installation').updateOne({ _id: 'installation', installationId,
       activeGenerationId: { $type: 'null' }, mfaKeyDigest: installation.mfaKeyDigest, 'restoration.fingerprint': fingerprint,
       'restoration.generationId': marker.generationId, 'restoration.phase': 'staged' },

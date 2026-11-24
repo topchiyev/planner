@@ -29,6 +29,12 @@ export type BackupManifest = {
   secrets: Part;
 };
 export type Owner = { uid: number; gid: number };
+export function optionalStat(path: string) {
+  return lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  });
+}
 const own = (stat: Stats, owner: Owner) => stat.uid === owner.uid && stat.gid === owner.gid;
 export const fdPath = ({ fd }: FileHandle) => `/proc/self/fd/${fd}`;
 const json = (value: unknown) => Buffer.from(JSON.stringify(value) + '\n', 'utf8');
@@ -255,7 +261,7 @@ export async function publishBackup(
     const checked = await checkedBundle(directory, owner, fingerprint);
     await checked.close();
     await directory.sync();
-    if (await lstat(published, { throwIfNoEntry: false })) throw new BackupError();
+    if (await optionalStat(published)) throw new BackupError();
     await rename(pending, published);
     complete = true;
     await root.sync();

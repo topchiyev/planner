@@ -179,3 +179,17 @@ The board workspace response includes `latestEventSequence` as a decimal string 
 The stream replays at most 1,000 contiguous events. A cursor that cannot be replayed receives a `reset` event and the connection closes. On reset, close the EventSource, fetch a new board snapshot and open a stream using its cursor. Each event and the 20-second heartbeat recheck the session and board access without refreshing inactivity. The relationship command rechecks affected subscriptions before releasing the writer, so regranting access requires a new stream. A connection that falls behind its transport buffer closes and can reconnect using its last event ID.
 
 The shared `boardEventFrameSchema` defines the delivered payload. Emit `card.removed` with the source board and source-local card ID on a transfer away. A separate destination event can identify the card only while it belongs to that authorized destination board. Unknown effects invalidate the affected board through `board.invalidated`.
+
+### Native backup and staged restore
+
+Run `plannerctl backup create --json` as root on a running, ready Planner installation. It returns the private backup directory and the manifest SHA-256. Keep a trusted record of the hash separate from the copy. The archive contains ordered BSON for every Planner generation, matched private media, and a restricted source configuration and MFA key bundle. Keep the directory and its copies under operator control. The archive permissions are `0700` for directories and `0600` for files.
+
+Copy the complete archive to a private, root-owned directory at the clean destination while preserving those modes. Never use an existing Planner workspace as a restore destination. Stage and verify the copy, then activate it explicitly with the same trusted manifest hash.
+
+```sh
+plannerctl backup restore --archive /root/planner-backup --expect-manifest SHA256 \
+  --public-url https://restored.example.test --app-port 27430 --db-port 27431 --json
+plannerctl backup activate --expect-manifest SHA256 --yes --json
+```
+
+A staged restore stays unavailable to browser clients. After interruption, repeat the same command with the original archive, manifest, origin, and ports. Activation can also be repeated with that manifest. The source remains available separately. The destination uses its own proxy token, service receipts and MongoDB credentials. Users sign in again using their retained passwords and enrolled factors. Browser sessions, device trust, pending login and recovery grants, and linked access credentials expire at restore. Establish fresh linked consent where required.

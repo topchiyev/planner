@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, rmdir, unlink, type FileHandle } from 'node:fs/promises';
+import { link, mkdir, open, readdir, rmdir, unlink, type FileHandle } from 'node:fs/promises';
 import type { BlobIdentity } from '../../storage/blobs/private-store.js';
-import { anchoredDirectory, BackupError, childPath, digestPattern, fdPath, fileChunks, verifyPart, type Owner, type Part } from './archive.js';
+import { anchoredDirectory, BackupError, childPath, digestPattern, fdPath, fileChunks, optionalStat, verifyPart, type Owner, type Part } from './archive.js';
 
 const { O_RDONLY, O_RDWR, O_NOFOLLOW, O_DIRECTORY, O_NONBLOCK, O_EXCL, O_CREAT } = constants;
 const code = (error: unknown) => (error as NodeJS.ErrnoException).code;
@@ -43,7 +43,7 @@ export async function openRestoreMedia({ staging, blobs, owner, fingerprint }: {
   }
   async function discardPart(digest: string) {
     const temp = childPath(temporary, digest);
-    const stat = await lstat(temp, { throwIfNoEntry: false });
+    const stat = await optionalStat(temp);
     if (!stat) return;
     if (!stat.isFile() || (stat.uid !== uid && stat.uid !== owner.uid) || (stat.gid !== gid && stat.gid !== owner.gid)
       || ![0o600, 0o400].includes(stat.mode & 0o7777) || stat.nlink < 1 || stat.nlink > 2) throw new BackupError();
