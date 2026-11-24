@@ -1,15 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  generationIdSchema, maximumSignedInt64, minimumSignedInt64, publicIdSchema,
-  signedInt64TextSchema, sourceAssetIdSchema, sourceEntitySchema, sourceUuidSchema,
+  generationIdSchema, maximumSignedInt64, minimumSignedInt64, parseSourceIdentity, publicIdSchema,
+  signedInt64TextSchema, sourceUuidSchema,
 } from '@planner/contracts/storage';
 import { Long } from 'mongodb';
 
 export { randomUUID as newPublicId };
+export const signedLongFields = ['rank', 'historySequence', 'recoverySequence', 'sequence'] as const;
+export const storedInstantFields = [
+  'createdAt', 'updatedAt', 'listChangedAt', 'issuedAt', 'expiresAt', 'consumedAt', 'revokedAt', 'readAt',
+] as const;
 
 export function legacyPublicId(sourceInstanceId: string, entity: string, sourceId: string) {
   const namespace = Buffer.from(sourceUuidSchema.parse(sourceInstanceId).replaceAll('-', ''), 'hex');
-  const name = `${sourceEntitySchema.parse(entity)}:${sourceAssetIdSchema.parse(sourceId)}`;
+  const identity = parseSourceIdentity(entity, sourceId);
+  const name = `${identity.entity}:${identity.sourceId}`;
   const bytes = createHash('sha1').update(namespace).update(name, 'utf8').digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -32,6 +37,21 @@ export function encodeRank(value: bigint | string) {
 export function decodeRank(value: Long) {
   if (!Long.isLong(value) || value.unsigned) throw new TypeError('Expected a signed BSON Long rank.');
   return value.toBigInt();
+}
+
+export function readLongField(field: string, value: unknown) {
+  if (field === 'rank' && value === null) return null;
+  if (!Long.isLong(value)) throw new TypeError('Expected a signed BSON Long rank or sequence.');
+  return decodeRank(value);
+}
+
+export function isStoredDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+export function readStoredInstant(value: unknown) {
+  if (value === null || isStoredDate(value)) return value;
+  throw new TypeError('Expected a BSON Date or explicit null.');
 }
 
 function compareId(first: string, second: string) {

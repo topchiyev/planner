@@ -1,8 +1,10 @@
 import { isDeepStrictEqual } from 'node:util';
-import { generationIdSchema, installationIdSchema, publicIdSchema } from '@planner/contracts/storage';
+import {
+  generationIdSchema, installationIdSchema, normalizedEmailSchema, parseSourceIdentity, publicIdSchema, revisionSchema,
+} from '@planner/contracts/storage';
 import { MongoServerError, type Db, type Filter } from 'mongodb';
 import { ownedIndexes, workspaceCollections, type OwnedIndex, type WorkspaceCollection } from './catalog.js';
-import { workspaceKey } from './identity.js';
+import { isStoredDate, readLongField, readStoredInstant, signedLongFields, storedInstantFields, workspaceKey } from './identity.js';
 
 export const currentStorageSchema = 1;
 const writeConcern = { w: 1, j: true };
@@ -35,6 +37,7 @@ interface WorkspaceIdentity {
   generationId: string;
   normalizedEmail?: unknown;
   normalizedUsername?: unknown;
+  [field: string]: unknown;
 }
 
 interface LegacyGrant extends WorkspaceIdentity {
@@ -129,10 +132,6 @@ export async function verifyStorageSchema(database: Db, installationId: string) 
   return installation;
 }
 
-function validDate(value: unknown): value is Date {
-  return value instanceof Date && Number.isFinite(value.getTime());
-}
-
 async function moveLegacyGrants(database: Db, installation: InstallationDocument, hooks: MigrationTestHooks) {
   const collection = database.collection<LegacyGrant>('recoveryGrants');
   for await (const grant of collection.find({}, { promoteLongs: false })) {
@@ -142,10 +141,11 @@ async function moveLegacyGrants(database: Db, installation: InstallationDocument
         || grant.installationId !== installation.installationId
         || grant.generationId !== installation.setup.enrollmentGenerationId
         || (grant.id !== undefined && grant.id !== grant._id)
-        || !/^[0-9a-f]{64}$/u.test(grant.tokenDigest)
-        || !validDate(grant.issuedAt) || !validDate(grant.expiresAt) || grant.expiresAt <= grant.issuedAt
-        || (issued !== undefined && (!validDate(issued) || issued.getTime() !== grant.issuedAt.getTime()))
-        || (grant.consumedAt !== null && !validDate(grant.consumedAt))) {
+        || typeof grant.tokenDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(grant.tokenDigest)
+        || !isStoredDate(grant.issuedAt) || !isStoredDate(grant.expiresAt)
+        || grant.expiresAt.getTime() - grant.issuedAt.getTime() !== 30 * 60 * 1000
+        || (issued !== undefined && (!isStoredDate(issued) || issued.getTime() !== grant.issuedAt.getTime()))
+        || (grant.consumedAt !== null && !isStoredDate(grant.consumedAt))) {
       throw new StorageSchemaError('records', 'A legacy enrollment grant has an unexpected identity or shape.');
     }
     const id = grant._id;
@@ -169,20 +169,41 @@ async function moveLegacyGrants(database: Db, installation: InstallationDocument
   }
 }
 
-async function verifyWorkspaceKeys(database: Db) {
+async function verifyWorkspaceRecords(database: Db) {
   for (const name of workspaceCollections) {
     const collection = database.collection<WorkspaceIdentity>(name);
-    const projection = { _id: 1, generationId: 1, id: 1,
-      ...(name === 'users' && { normalizedEmail: 1, normalizedUsername: 1 }) };
-    const keys = collection.find({}, { projection });
+    const projection = { _id: 1, generationId: 1, id: 1, revision: 1,
+      ...Object.fromEntries([...signedLongFields, ...storedInstantFields].map((field) => [field, 1])),
+      ...(name === 'users' && { normalizedEmail: 1, normalizedUsername: 1 }),
+      ...(name === 'importIds' && { entity: 1, sourceId: 1 }) };
+    const keys = collection.find({}, { projection, promoteLongs: false });
     for await (const key of keys) {
       if (!generationIdSchema.safeParse(key.generationId).success || !publicIdSchema.safeParse(key.id).success
           || key._id !== workspaceKey(key.generationId, key.id!)) {
         throw new StorageSchemaError('records', `A stored ${name} identifier has an unexpected generation or shape.`);
       }
-      if (name === 'users' && (typeof key.normalizedEmail !== 'string' || !key.normalizedEmail
+      if (name === 'users' && (!normalizedEmailSchema.safeParse(key.normalizedEmail).success
           || (key.normalizedUsername != null && typeof key.normalizedUsername !== 'string'))) {
         throw new StorageSchemaError('records', 'A stored normalized user identifier is not a concrete string.');
+      }
+      if (name === 'importIds') {
+        try { parseSourceIdentity(key.entity, key.sourceId); }
+        catch { throw new StorageSchemaError('records', 'A stored source mapping has an invalid source identity.'); }
+      }
+      if ('revision' in key && !revisionSchema.safeParse(key.revision).success) {
+        throw new StorageSchemaError('records', `A stored ${name} revision is invalid.`);
+      }
+      for (const field of signedLongFields) {
+        if (!(field in key)) continue;
+        try { readLongField(field, key[field]); }
+        catch {
+          throw new StorageSchemaError('records', `A stored ${name} rank or sequence is not a signed BSON Long.`);
+        }
+      }
+      for (const field of storedInstantFields) {
+        if (!(field in key)) continue;
+        try { readStoredInstant(key[field]); }
+        catch { throw new StorageSchemaError('records', `A stored ${name} instant is not a BSON Date or null.`); }
       }
     }
   }
@@ -220,12 +241,12 @@ export async function migrateStorageSchema(database: Db, installationId: string,
       await missingIndexes(database, name, false);
     }
     await moveLegacyGrants(database, record, hooks);
-    await verifyWorkspaceKeys(database);
     const staged = await installation.updateOne(atPhase('records'),
       { $set: { schemaMigration: progress('indexes') } }, { writeConcern });
     requireMatch(staged.matchedCount);
     phase = 'indexes';
   }
+  await verifyWorkspaceRecords(database);
   if (phase === 'indexes') {
     for (const name of workspaceCollections) {
       await checkCollection(database, name, false);
