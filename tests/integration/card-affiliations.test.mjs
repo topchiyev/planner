@@ -6,6 +6,7 @@ import { csrfToken, readSessionCookie } from '../../apps/backend/dist/applicatio
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../../apps/backend/dist/application/workspace/relationship-commands.js';
+import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
 import { assertOwnedMongoEnvironment } from '../support/mongo-environment.ts';
 import { cookieOf, fixtureId, ids, makeWorkspaceAccessFixture, origin } from '../support/workspace-access-fixture.mjs';
@@ -71,6 +72,20 @@ test('board palette uses scoped ranked IDs, accepts unnamed and duplicate names,
     assert.deepEqual([changed.label.name, changed.label.revision, changed.boardRevision], ['Progress', 2, 4]);
     assert.equal((await data(f.call(board() + '/labels', viewer))).filter(({ name }) => name === 'Progress').length, 2);
 
+    const malformed = ['noncanonical-test-label', workspaceKey(f.generationId, fixtureId(5005))];
+    const edges = f.db.collection('cardLabels');
+    await edges.insertMany([
+      { _id: malformed[0], id: fixtureId(5004), ...f.scope, cardId: ids.activeCard, labelId: second.label.id },
+      { _id: malformed[1], id: fixtureId(5005), ...f.scope, cardId: ids.activeCard, labelId: [original] },
+    ]);
+    assert.deepEqual((await data(f.call(card(ids.activeCard), editor))).labels, []);
+    for (const id of [original, second.label.id]) {
+      const positive = await data(f.call(board() + '/cards?labelsAny=' + id, editor));
+      const negative = await data(f.call(board() + '/cards?labelsNone=' + id, editor));
+      assert.ok(positive.every(({ id: cardId }) => cardId !== ids.activeCard));
+      assert.ok(negative.some(({ id: cardId }) => cardId === ids.activeCard));
+    }
+    await edges.deleteMany({ ...f.scope, _id: { $in: malformed } });
     const otherLabel = fixtureId(5000);
     await f.insert('labels', otherLabel, { boardId: ids.sharedBoard, name: 'Foreign palette', color: 'berry-red', rank: '1' });
     await f.insert('labels', original, { boardId: ids.privateBoard, name: 'Staged copy', color: 'berry-red', rank: '1' }, f.stagedGenerationId);
@@ -80,7 +95,6 @@ test('board palette uses scoped ranked IDs, accepts unnamed and duplicate names,
     await expectResponse(mutate(f, editor, 'PUT', card(ids.archivedStory) + '/labels/' + original, 1), 403);
     const linked = await data(mutate(f, editor, 'PUT', linkPath, 1));
     assert.deepEqual(linked, { id: ids.activeCard, revision: 2 });
-    const edges = f.db.collection('cardLabels');
     const edge = await edges.findOne({ ...f.scope, cardId: ids.activeCard, labelId: original });
     assert.deepEqual(await data(mutate(f, editor, 'PUT', linkPath, 2)), linked);
     assert.deepEqual(await edges.findOne({ ...f.scope, cardId: ids.activeCard, labelId: original }), edge);

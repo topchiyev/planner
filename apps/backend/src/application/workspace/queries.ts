@@ -5,7 +5,7 @@ import { encodeRank } from '../../storage/identity.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import type { BoardAccessContext } from './authorization.js';
 import { eligibleBoardPeople } from './eligible-members.js';
-import { scopedLabels } from './label-state.js';
+import { cardLabelJoinFilter, scopedLabels } from './label-state.js';
 import { canonicalRow, equal, type WorkspaceRecords } from './records.js';
 
 export const escapeSearch = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
@@ -61,14 +61,12 @@ export async function cardFilters(records: WorkspaceRecords, board: BoardAccessC
     const any = query.labelsAny.filter((id) => owned.has(id));
     const none = query.labelsNone.filter((id) => owned.has(id));
     if (query.labelsAny.length) {
-      stages.push(records.lookup('cardLabels', 'includedLabels', { cardId: '$id' }, {
-        labelId: { $in: any }, $expr: { $eq: ['$cardId', '$$cardId'] },
-      }, [{ $limit: 1 }]), { $match: { 'includedLabels.0': { $exists: true } } });
+      stages.push(records.lookup('cardLabels', 'includedLabels', { cardId: '$id' },
+        cardLabelJoinFilter(generationId, '$$cardId', any), [{ $limit: 1 }]), { $match: { 'includedLabels.0': { $exists: true } } });
     }
     if (none.length) {
-      stages.push(records.lookup('cardLabels', 'excludedLabels', { cardId: '$id' }, {
-        labelId: { $in: none }, $expr: { $eq: ['$cardId', '$$cardId'] },
-      }, [{ $limit: 1 }]), { $match: { 'excludedLabels.0': { $exists: false } } });
+      stages.push(records.lookup('cardLabels', 'excludedLabels', { cardId: '$id' },
+        cardLabelJoinFilter(generationId, '$$cardId', none), [{ $limit: 1 }]), { $match: { 'excludedLabels.0': { $exists: false } } });
     }
   }
   const eligible = query.members.length || query.unassigned

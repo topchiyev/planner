@@ -1,6 +1,6 @@
 import { decodeRank } from '../../storage/identity.js';
 import { affiliationFilter } from './affiliation-edges.js';
-import { rankSort, type WorkspaceRecords, type WorkspaceRow } from './records.js';
+import { canonicalRow, equal, publicIdField, rankSort, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 export function labelDto(row: Pick<WorkspaceRow<'labels'>, 'id' | 'boardId' | 'name' | 'color' | 'rank' | 'revision' | 'createdAt' | 'updatedAt'>) {
   return {
@@ -12,4 +12,14 @@ export function labelDto(row: Pick<WorkspaceRow<'labels'>, 'id' | 'boardId' | 'n
 
 export function scopedLabels(records: WorkspaceRecords, generationId: string, boardId: string, ids?: string[]) {
   return records.find('labels', { ...affiliationFilter(generationId, { boardId }), ...(ids && { id: { $in: ids } }) }, rankSort);
+}
+
+export function cardLabelJoinFilter(generationId: string, cardId: string, labelIds?: string[]) {
+  return {
+    ...(labelIds && { labelId: { $in: labelIds } }),
+    $expr: { $and: [
+      canonicalRow(generationId), equal('cardId', cardId), publicIdField('labelId'),
+      ...(labelIds ? [{ $in: ['$labelId', labelIds] }] : []),
+    ] },
+  };
 }

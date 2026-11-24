@@ -11,7 +11,7 @@ import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
 import { cardClosed, cardDto, cardStopwatch } from './card-state.js';
 import { personalFollow } from './affiliation-edges.js';
 import { eligibleBoardPeople } from './eligible-members.js';
-import { labelDto, scopedLabels } from './label-state.js';
+import { cardLabelJoinFilter, labelDto, scopedLabels } from './label-state.js';
 import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
 import { boardListOrderVersion, listDto } from './list-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
@@ -275,8 +275,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const { card, board, list } = context;
       const boardId = board.board.id;
       const [links, assignments, attachments, previousListId, fields, follow] = await together([
-        records.find('cardLabels', { cardId: id,
-          $expr: { $and: [canonical, equal('cardId', id), publicIdField('labelId')] } }),
+        records.find('cardLabels', { cardId: id, ...cardLabelJoinFilter(generationId, id) }),
         records.find('cardAssignees', { cardId: id,
           $expr: { $and: [canonical, equal('cardId', id), publicIdField('userId')] } }),
         records.find('attachments', { cardId: id, deletedAt: null, kind: { $in: ['file', 'link'] } }, { createdAt: 1, id: 1 }),
