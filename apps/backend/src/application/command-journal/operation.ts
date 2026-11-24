@@ -28,7 +28,6 @@ export interface CommandContext {
 export interface CommandPlanningContext extends CommandContext {
   commandId: string;
   timestamp: string;
-  idFor(label: string): string;
 }
 
 export interface JournalOperation {

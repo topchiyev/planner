@@ -36,11 +36,13 @@ try {
     const gate = createNativeCommandGate();
     commandGate = gate;
     const readAccess = boundedRuntimeProbe(async () => {
-      const access = await inspectRuntimeAccess(config);
-      if (!gate.ready && (access.kind === 'ready' || gate.state !== 'starting')) {
-        return { kind: 'unavailable', reason: 'schema-or-recovery' };
+      const unavailable = { kind: 'unavailable', reason: 'schema-or-recovery' } as const;
+      if (!gate.ready) return unavailable;
+      try {
+        return await gate.readSnapshot(() => inspectRuntimeAccess(config));
+      } catch {
+        return unavailable;
       }
-      return access;
     });
     // Apply this before binding the local operator socket, including direct service-account startup.
     process.umask(0o077);

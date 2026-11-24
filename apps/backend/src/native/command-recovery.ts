@@ -1,11 +1,14 @@
 import type { NativeInstallationConfig } from '@planner/contracts/native';
+import type { Db } from 'mongodb';
 import type { CommandGate } from '../application/command-gate/gate.js';
 import { CommandJournal } from '../application/command-journal/journal.js';
 import { CommandRecoveryError } from '../application/command-journal/operation.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
 
-export function startNativeCommandRecovery(config: NativeInstallationConfig, gate: CommandGate) {
+export function startNativeCommandRecovery(
+  config: NativeInstallationConfig, gate: CommandGate, recoverPrivate?: (database: Db, installationId: string) => Promise<void>,
+) {
   let stopped = false;
   let warned = false;
   let timer: NodeJS.Timeout | undefined;
@@ -14,7 +17,10 @@ export function startNativeCommandRecovery(config: NativeInstallationConfig, gat
     try {
       const client = await connectConfiguredNativeMongo(config);
       try {
-        if (!stopped) await new CommandJournal(gate, client.db(databaseName), config.installationId).recover();
+        const database = client.db(databaseName);
+        if (!stopped) await new CommandJournal(gate, database, config.installationId).recover(
+          recoverPrivate && (() => recoverPrivate(database, config.installationId)),
+        );
       } finally { await client.close(); }
     } catch (error) {
       if (stopped) return;

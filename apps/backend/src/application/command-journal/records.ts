@@ -29,7 +29,7 @@ export interface CommandRecord {
   idempotencyKey: string;
   requestHash: string;
   createdAt: Date;
-  recoverySequence: Long;
+  recoverySequence?: Long;
   status: 'building' | 'prepared' | 'committed';
   applied?: number;
   pendingDelete?: string;
@@ -64,17 +64,17 @@ export function checkCommand(command: CommandRecord) {
       || !publicIdSchema.safeParse(idempotencyKey).success || !isCommandName(operationId)
       || id !== commandUuid(generationId, ['command', actorId, operationId, idempotencyKey])
       || command._id !== workspaceKey(generationId, id) || typeof command.requestHash !== 'string'
-      || !digestPattern.test(command.requestHash) || !isStoredDate(command.createdAt)
-      || !Long.isLong(command.recoverySequence) || decodeRank(command.recoverySequence) <= 0n) {
+      || !digestPattern.test(command.requestHash) || !isStoredDate(command.createdAt)) {
     throw new CommandRecoveryError('A command journal identity is invalid.');
   }
   if (status === 'building') {
     if ([command.applied, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
-      command.eventCount, command.delivered, command.outboxPending]
+      command.eventCount, command.delivered, command.outboxPending, command.recoverySequence]
       .some((value) => value !== undefined)) throw new CommandRecoveryError('A building command has active effects.');
     return;
   }
-  if (!['prepared', 'committed'].includes(status) || !Array.isArray(command.manifest)
+  if (!['prepared', 'committed'].includes(status) || !Long.isLong(command.recoverySequence)
+      || decodeRank(command.recoverySequence) <= 0n || !Array.isArray(command.manifest)
       || !command.manifest.length || typeof command.result !== 'string' || typeof command.resultHash !== 'string'
       || journalDigest(command.result) !== command.resultHash || !Number.isSafeInteger(command.applied) || command.applied! < 0
       || (status === 'prepared' ? command.committedAt !== undefined : !isStoredDate(command.committedAt))) {
@@ -90,13 +90,19 @@ export function checkCommand(command: CommandRecord) {
   if (command.applied! > total || (status === 'committed' && (command.applied !== total || command.pendingDelete !== undefined))) {
     throw new CommandRecoveryError('The command journal cursor is invalid.');
   }
-  if (!Number.isSafeInteger(command.eventCount) || command.eventCount! < 0 || command.eventCount! >= total
-      || !Number.isSafeInteger(command.delivered) || command.delivered! < 0 || command.delivered! > command.eventCount!
-      || (status === 'prepared' && command.delivered !== 0)
-      || command.outboxPending !== (command.delivered! < command.eventCount!)) {
+  checkOutboxCursor(command);
+  if (command.eventCount! >= total || (status === 'prepared' && command.delivered !== 0)) {
     throw new CommandRecoveryError('The command outbox cursor is invalid.');
   }
   readJournalResult(command);
+}
+
+export function checkOutboxCursor(command: Pick<CommandRecord, 'eventCount' | 'delivered' | 'outboxPending'>) {
+  if (!Number.isSafeInteger(command.eventCount) || command.eventCount! < 0
+      || !Number.isSafeInteger(command.delivered) || command.delivered! < 0 || command.delivered! > command.eventCount!
+      || command.outboxPending !== (command.delivered! < command.eventCount!)) {
+    throw new CommandRecoveryError('The command outbox cursor is invalid.');
+  }
 }
 
 export function readJournalResult(command: CommandRecord) {

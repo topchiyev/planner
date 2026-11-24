@@ -5,14 +5,14 @@ import { applyCommandEffect } from '../../storage/command-effects.js';
 import { decodeRank, encodeRank, workspaceKey } from '../../storage/identity.js';
 import { readInstallation, requireCurrentSchema, verifyStorageSchema } from '../../storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace, workspaceInsertFields } from '../../storage/scoped.js';
-import type { CommandGate } from '../command-gate/gate.js';
+import { CleanCommandRejection, GateUnavailableError, type CommandGate } from '../command-gate/gate.js';
 import {
   canonicalJournalData, CommandConflict, CommandInputError, CommandRecoveryError, commandOperations, commandUuid,
   isCommandName, journalDigest, type CommandContext, type CommandPlan, type JournalOperation, type JournalValue,
   type PlannedEffect,
 } from './operation.js';
 import {
-  assertChanged, batches, checkCommand, commands, durable, packBatches, readBatches, readJournalResult,
+  assertChanged, batches, checkCommand, checkOutboxCursor, commands, durable, packBatches, readBatches, readJournalResult,
   validateEffect, type CommandRecord,
 } from './records.js';
 
@@ -41,6 +41,8 @@ interface JournalOptions {
   // Only process composition can bind the verified enrollment generation. Input never supplies a generation.
   scope?: 'active' | 'enrollment';
   checkpoint?: (point: Checkpoint, index?: number) => void | Promise<void>;
+  // Synchronously enqueue the trusted signal. Any receipt settles outside the gate.
+  // Recipient authorization and transport work are implemented by the subscriber.
   publish?: (signal: OutboxSignal) => void | Promise<void>;
 }
 
@@ -51,8 +53,10 @@ async function withReadContext<T>(
 ) {
   let open = true;
   const pending: Promise<unknown>[] = [];
+  let completed = false;
+  let failure: unknown;
   try {
-    return await operation(Object.freeze({
+    const result = await operation(Object.freeze({
       generationId: workspace.generationId, actorId,
       read(...args: Parameters<Workspace['read']>) {
         if (!open) return Promise.reject(new Error('The command snapshot has ended.'));
@@ -62,9 +66,16 @@ async function withReadContext<T>(
         return request;
       },
     }));
+    completed = true;
+    return result;
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
     open = false;
-    await Promise.all(pending);
+    const outcomes = await Promise.allSettled(pending);
+    const first = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (first?.status === 'rejected' && (completed || failure instanceof CleanCommandRejection)) throw first.reason;
   }
 }
 
@@ -87,6 +98,7 @@ export class CommandJournal {
     readonly installationId: string,
     private readonly options: JournalOptions = {},
   ) {
+    this.options = Object.freeze({ ...options });
     this.#operations = commandOperations(options.operations ?? {});
   }
 
@@ -120,17 +132,8 @@ export class CommandJournal {
         if (command.status === 'prepared') return this.#finish(command);
       } else {
         const id = commandUuid(generationId, ['command', actorId, operationId, idempotencyKey]);
-        const latest = await Promise.all((['building', 'prepared', 'committed'] as const).map((status) =>
-          collection.findOne({ generationId, status }, { sort: { recoverySequence: -1 }, promoteLongs: false })));
-        const last = latest.reduce((maximum, record) => {
-          if (!record) return maximum;
-          checkCommand(record);
-          const sequence = decodeRank(record.recoverySequence);
-          return sequence > maximum ? sequence : maximum;
-        }, 0n);
-        const recoverySequence = encodeRank(last + 1n);
         command = { ...identity, _id: workspaceKey(generationId, id), id, status: 'building',
-          requestHash: hash, recoverySequence, createdAt: new Date() };
+          requestHash: hash, createdAt: new Date() };
         await this.options.checkpoint?.('beforeIntent');
         await collection.insertOne(command, durable);
         await this.options.checkpoint?.('building');
@@ -139,7 +142,6 @@ export class CommandJournal {
       const intent = command;
       const plan = await withReadContext(workspace, actorId, (context) => operation.plan(Object.freeze({
         ...context, commandId: intent.id, timestamp: intent.createdAt.toISOString(),
-        idFor: (label: string) => commandUuid(intent.id, ['resource', label]),
       }), normalized));
       const prepared = await this.#prepare(command, plan);
       await this.options.checkpoint?.('prepared');
@@ -149,22 +151,37 @@ export class CommandJournal {
     return result;
   }
 
-  async recover() {
+  async recover(recoverPrivate?: () => void | Promise<void>) {
     await this.gate.recover(async () => {
       const installation = await verifyStorageSchema(this.database, this.installationId);
       const generationId = scopeGeneration(installation, 'active') ?? scopeGeneration(installation, 'enrollment');
-      if (!generationId) return;
-      const pending = commands(this.database).find({ generationId, status: { $ne: 'committed' } }, { promoteLongs: false })
-        .sort({ recoverySequence: 1, id: 1 });
-      for await (const command of pending) {
-        checkCommand(command);
-        if (command.status === 'building') continue; // Only an authorized retry can rebuild.
-        await this.#finish(command);
-      }
-      const outbox = commands(this.database).find({ generationId, status: 'committed', outboxPending: true }, { promoteLongs: false });
-      for await (const command of outbox) await this.#verifyOutbox(command);
+      if (generationId) await this.#recoverScope(generationId);
+      // Protected claims may have their own replay mechanism. This hook runs before admission.
+      await recoverPrivate?.();
     });
     this.#wake();
+  }
+
+  async #recoverScope(generationId: string) {
+    const collection = commands(this.database);
+    const pending = collection.find({ generationId, status: { $ne: 'committed' } }, { promoteLongs: false })
+      .sort({ recoverySequence: 1, id: 1 });
+    for await (const command of pending) {
+      checkCommand(command);
+      if (command.status === 'building') continue; // Only an authorized retry can rebuild.
+      await this.#finish(command);
+    }
+    const outbox = collection.find({ generationId, status: 'committed' }, {
+      projection: { _id: 1, delivered: 1, eventCount: 1, outboxPending: 1 },
+    });
+    for await (const cursor of outbox) {
+      checkOutboxCursor(cursor);
+      if (cursor.outboxPending) {
+        const command = await collection.findOne({ generationId, _id: cursor._id }, { promoteLongs: false });
+        if (!command) throw new CommandRecoveryError('A pending outbox command is missing.');
+        await this.#verifyOutbox(command);
+      }
+    }
   }
 
   deliverPending(publish: (signal: OutboxSignal) => void | Promise<void>) {
@@ -224,7 +241,17 @@ export class CommandJournal {
     }
     const { records, manifest } = packBatches(command, effects);
     const eventCount = plan.events?.length ?? 0;
-    const preparedFields = { status: 'prepared', applied: 0, manifest, result, resultHash: journalDigest(result),
+    const latest = await Promise.all((['prepared', 'committed'] as const).map((status) =>
+      commands(this.database).findOne({ generationId: command.generationId, status },
+        { sort: { recoverySequence: -1 }, promoteLongs: false })));
+    const last = latest.reduce((maximum, record) => {
+      if (!record) return maximum;
+      checkCommand(record);
+      const sequence = decodeRank(record.recoverySequence!);
+      return sequence > maximum ? sequence : maximum;
+    }, 0n);
+    const recoverySequence = encodeRank(last + 1n);
+    const preparedFields = { status: 'prepared', recoverySequence, applied: 0, manifest, result, resultHash: journalDigest(result),
       eventCount, delivered: 0, outboxPending: eventCount > 0 } as const;
     const prepared = { ...command, ...preparedFields };
     const collection = batches(this.database);
@@ -233,19 +260,42 @@ export class CommandJournal {
       await collection.insertOne(batch, durable);
       await this.options.checkpoint?.('batchStored', batch.batch);
     }
-    for await (const _ of readBatches(this.database, prepared)) { /* Verify the persisted manifest. */ }
+    await this.#validateReplay(prepared);
     const written = await commands(this.database).updateOne({ _id: command._id, status: 'building' },
       { $set: preparedFields }, durable);
     assertChanged(written.matchedCount);
     return prepared;
   }
 
-  async #finish(command: CommandRecord): Promise<JournalValue> {
+  async #validateReplay(command: CommandRecord) {
     checkCommand(command);
     const cursor = command.applied!;
     let index = 0;
+    let audit = false;
+    let events = 0;
     for await (const batch of readBatches(this.database, command)) {
       for (const effect of batch) {
+        if (effect.collection === 'auditEntries') {
+          if (audit || effect.kind !== 'insert' || effect.id !== commandUuid(command.id, ['audit'])
+              || effect.fields.commandId !== command.id || effect.fields.actorId !== command.actorId
+              || effect.fields.createdAt !== command.createdAt.toISOString()
+              || !isCommandName(effect.fields.resourceType) || !isCommandName(effect.fields.action)
+              || !publicIdSchema.safeParse(effect.fields.resourceId).success) {
+            throw new CommandRecoveryError('A command audit effect has an invalid identity.');
+          }
+          audit = true;
+        } else if (effect.collection === 'events') {
+          if (!audit || effect.kind !== 'insert' || effect.id !== commandUuid(command.id, ['event', String(events)])
+              || effect.fields.commandId !== command.id || effect.fields.ordinal !== events
+              || effect.fields.createdAt !== command.createdAt.toISOString() || !isCommandName(effect.fields.kind)
+              || !publicIdSchema.safeParse(effect.fields.boardId).success
+              || typeof effect.fields.sequence !== 'string' || decodeRank(encodeRank(effect.fields.sequence)) <= 0n) {
+            throw new CommandRecoveryError('A command event effect has an invalid identity.');
+          }
+          events += 1;
+        } else if (audit) {
+          throw new CommandRecoveryError('A domain effect follows its command audit.');
+        }
         if (index === cursor && command.pendingDelete !== undefined
             && (effect.kind !== 'delete' || command.pendingDelete !== effect.effectId)) {
           throw new CommandRecoveryError('The command deletion reservation is invalid.');
@@ -254,8 +304,14 @@ export class CommandJournal {
       }
     }
     if (cursor === index && command.pendingDelete !== undefined) throw new CommandRecoveryError('A command has an extra deletion reservation.');
+    if (!audit || events !== command.eventCount) throw new CommandRecoveryError('A command audit or event manifest is incomplete.');
+  }
+
+  async #finish(command: CommandRecord): Promise<JournalValue> {
+    await this.#validateReplay(command);
+    const cursor = command.applied!;
     const collection = commands(this.database);
-    index = 0;
+    let index = 0;
     for await (const batch of readBatches(this.database, command)) {
       for (const effect of batch) {
         const step = index++;
@@ -321,18 +377,46 @@ export class CommandJournal {
       if (!delivery) return;
       const { command, event } = delivery;
       await this.options.checkpoint?.('beforeDelivery');
-      await publish(Object.freeze({ id: event.id, generationId: event.generationId,
-        boardId: event.boardId, sequence: decodeRank(event.sequence).toString() }));
+      const handoff = await this.gate.readSnapshot(async () => {
+        const installation = await readInstallation(this.database, this.installationId);
+        requireCurrentSchema(installation);
+        if (installation.activeGenerationId !== event.generationId) return null;
+        const current = await commands(this.database).findOne({ _id: command._id, generationId: event.generationId, status: 'committed' },
+          { projection: { delivered: 1, eventCount: 1, outboxPending: 1 } });
+        if (!current) throw new CommandRecoveryError('A pending outbox command is missing.');
+        checkOutboxCursor(current);
+        if (current.delivered! > event.ordinal) return null;
+        if (current.delivered !== event.ordinal || current.eventCount !== command.eventCount || !current.outboxPending) {
+          throw new CommandRecoveryError('The selected outbox event changed before handoff.');
+        }
+        if (!this.gate.ready) throw new GateUnavailableError();
+        let receipt: Promise<void>;
+        try {
+          receipt = Promise.resolve(publish(Object.freeze({ id: event.id, generationId: event.generationId,
+            boardId: event.boardId, sequence: decodeRank(event.sequence).toString() })));
+        } catch (error) { receipt = Promise.reject(error); }
+        void receipt.catch(() => {});
+        return { receipt };
+      });
+      if (!handoff) continue;
+      await handoff.receipt;
       await this.options.checkpoint?.('afterDelivery');
       await this.gate.runCommand(async () => {
         const installation = await readInstallation(this.database, this.installationId);
         requireCurrentSchema(installation);
         if (installation.activeGenerationId !== event.generationId) return;
         const delivered = event.ordinal + 1;
-        const acknowledged = await commands(this.database).updateOne({
+        const collection = commands(this.database);
+        const acknowledged = await collection.updateOne({
           _id: command._id, generationId: event.generationId, status: 'committed', delivered: event.ordinal, outboxPending: true,
         }, { $set: { delivered, outboxPending: delivered < command.eventCount! } }, durable);
-        assertChanged(acknowledged.matchedCount);
+        if (acknowledged.matchedCount === 0) {
+          const current = await collection.findOne({ _id: command._id, generationId: event.generationId, status: 'committed' },
+            { projection: { delivered: 1, eventCount: 1, outboxPending: 1 } });
+          if (!current) throw new CommandRecoveryError('An acknowledged outbox command is missing.');
+          checkOutboxCursor(current);
+          if (current.delivered! < delivered || current.eventCount !== command.eventCount) assertChanged(0);
+        }
       });
     }
   }
