@@ -1,11 +1,14 @@
 import type { Document } from 'mongodb';
-import type { PlannedEffect } from '../command-journal/operation.js';
-import { requireRevision, rowRevision, touchRevision } from './relationship-policy.js';
+import type { CommandPlanningContext, PlannedEffect } from '../command-journal/operation.js';
+import { fitsCommandEffect } from '../command-journal/records.js';
+import { RelationshipError, requireRevision, rowRevision, touchRevision } from './relationship-policy.js';
 import { canonicalRow, equal, together, type WorkspaceRecordName, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 const queryBatchSize = 512;
 
-export async function planBoardDescendants(records: WorkspaceRecords, generationId: string, boardId: string, timestamp: string) {
+export async function planBoardDescendants(records: WorkspaceRecords, boardId: string,
+  { generationId, timestamp, commandId }: CommandPlanningContext,
+) {
   function find<K extends WorkspaceRecordName>(collection: K, selector: Document, ...checks: Document[]) {
     return records.find(collection, { ...selector, $expr: { $and: [canonicalRow(generationId), ...checks] } }, { id: 1 });
   }
@@ -99,13 +102,15 @@ export async function planBoardDescendants(records: WorkspaceRecords, generation
     if (!checklist || !card || !target || !survivingBoards.has(card.boardId) || externalLists.get(card.listId)?.boardId !== card.boardId) continue;
 
     const revision = requireRevision(task, task.revision, true);
-    effects.push({ kind: 'update', collection: 'tasks', id: task.id, revision, fields: {
+    const unlink = { kind: 'update', collection: 'tasks', id: task.id, revision, fields: {
       linkedCardId: null, linkedUnavailable: true, name: null, completed: null, updatedAt: timestamp,
       linkedUnavailableProvenance: {
-        id: target.id, name: Array.from(target.name).slice(0, 512).join(''),
+        id: target.id, name: target.name,
         completed: target.closed ?? targetLists.get(target.listId)?.kind === 'closed',
       },
-    } });
+    } } satisfies PlannedEffect;
+    if (!fitsCommandEffect({ id: commandId, generationId }, unlink)) throw new RelationshipError('boardDeleteData');
+    effects.push(unlink);
     changedCards.set(card.id, card);
     changedChecklists.set(checklist.id, checklist);
     otherBoardIds.add(card.boardId);

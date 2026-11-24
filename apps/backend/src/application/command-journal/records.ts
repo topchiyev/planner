@@ -133,9 +133,16 @@ export function validateEffect(effect: PlannedEffect, internal: boolean) {
   }
 }
 
-function batchIdentity(command: CommandRecord, batch: number) {
+type BatchCommand = Pick<CommandRecord, 'id' | 'generationId'>;
+
+function batchIdentity(command: BatchCommand, batch: number) {
   const id = commandUuid(command.id, ['batch', String(batch)]);
   return { _id: workspaceKey(command.generationId, id), id, generationId: command.generationId, commandId: command.id, batch };
+}
+
+export function fitsCommandEffect(command: BatchCommand, effect: PlannedEffect) {
+  const entry = canonicalJournalData({ ...effect, effectId: effectId(command, 0) });
+  return BSON.calculateObjectSize({ ...batchIdentity(command, 0), payload: `[${entry}]` }) <= maximumBatchBytes;
 }
 
 export function packBatches(command: CommandRecord, effects: PlannedEffect[]) {
@@ -164,7 +171,7 @@ export function packBatches(command: CommandRecord, effects: PlannedEffect[]) {
   return { records, manifest };
 }
 
-export function effectId(command: CommandRecord, index: number) {
+export function effectId(command: Pick<CommandRecord, 'id'>, index: number) {
   return commandUuid(command.id, ['effect', String(index)]);
 }
 

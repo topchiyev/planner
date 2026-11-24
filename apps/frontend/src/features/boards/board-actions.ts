@@ -8,6 +8,7 @@ import './board-management.css';
 
 const errors = new Map([
   ['BOARD_ORDER_CONFLICT', 'The board order changed. Review the current order and try again.'],
+  ['BOARD_DELETE_DATA_LIMIT', 'This board has imported data too large to preserve during deletion.'],
   ['BOARD_NAME_MISMATCH', 'Enter the board name exactly as displayed.'],
   ['INELIGIBLE_ACCOUNT', 'That account is unavailable for board membership.'],
   ['RELATIONSHIP_EXISTS', 'This account already belongs to the board.'],

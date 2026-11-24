@@ -179,7 +179,7 @@ export async function planBoardDelete(records: WorkspaceRecords, access: BoardAc
   const revision = requireRevision(board, input.expectedRevision);
   if (board.name !== input.name) throw new RelationshipError('boardName');
   const parent = advanceBoardOrder(project.project, context.timestamp);
-  const descendants = await planBoardDescendants(records, context.generationId, board.id, context.timestamp);
+  const descendants = await planBoardDescendants(records, board.id, context);
   return {
     effects: [...descendants.effects, { kind: 'delete', collection: 'boards', id: board.id, revision }, parent],
     result: { data: { id: board.id, projectId: project.project.id, parentRevision: parent.revision + 1 } },
