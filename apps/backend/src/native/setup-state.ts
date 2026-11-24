@@ -3,6 +3,8 @@ import {
   nativeInstallationConfig, nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
 } from '@planner/contracts/native';
 import type { MongoClient } from 'mongodb';
+import { workspaceKey } from '../storage/identity.js';
+import { currentStorageSchema, type InstallationDocument } from '../storage/schema.js';
 import { checkDirectory, fileJson, readProtectedFile, writeProtectedFile } from './mongo-host.js';
 import { databaseName, NativeMongoError, uuidPattern } from './mongo-identity.js';
 
@@ -93,21 +95,9 @@ export function publishInstallationConfig(config: NativeInstallationConfig, appG
 
 type PendingAction = 'first-admin-enrollment' | 'migration-preflight';
 
-export interface InstallationRecord {
-  _id: string;
-  installationId: string;
-  activeGenerationId?: string | null;
-  schemaVersion?: number;
-  setup?: {
-    mode: NativeSetupOptions['mode'];
-    pendingAction: PendingAction;
-    enrollmentGenerationId: string | null;
-    firstAdminGrantIssuedAt?: Date;
-  };
-}
-
 interface GrantRecord {
   _id: string;
+  id: string;
   installationId: string;
   generationId: string;
   kind: 'first-admin';
@@ -123,8 +113,8 @@ export function pendingAction(mode: NativeSetupOptions['mode']): PendingAction {
 
 export async function persistSetup(client: MongoClient, installationId: string, intent: SetupIntent) {
   const database = client.db(databaseName);
-  const installation = database.collection<InstallationRecord>('installation');
-  const key = { _id: 'installation', installationId };
+  const installation = database.collection<InstallationDocument>('installation');
+  const key = { _id: 'installation', installationId } as const;
   const setup = {
     mode: intent.options.mode, pendingAction: pendingAction(intent.options.mode),
     enrollmentGenerationId: intent.grant?.generationId ?? null,
@@ -134,7 +124,8 @@ export async function persistSetup(client: MongoClient, installationId: string, 
     { $set: { setup, activeGenerationId: null, schemaVersion: 0 } }, { writeConcern },
   );
   const stored = await installation.findOne(key);
-  if (stored?.activeGenerationId !== null || stored.schemaVersion !== 0
+  if (stored?.activeGenerationId !== null || (stored.schemaVersion !== 0 && stored.schemaVersion !== currentStorageSchema)
+      || stored.schemaMigration !== undefined
       || stored.setup?.mode !== setup.mode || stored.setup.pendingAction !== setup.pendingAction
       || stored.setup.enrollmentGenerationId !== setup.enrollmentGenerationId) {
     throw new NativeMongoError('The database setup state does not match this installation.');
@@ -142,22 +133,23 @@ export async function persistSetup(client: MongoClient, installationId: string, 
   if (!intent.grant) return undefined;
 
   const grant = intent.grant;
+  const keyForGrant = workspaceKey(grant.generationId, grant.id);
   const recoveryGrants = database.collection<GrantRecord>('recoveryGrants');
   const digest = createHash('sha256').update(grant.token).digest('hex');
   const firstIssuedAt = stored.setup.firstAdminGrantIssuedAt;
   if (firstIssuedAt === undefined) {
     const issuedAt = new Date();
-    await recoveryGrants.updateOne({ _id: grant.id }, { $setOnInsert: {
-      installationId, generationId: grant.generationId, kind: 'first-admin',
+    await recoveryGrants.updateOne({ _id: keyForGrant }, { $setOnInsert: {
+      id: grant.id, installationId, generationId: grant.generationId, kind: 'first-admin',
       tokenDigest: digest, issuedAt, expiresAt: new Date(issuedAt.getTime() + grantLifetimeMs), consumedAt: null,
     } }, { upsert: true, writeConcern });
   } else if (!(firstIssuedAt instanceof Date) || !Number.isFinite(firstIssuedAt.getTime())) {
     throw new NativeMongoError('The first-administrator grant issuance record is invalid.');
   }
-  const saved = await recoveryGrants.findOne({ _id: grant.id });
+  const saved = await recoveryGrants.findOne({ _id: keyForGrant });
   // The installation retains the issuance marker even after an expired or consumed grant is removed.
   if (!saved && firstIssuedAt !== undefined) return undefined;
-  if (saved?.installationId !== installationId || saved.generationId !== grant.generationId
+  if (saved?.installationId !== installationId || saved.id !== grant.id || saved.generationId !== grant.generationId
       || saved.kind !== 'first-admin' || saved.tokenDigest !== digest
       || !(saved.issuedAt instanceof Date) || !(saved.expiresAt instanceof Date)
       || saved.expiresAt.getTime() - saved.issuedAt.getTime() !== grantLifetimeMs

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parsePreflightOptions } from '@planner/contracts/native';
 
-type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart';
+type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart' | 'verify-storage';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
 
 export function runNativeCommand(command: NativeCommand, args: string[]) {
@@ -20,7 +20,7 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
       helperArgs = [command, JSON.stringify({ ...options, mode }), json ? 'json' : 'text'];
     } else {
       if (args.length > 1 || (args.length === 1 && args[0] !== '--json')) {
-        throw new Error(`Usage: plannerctl ${command} [--json]`);
+        throw new Error(`Usage: plannerctl ${command === 'verify-storage' ? 'storage verify' : command} [--json]`);
       }
       helperArgs = [command, args.length ? 'json' : 'text'];
     }

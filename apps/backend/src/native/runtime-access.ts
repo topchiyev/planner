@@ -1,8 +1,8 @@
 import type { NativeInstallationConfig } from '@planner/contracts/native';
+import { StorageSchemaError, verifyStorageSchema } from '../storage/schema.js';
 import { checkDirectory } from './mongo-host.js';
 import { databaseName, uuidPattern } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
-import type { InstallationRecord } from './setup-state.js';
 
 export type RuntimeAccess =
   | { kind: 'ready' }
@@ -42,12 +42,10 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
     const client = await connectConfiguredNativeMongo(config);
     try {
       const database = client.db(databaseName);
-      const installation = await database.collection<InstallationRecord>('installation').findOne({
-        _id: 'installation', installationId: config.installationId,
-      });
-      if (!installation || installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
-      if (installation.activeGenerationId !== null || installation.schemaVersion !== 0) {
-        // Activation also needs the schema and recovery checks from the storage layer.
+      const installation = await verifyStorageSchema(database, config.installationId);
+      if (installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
+      if (installation.activeGenerationId !== null) {
+        // Activation also needs command recovery to finish before serving ordinary workspace requests.
         return { kind: 'unavailable', reason: 'schema-or-recovery' };
       }
       if (config.mode === 'import') return { kind: 'unavailable', reason: 'migration' };
@@ -70,7 +68,7 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
     } finally {
       await client.close();
     }
-  } catch {
-    return { kind: 'unavailable', reason: 'database' };
+  } catch (error) {
+    return { kind: 'unavailable', reason: error instanceof StorageSchemaError ? 'schema-or-recovery' : 'database' };
   }
 }
