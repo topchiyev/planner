@@ -43,7 +43,7 @@ interface Records {
   cardLabels: { cardId: string; labelId: string };
   cardAssignees: { cardId: string; userId: string };
   boardFollows: { boardId: string; userId: string };
-  cardFollows: { cardId: string; userId: string };
+  cardFollows: { cardId: string; userId: string; isPermanent?: boolean | null };
   checklists: Ordered & { cardId: string; showOnFront?: boolean; hideCompleted?: boolean };
   tasks: {
     checklistId: string; rank?: Long | null; name?: string | null; completed?: boolean | null; assigneeId?: string | null;

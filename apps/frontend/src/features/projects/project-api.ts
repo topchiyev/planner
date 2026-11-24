@@ -15,10 +15,11 @@ function headers(csrf: string, key: string, revision?: number | null): Record<st
 }
 
 export async function relationshipCommand<K extends RelationshipCommand>(command: K, csrf: string, key: string, options: {
-  id?: string; userId?: string; revision?: number | null; body?: object;
+  id?: string; userId?: string; relatedId?: string; revision?: number | null; body?: object;
 } = {}): Promise<RelationshipCommandOutput<K> | undefined> {
   const operation = relationshipCommands[command];
-  const path = pathWithId(pathWithId(operation.path, ':id', options.id), ':userId', options.userId);
+  const parent = pathWithId(operation.path, ':id', options.id);
+  const path = pathWithId(pathWithId(parent, ':userId', options.userId), ':relatedId', options.relatedId);
   const response = await workspaceResponse(path, {
     method: operation.method, headers: { ...headers(csrf, key, options.revision), ...(options.body && { 'Content-Type': 'application/json' }) },
     body: options.body && JSON.stringify(options.body),

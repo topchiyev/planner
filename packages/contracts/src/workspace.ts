@@ -87,6 +87,7 @@ export const boardWorkspaceSchema = z.strictObject({
   labels: z.array(boardLabelSchema),
   preferences: boardPreferencesSchema,
   selfMembership: z.strictObject({ revision: revisionSchema.nullable() }).nullable(),
+  following: z.boolean(),
   orderVersion: revisionSchema,
   latestEventSequence: signedInt64TextSchema,
   eventCursor: boardEventCursorSchema,
@@ -102,7 +103,7 @@ const attachmentSchema = named.extend({
 });
 export const cardDetailSchema = cardSummarySchema.extend({
   description: maybeText, stopwatch: cardStopwatchSchema, previousListId: maybeId, labels: z.array(boardLabelSchema),
-  assignees: z.array(workspacePersonSchema), attachments: z.array(attachmentSchema), coverAttachmentId: maybeId,
+  assignees: z.array(workspacePersonSchema), following: z.boolean(), automaticFollow: z.boolean(), attachments: z.array(attachmentSchema), coverAttachmentId: maybeId,
   fields: z.array(fieldGroupSchema),
   values: z.array(z.strictObject({ fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, value: z.string() })),
 });

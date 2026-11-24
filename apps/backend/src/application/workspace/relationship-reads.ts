@@ -1,5 +1,6 @@
 import type { RelationshipRead, RelationshipReadInput } from '@planner/contracts';
 import type { Db } from 'mongodb';
+import { eligibleBoardPeople } from './eligible-members.js';
 import { requireCapability, type WorkspaceAuthorization } from './authorization.js';
 import { readPage, textQuery } from './queries.js';
 import { managerRoles, memberRoles, requireBoardManagement, rowRevision } from './relationship-policy.js';
@@ -84,20 +85,7 @@ export function createRelationshipReads(database: Db, scope: WorkspaceAuthorizat
     requireCapability(permissions.canEdit);
     const search = textQuery(input.q, ['name', 'username']);
     const paging = page('boards.mentionMembers', input, [search.binding]);
-    const rows = await records.aggregate<Person>('users', {
-      ...search.filter, $expr: { $and: [
-        canonical, { $eq: [{ $type: '$disabledAt' }, 'null'] }, { $in: ['$role', memberRoles] },
-      ] },
-    }, [
-      records.lookup('boardMembers', 'member', { userId: '$id' }, {
-        boardId: input.id, $expr: { $and: [
-          canonical, equal('boardId', input.id), { $eq: ['$userId', '$$userId'] }, directBoardRole,
-        ] },
-      }, [{ $limit: 1 }]),
-      { $match: { 'member.0': { $exists: true } } },
-      ...paging.stages,
-      { $project: personProjection },
-    ]);
+    const rows = await eligibleBoardPeople(records, generationId, input.id, search.filter, paging.stages);
     const result = paging.result(rows, ({ id }) => ({ id }));
     return { data: result.selected.map(personOf), page: result.page };
   }

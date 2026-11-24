@@ -1048,3 +1048,93 @@ test('keyboard placement continues past the first anchor page and closes when pr
     await expect(p.getByRole('heading', { name: 'Page not found', exact: true })).toBeVisible();
   });
 });
+
+test('board and card labels, scoped assignees and explicit follows work in the native frontend', { timeout: 150_000 }, async () => {
+  await workspaceBrowser(async ({ origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    const colleague = await page({ width: 390, height: 844 });
+    const viewer = await page({ width: 1240, height: 900 });
+    const path = board(ids.privateBoard);
+    const cardPath = path + '/cards/' + ids.activeCard + '?context=board&view=list';
+    await signIn(editor, origin, 'first-editor');
+    await signIn(colleague, origin, 'second-editor');
+    await signIn(viewer, origin, 'viewer');
+    await editor.goto(origin + path);
+    await viewer.goto(origin + path);
+
+    await viewer.getByRole('button', { name: 'Follow board', exact: true }).click();
+    await expect(viewer.getByRole('button', { name: 'Unfollow board', exact: true })).toBeVisible();
+    await expect(editor.getByRole('button', { name: 'Follow board', exact: true })).toBeVisible();
+    await editor.getByRole('button', { name: 'Board labels', exact: true }).click();
+    const palette = editor.getByRole('dialog', { name: 'Board labels' });
+    await palette.getByRole('button', { name: 'New label' }).click();
+    await palette.getByLabel('Label color').selectOption('pirate-gold');
+    await palette.getByRole('button', { name: 'Create label' }).click();
+    await expect(palette.getByRole('list', { name: 'Labels' }).getByText('Pirate gold', { exact: true })).toBeVisible();
+    await palette.getByRole('button', { name: 'Edit label Pirate gold', exact: true }).click();
+    await palette.getByLabel('Label name').fill('Urgent');
+    await palette.getByLabel('Label color').selectOption('berry-red');
+    await palette.getByRole('button', { name: 'Save label' }).click();
+    await expect(palette.getByRole('list', { name: 'Labels' }).getByText('Urgent', { exact: true })).toBeVisible();
+    await palette.getByRole('button', { name: 'Close', exact: true }).click();
+
+    await viewer.reload();
+    await viewer.getByRole('button', { name: 'Board labels', exact: true }).click();
+    const readOnly = viewer.getByRole('dialog', { name: 'Board labels' });
+    await expect(readOnly.getByText('Urgent', { exact: true })).toBeVisible();
+    await expect(readOnly.getByRole('button', { name: 'New label' })).toHaveCount(0);
+    await expect(readOnly.getByRole('button', { name: 'Edit label Urgent' })).toHaveCount(0);
+
+    await editor.goto(origin + cardPath);
+    const panel = editor.getByRole('region', { name: 'Card affiliations' });
+    await panel.getByRole('button', { name: 'Add label', exact: true }).click();
+    const attach = editor.getByRole('dialog', { name: 'Add label' });
+    await attach.getByRole('button', { name: 'Add label Urgent', exact: true }).click();
+    await expect(panel.getByRole('list', { name: 'Attached labels' }).getByText('Urgent', { exact: true })).toBeVisible();
+
+    await panel.getByRole('button', { name: 'Assign people' }).click();
+    const people = editor.getByRole('dialog', { name: 'Assign people' });
+    await people.getByLabel('Find a board member').fill('disabled-member');
+    await people.getByRole('button', { name: 'Search members' }).click();
+    await expect(people.getByText('No eligible board members on this page.')).toBeVisible();
+    await people.getByLabel('Find a board member').fill('commenting-viewer');
+    await people.getByRole('button', { name: 'Search members' }).click();
+    await people.getByRole('button', { name: 'Assign Fixture commenting-viewer', exact: true }).click();
+    await expect(panel.getByRole('list', { name: 'Assignees' }).getByText('Fixture commenting-viewer', { exact: true })).toBeVisible();
+
+    await panel.getByRole('button', { name: 'Unassign Fixture second-editor', exact: true }).click();
+    await expect(panel.getByRole('button', { name: 'Unassign Fixture second-editor', exact: true })).toHaveCount(0);
+    await panel.getByRole('button', { name: 'Assign people' }).click();
+    await people.getByLabel('Find a board member').fill('second-editor');
+    await people.getByRole('button', { name: 'Search members' }).click();
+    await people.getByRole('button', { name: 'Assign Fixture second-editor', exact: true }).click();
+    await expect(panel.getByRole('list', { name: 'Assignees' }).getByText('Fixture second-editor', { exact: true })).toBeVisible();
+    await colleague.goto(origin + cardPath);
+    const own = colleague.getByRole('region', { name: 'Card affiliations' });
+    await expect(own.getByRole('button', { name: 'Unfollow card', exact: true })).toBeVisible();
+    await own.getByRole('button', { name: 'Keep following card', exact: true }).click();
+    await expect(own.getByRole('button', { name: 'Keep following card', exact: true })).toHaveCount(0);
+    await panel.getByRole('button', { name: 'Unassign Fixture second-editor', exact: true }).click();
+    await expect(panel.getByRole('button', { name: 'Unassign Fixture second-editor', exact: true })).toHaveCount(0);
+    await colleague.reload();
+    await expect(own.getByRole('button', { name: 'Unfollow card', exact: true })).toBeVisible();
+    await expect(own.getByText('Fixture second-editor', { exact: true })).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Follow card', exact: true })).toBeVisible();
+    assert.ok(await colleague.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+
+    await viewer.goto(origin + path + '/cards/' + ids.archivedStory + '?context=archive&view=list');
+    const historical = viewer.getByRole('region', { name: 'Card affiliations' });
+    await historical.getByRole('button', { name: 'Follow card', exact: true }).click();
+    await expect(historical.getByRole('button', { name: 'Unfollow card', exact: true })).toBeVisible();
+    await expect(historical.getByRole('button', { name: 'Assign people' })).toHaveCount(0);
+    await expect(historical.getByRole('button', { name: 'Add label', exact: true })).toHaveCount(0);
+
+    await editor.goto(origin + path);
+    await editor.getByRole('button', { name: 'Board labels', exact: true }).click();
+    await palette.getByRole('button', { name: 'Delete label Urgent', exact: true }).click();
+    await palette.getByRole('button', { name: 'Confirm label deletion', exact: true }).click();
+    await expect(palette.getByText('No labels yet.')).toBeVisible();
+    await editor.goto(origin + cardPath);
+    await expect(panel.getByRole('list', { name: 'Attached labels' })).toHaveCount(0);
+  });
+});

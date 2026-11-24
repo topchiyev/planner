@@ -9,13 +9,16 @@ import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/
 import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardClosed, cardDto, cardStopwatch } from './card-state.js';
+import { personalFollow } from './affiliation-edges.js';
+import { eligibleBoardPeople } from './eligible-members.js';
+import { cardLabelJoinFilter, labelDto, scopedLabels } from './label-state.js';
 import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
 import { boardListOrderVersion, listDto } from './list-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { availableMedia, unavailableMedia } from '../media/records.js';
 import { availableProjectImage, effectiveProjectBackground } from './project-background.js';
-import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
+import { canonicalRow, createWorkspaceRecords, equal, publicIdField, rankSort, together, type WorkspaceRow } from './records.js';
 import { projectFavoriteFilter, projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
 
 const nameAnchor = (name: string) => createHash('sha256').update(name, 'utf8').digest('hex');
@@ -26,7 +29,6 @@ const entity = ({ id, revision, createdAt, updatedAt }: EntityProjection) =>
   ({ id, revision, createdAt: createdAt.toISOString(), updatedAt: iso(updatedAt) });
 const ordered = (row: EntityProjection & { rank?: Long | null }) => ({ ...entity(row), rank: rank(row.rank) });
 const person = ({ id, name, username }: WorkspaceRow<'users'>) => ({ id, name, username: username ?? null });
-const labelDto = (row: WorkspaceRow<'labels'>) => ({ ...ordered(row), boardId: row.boardId, name: row.name ?? null, color: row.color ?? null });
 
 const fieldDefinition = (row: WorkspaceRow<'fieldDefinitions'>) => ({
   ...ordered(row), name: row.name, fieldGroupId: row.fieldGroupId, showOnFront: row.showOnFront ?? false,
@@ -102,9 +104,9 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   }
 
   async function publicAssignee(id: string | null | undefined, boardId: string) {
-    if (!id || !await records.first('boardMembers', { boardId, userId: id, $expr: directBoardRole })) return null;
-    const user = await records.get('users', id);
-    return user ? person(user) : null;
+    if (!id || !publicIdSchema.safeParse(id).success) return null;
+    const [member] = await eligibleBoardPeople(records, generationId, boardId, { id });
+    return member ?? null;
   }
 
   async function previousList(context: CardAccessContext) {
@@ -213,16 +215,17 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
     async boardWorkspace({ id }: WorkspaceReadInput<'boardWorkspace'>) {
       const board = await access.requireBoard(id);
-      const [project, lists, labels, preferences, latestSequence, totals] = await together([
+      const [project, lists, labels, preferences, latestSequence, totals, follow] = await together([
         projectSummary(board.project),
         records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] } }, rankSort),
-        records.find('labels', { boardId: id }, rankSort),
+        scopedLabels(records, generationId, id),
         boardPreferencesRow(records, generationId, id),
         createBoardEventStore(database, generationId, id).highWater(),
         together((['board', 'archive', 'trash'] as const).map((kind) =>
           records.aggregate<{ _id: string; count: number }>('cards', { boardId: id, kind }, [
             ...cardPlacementStages(records, id, kind), { $group: { _id: '$listId', count: { $sum: 1 } } },
           ]))),
+        board.permissions.canFollow ? personalFollow(records, generationId, 'board', id, actor.id) : null,
       ]);
       const counts = new Map(totals.flat().map(({ _id, count }) => [_id, count]));
       return { data: {
@@ -232,6 +235,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         latestEventSequence: latestSequence.toString(),
         eventCursor: eventCursors.encode({ actorId: actor.id, generationId, boardId: id }, latestSequence),
         preferences: boardPreferences(board.board, preferences),
+        following: !!follow,
         selfMembership: board.membership ? { revision: board.membership.revision ?? null } : null,
       } };
     },
@@ -270,26 +274,29 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const context = await access.requireCard(id, expectedBoard);
       const { card, board, list } = context;
       const boardId = board.board.id;
-      const [links, assignments, attachments, previousListId, fields] = await together([
-        records.find('cardLabels', { cardId: id }), records.find('cardAssignees', { cardId: id }),
+      const [links, assignments, attachments, previousListId, fields, follow] = await together([
+        records.find('cardLabels', { cardId: id, ...cardLabelJoinFilter(generationId, id) }),
+        records.find('cardAssignees', { cardId: id,
+          $expr: { $and: [canonical, equal('cardId', id), publicIdField('userId')] } }),
         records.find('attachments', { cardId: id, deletedAt: null, kind: { $in: ['file', 'link'] } }, { createdAt: 1, id: 1 }),
         previousList(context), cardFields(context),
+        context.permissions.canFollow ? personalFollow(records, generationId, 'card', id, actor.id) : null,
       ]);
-      const labels = await records.find('labels', { boardId, id: { $in: links.map(({ labelId }) => labelId) } }, rankSort);
-      const members = await records.find('boardMembers', { boardId, userId: { $in: assignments.map(({ userId }) => userId) },
-        $expr: directBoardRole });
+      const labels = await scopedLabels(records, generationId, boardId, links.map(({ labelId }) => labelId));
+      const assignees = await eligibleBoardPeople(records, generationId, boardId, { id: { $in: assignments.map(({ userId }) => userId) } }, [{ $sort: { id: 1 } }]);
       const visibleAttachments = await together(attachments.map(attachment));
       const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file');
       const coverAttachmentId = cover && (cover.availability === unavailableMedia
         || (cover.availability === availableMedia && await blobAvailable(cover.blobDigest, true))) ? cover.id : null;
       return { data: { ...cardDto(card, board, list), description: card.description ?? null, stopwatch: cardStopwatch(card.stopwatch), previousListId, labels: labels.map(labelDto),
-        assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: visibleAttachments,
+        assignees, following: !!follow, automaticFollow: !!follow && 'isPermanent' in follow && follow.isPermanent === false,
+        attachments: visibleAttachments,
         coverAttachmentId, ...fields } };
     },
 
     async boardLabels({ id }: WorkspaceReadInput<'boardLabels'>) {
       const { board } = await access.requireBoard(id);
-      return { data: (await records.find('labels', { boardId: board.id }, rankSort)).map(labelDto) };
+      return { data: (await scopedLabels(records, generationId, board.id)).map(labelDto) };
     },
 
     async cardChecklists({ id }: WorkspaceReadInput<'cardChecklists'>) {

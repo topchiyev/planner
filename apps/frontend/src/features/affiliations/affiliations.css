@@ -1,0 +1,17 @@
+.board-affiliations { margin-block-start: .55rem; }
+.personal-follow { display: grid; gap: .35rem; }
+.planner-label {
+  display: inline-flex; align-items: center; gap: .36rem; max-width: 100%; padding: .2rem .48rem;
+  border: 1px solid color-mix(in srgb, var(--palette-color) 45%, white); border-radius: .35rem;
+  background: color-mix(in srgb, var(--palette-color) 15%, white); color: #23332c;
+  font-size: .85rem; font-weight: 650; overflow-wrap: anywhere;
+}
+.planner-label::before {
+  content: ''; flex: 0 0 .58rem; height: .58rem; border-radius: 50%; background: var(--palette-color);
+}
+.board-palette, .card-affiliation-items { display: grid; gap: .5rem; padding: 0; margin: .7rem 0; list-style: none; }
+.board-palette > li, .card-affiliation-items > li { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; justify-content: space-between; }
+.palette-form { margin-block: .8rem; }
+.card-affiliations { display: grid; gap: .85rem; padding-block-end: .85rem; }
+.card-affiliations h3 { font-size: .94rem; }
+.affiliation-username { display: block; color: var(--muted); font-size: .79rem; }
