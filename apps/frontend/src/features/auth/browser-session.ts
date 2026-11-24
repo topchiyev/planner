@@ -5,8 +5,6 @@ export const sessionPath = '/api/v1/session';
 
 export async function loadBrowserSession({ request }: LoaderFunctionArgs) {
   const response = await fetch(sessionPath, { cache: 'no-store', signal: request.signal });
-  // The explicitly non-native shell has no session service.
-  if (response.status === 404) return null;
   if (response.status === 401) throw redirect('/sign-in');
   if (!response.ok) throw new Error('The browser session could not be verified.');
   return sessionSchema.parse(await response.json());

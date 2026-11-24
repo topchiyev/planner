@@ -3,22 +3,28 @@ import { RouteError, RouteNotFound, RoutePending } from './page-state.js';
 import { AppShell } from './shell.js';
 import { loadBrowserSession } from '../features/auth/browser-session.js';
 
+const nativeBrowserAuth = document.querySelector<HTMLMetaElement>('meta[name="planner-browser-auth"]')?.content === 'required';
+
 export const router = createBrowserRouter([
-  {
-    path: 'recover',
-    lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).FirstAdminPage }),
-  },
-  {
-    path: 'sign-in',
-    lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).SignInPage }),
-  },
+  ...(nativeBrowserAuth ? [
+    {
+      path: 'recover',
+      lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).FirstAdminPage }),
+    },
+    {
+      path: 'sign-in',
+      lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).SignInPage }),
+    },
+  ] : []),
   {
     Component: AppShell,
-    loader: loadBrowserSession,
-    shouldRevalidate: ({ currentUrl, nextUrl, defaultShouldRevalidate }) =>
-      currentUrl.pathname !== nextUrl.pathname || defaultShouldRevalidate,
-    ErrorBoundary: RouteError,
-    HydrateFallback: RoutePending,
+    ...(nativeBrowserAuth && {
+      loader: loadBrowserSession,
+      shouldRevalidate: ({ currentUrl, nextUrl, defaultShouldRevalidate }) =>
+        currentUrl.pathname !== nextUrl.pathname || defaultShouldRevalidate,
+      ErrorBoundary: RouteError,
+      HydrateFallback: RoutePending,
+    }),
     children: [{
       ErrorBoundary: RouteError,
       HydrateFallback: RoutePending,

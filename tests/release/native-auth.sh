@@ -23,6 +23,11 @@ status() { curl_tls -o /dev/null -w '%{http_code}' "$@"; }
 
 certificate_key=$(openssl x509 -in /etc/ssl/planner/fullchain.pem -pubkey -noout | \
     openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | openssl base64 -A)
+missing=$(LD_LIBRARY_PATH="$media/browser-libs" ldd "$media/chromium/chrome-headless-shell" | awk '$2 == "=>" && $3 == "not" {print $1}')
+if [ -n "$missing" ]; then
+    printf 'Missing Chromium libraries: %s\n' "$missing" >&2
+    exit 1
+fi
 test_user=nobody
 chown "$test_user":nogroup "$work" "$work/setup.json"
 runuser -u "$test_user" -- env LD_LIBRARY_PATH="$media/browser-libs" "$node" "$media/native-auth-browser.mjs" \
