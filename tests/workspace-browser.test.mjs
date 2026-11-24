@@ -309,7 +309,7 @@ test('project settings preserve a stale draft and refresh manager authority thro
     const pathname = new URL(owner.url()).pathname;
     const id = pathname.split('/').at(-1);
     await admin.goto(origin + pathname);
-    await expect(admin.getByRole('heading', { name: 'This page is unavailable' })).toBeVisible();
+    await expect(admin.getByRole('heading', { name: 'Page not found' })).toBeVisible();
     await owner.getByRole('button', { name: 'Project settings' }).click();
     const settings = owner.getByRole('dialog', { name: 'Project settings' });
     await settings.getByLabel('Project name').fill('Browser draft title');

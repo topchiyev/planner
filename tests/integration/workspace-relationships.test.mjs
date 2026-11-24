@@ -90,7 +90,7 @@ test('project manager changes preserve ownership, authorize every field and reco
       await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 1, type: 'shared' }, { key: releaseKey }), 200);
       const replay = await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 1, type: 'shared' }, { key: releaseKey }), 200);
       assert.deepEqual(replay.data, { id: ids.privateProject, revision: 2, name: 'Private fixture project', description: null,
-        type: 'shared', hidden: false });
+        type: 'shared', hidden: false, background: null });
       await expectResponse(f.call(board(sibling), admin), 200);
       await expectResponse(f.call(board(sibling), viewer), 404);
       await expectResponse(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.privateOwner), { revision: 1 }), 409, 'LAST_PROJECT_MANAGER');
