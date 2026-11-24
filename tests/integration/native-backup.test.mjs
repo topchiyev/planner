@@ -171,8 +171,10 @@ test('captures matched BSON and all-generation pinned media, then replays durabl
           const firstRow = await checkpoint('row');
           assert.equal((await db.collection('installation').findOne()).activeGenerationId, null);
           await assert.rejects(offline(activate), /matching verified staged backup/);
-          const [name, id] = firstRow.split('/');
-          await db.collection(name).updateOne({ _id: id }, { $set: { conflictingField: true } });
+          const boundary = firstRow.indexOf('/');
+          const name = firstRow.slice(0, boundary);
+          const id = firstRow.slice(boundary + 1);
+          assert.equal((await db.collection(name).updateOne({ _id: id }, { $set: { conflictingField: true } })).matchedCount, 1);
           await assert.rejects(offline((lease, media) => stageRestore(db, lease, media, backup)), /conflicts with the backup/);
           await db.collection(name).updateOne({ _id: id }, { $unset: { conflictingField: '' } });
           await checkpoint('blob');
@@ -202,6 +204,16 @@ test('captures matched BSON and all-generation pinned media, then replays durabl
           assert.equal((await offline((lease, media) => stageRestore(db, lease, media, backup))).state, 'staged');
           await checkpoint('activated');
           assert.equal((await db.collection('installation').findOne()).activeGenerationId, f.generationId);
+          await unlink(live);
+          await assert.rejects(offline((lease, media) => activateRestore(db, lease, media, f.installationId,
+            receipt.manifestSha256, backup.proof, verifyKey, undefined, true)));
+          await offline(async (_lease, media) => {
+            const entry = backup.archive.manifest.blobs.find(({ sha256 }) => sha256 === source.active.digest);
+            const file = await backup.archive.blob(entry);
+            try { await media.writeBlob(file, entry); } finally { await file.close(); }
+          });
+          assert.equal((await offline((lease, media) => activateRestore(db, lease, media, f.installationId,
+            receipt.manifestSha256, backup.proof, verifyKey, undefined, true))).state, 'active');
           assert.equal((await offline(activate)).state, 'active');
           await assert.rejects(offline((lease, media) => stageRestore(db, lease, media, backup)), /replace an active/);
           const gate = new CommandGate(writer());
