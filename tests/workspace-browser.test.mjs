@@ -201,6 +201,29 @@ test('native project and board links restore the authorized selection through MF
     await expect(narrow.getByRole('heading', { name: 'Page not found' })).toBeVisible();
     await expect(narrow.getByText('Cross-board linked target')).toHaveCount(0);
 
+    const longProjectId = fixtureId(1800);
+    const longBoardId = fixtureId(1801);
+    const longListId = fixtureId(1802);
+    const longCardId = fixtureId(1803);
+    const longProject = 'Project'.repeat(18);
+    const longBoard = 'Board'.repeat(25);
+    const longList = 'List'.repeat(32);
+    const longCard = 'Card'.repeat(32);
+    await f.insert('projects', longProjectId, { name: longProject, type: 'shared', hidden: false,
+      ownerProjectManagerId: null, rank: '18432' });
+    await f.insert('boards', longBoardId, { name: longBoard, projectId: longProjectId, rank: '1024' });
+    await f.insert('lists', longListId, { name: longList, boardId: longBoardId, kind: 'active', rank: '1024' });
+    await f.insert('cards', longCardId, { name: longCard, boardId: longBoardId, listId: longListId, kind: 'board', type: 'project', rank: '1024' });
+    await f.insert('boardMembers', fixtureId(1804), { boardId: longBoardId, userId: ids.viewer, role: 'viewer', canComment: false });
+    for (const [path, title] of [
+      [project(longProjectId), longProject], [board(longBoardId), longBoard], [board(longBoardId) + '/cards/' + longCardId, longCard],
+    ]) {
+      await narrow.goto(origin + path);
+      await expect(narrow.getByRole('heading', { name: title, exact: true })).toBeVisible();
+      if (title === longBoard) await expect(narrow.getByRole('list', { name: 'Board lists' }).getByText(longList)).toBeVisible();
+      assert.equal(await narrow.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, title);
+    }
+
     const owner = await page({ width: 1440, height: 900 });
     await signIn(owner, origin, 'private-owner');
     await expect(tile(owner, 'Private fixture project').getByText('2 boards')).toBeVisible();

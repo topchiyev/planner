@@ -62,6 +62,9 @@
 .workspace-pagination { margin-top: 1rem; }
 .workspace-pagination a { min-height: 2.75rem; align-content: center; }
 .workspace-detail-title .workspace-favorite { margin-left: .3rem; }
+.app-shell[data-native-workspace='true'] :is(.workspace-detail-title h1, .workspace-breadcrumb a, .board-page h1, .inspector-header h2, .workspace-list-summary li) {
+  min-width: 0; overflow-wrap: anywhere;
+}
 .workspace-description { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); margin-block: 1rem; max-width: 65ch; }
 .workspace-detail { border: 1px solid var(--line); padding-block-start: .85rem; border-radius: .65rem; background: #fcfdfc; }
 .workspace-detail h2 { padding-inline: 1rem; font-size: 1.08rem; margin-bottom: .35rem; }
