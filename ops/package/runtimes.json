@@ -1,0 +1,38 @@
+{
+  "node": {
+    "version": "24.22.3",
+    "npmVersion": "11.19.1",
+    "archive": {
+      "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz",
+      "sha256": "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"
+    },
+    "upstreamSignature": {
+      "checksumsUrl": "https://nodejs.org/dist/v24.22.3/SHASUMS256.txt",
+      "signatureUrl": "https://nodejs.org/dist/v24.22.3/SHASUMS256.txt.sig",
+      "signerFingerprint": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356"
+    },
+    "source": {
+      "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3.tar.xz",
+      "sha256": "48ca3aa8a9b02133356922ef4fc80200e00598c80a4ef446f7c39a459222593d"
+    }
+  },
+  "mongodb": {
+    "version": "8.0.38",
+    "gitHash": "b2f7afe3a6838999fd375c7a7ea678189f795568",
+    "publicGitHash": "11d6674e73e4b36060314e68d7a12656d6a12aab",
+    "archive": {
+      "url": "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2404-8.0.38.tgz",
+      "sha256": "2885d4382bd47b96bfaf3edc7dec0ef44463e3e2a79479f584d20deb6182cda9"
+    },
+    "upstreamSignature": {
+      "signatureUrl": "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2404-8.0.38.tgz.sig",
+      "keyUrl": "https://pgp.mongodb.com/server-8.0.asc",
+      "signerFingerprint": "4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05"
+    },
+    "source": {
+      "tag": "r8.0.38",
+      "url": "https://codeload.github.com/mongodb/mongo/tar.gz/11d6674e73e4b36060314e68d7a12656d6a12aab",
+      "sha256": "d24d9b3489172c758690aaced8a7a56afad43e3b62cccbe585a8565818f0059e"
+    }
+  }
+}
