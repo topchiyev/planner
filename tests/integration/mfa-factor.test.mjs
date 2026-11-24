@@ -212,6 +212,50 @@ test('only the exact recovered staged administrator can enroll and completion le
 });
 
 
+test('staged replay accepts only the completed scoped enrollment, even after its proof expired', { timeout: 30_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const { db } = mongo;
+    const fixture = await setup(mongo, true);
+    const { installationId, generationId, gate, key, now, users, manage, userId } = fixture;
+    const userKey = { _id: workspaceKey(generationId, userId) };
+    const interruption = new Error('test audit write interruption');
+    const failingDb = {
+      collection: (name) => name === 'auditEntries' ? { insertOne: async () => { throw interruption; } } : db.collection(name),
+    };
+    const failing = createMfaManagement(failingDb, installationId, gate, key, hasher, now);
+    try {
+      const ticket = await gate.runCommand(() => issueStagedMfaTicket(db, installationId, now()));
+      const enrollment = await manage.begin({ enrollmentId: ticket });
+      const code = totpFrom(enrollment.secret).generate({ timestamp: now().getTime() });
+      await assert.rejects(() => failing.confirm({ enrollmentId: ticket }, code), interruption);
+      assert.equal(gate.state, 'maintenance');
+      const committedState = await fixture.user();
+      assert.equal(committedState.localAuth.factorAudit.action, 'enabled');
+      fixture.setTime(new Date(now().getTime() + 31 * 60_000));
+
+      const unrelatedId = randomUUID();
+      const unrelated = { ...committedState, _id: workspaceKey(generationId, unrelatedId), id: unrelatedId,
+        normalizedEmail: 'unrelated@example.test' };
+      await users.updateOne(userKey, { $unset: { 'localAuth.factorAudit': '' } });
+      await users.insertOne(unrelated);
+      const resume = () => gate.recover(() => recoverFactorChanges(db, installationId));
+      await assert.rejects(resume, /does not match the authorized recovery/u);
+      assert.equal(await db.collection('auditEntries').countDocuments({}), 0);
+      await users.deleteOne({ _id: unrelated._id });
+      await users.replaceOne(userKey, committedState);
+      await users.updateOne(userKey, { $set: { 'localAuth.factorAudit.action': 'recovery-codes-renewed' } });
+      await assert.rejects(resume, /does not match the authorized recovery/u);
+      assert.equal(await db.collection('auditEntries').countDocuments({}), 0);
+
+      await users.replaceOne(userKey, committedState);
+      await resume();
+      assert.equal((await fixture.user()).localAuth.factorAudit, undefined);
+      assert.equal(await db.collection('auditEntries').countDocuments({ generationId, actorId: userId, action: 'mfa.enabled' }), 1);
+      assert.equal((await readInstallation(db, installationId)).activeGenerationId, null);
+    } finally { await gate.closeAndDrain(); }
+  });
+});
+
 test('malformed protected factor audit state refuses replay before credential or audit effects', { timeout: 25_000 }, async () => {
   await withFixtureMongo(async (mongo) => {
     const { db } = mongo;

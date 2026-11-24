@@ -11,7 +11,7 @@ import { isRecoveryGrant, type RecoveryGrant } from './account-grant.js';
 import { getLocalAccount, type AccountRecord } from './accounts.js';
 import { tokenDigest } from './credentials.js';
 import { matchTotpCounter } from './mfa-crypto.js';
-import { isFactorState, type FactorState } from './mfa-records.js';
+import { hasConsumedStagedProof, isFactorState, type FactorState } from './mfa-records.js';
 
 type MfaAction = 'enabled' | 'disabled' | 'recovery-codes-renewed';
 
@@ -178,19 +178,24 @@ function stagedBinding(installation: InstallationDocument) {
   return { ...descriptor, generationId: setup.enrollmentGenerationId! };
 }
 
-export async function readStagedMfaEnrollment(database: Db, installationId: string, time: Date) {
-  const installation = await readInstallation(database, installationId);
-  requireCurrentSchema(installation);
-  const scope = stagedBinding(installation);
-  if (!scope) return null;
+type StagedBinding = NonNullable<ReturnType<typeof stagedBinding>>;
+
+async function hasStagedRecovery(database: Db, installationId: string, scope: StagedBinding, time: Date) {
   const grant = await database.collection<RecoveryGrant>('recoveryGrants').findOne({
     _id: workspaceKey(scope.generationId, scope.recoveryId), id: scope.recoveryId, installationId,
     generationId: scope.generationId, userId: scope.userId, actorId: scope.userId, kind: 'account-recovery',
     targetEpoch: scope.credentialsVersion - 1, targetRevision: scope.accountRevision - 1, revokedAt: { $type: 'null' },
     consumedAt: { $type: 'date', $lte: time }, expiresAt: { $gt: time },
   });
-  if (!grant || !isRecoveryGrant(grant) || !isStoredDate(grant.consumedAt)
-      || grant.issuedAt > grant.consumedAt || grant.consumedAt >= grant.expiresAt) return null;
+  return grant !== null && isRecoveryGrant(grant) && isStoredDate(grant.consumedAt)
+    && grant.issuedAt <= grant.consumedAt && grant.consumedAt < grant.expiresAt;
+}
+
+export async function readStagedMfaEnrollment(database: Db, installationId: string, time: Date) {
+  const installation = await readInstallation(database, installationId);
+  requireCurrentSchema(installation);
+  const scope = stagedBinding(installation);
+  if (!scope || !await hasStagedRecovery(database, installationId, scope, time)) return null;
   const account = await mfaAccounts(database).findOne({
     _id: workspaceKey(scope.generationId, scope.userId), generationId: scope.generationId, id: scope.userId,
     revision: scope.accountRevision, disabledAt: { $type: 'null' }, requiresMfaEnrollment: true,
@@ -204,9 +209,23 @@ export async function readStagedMfaEnrollment(database: Db, installationId: stri
 export async function recoverFactorChanges(database: Db, installationId: string) {
   const installation = await readInstallation(database, installationId);
   requireCurrentSchema(installation);
-  const generationId = installation.activeGenerationId ?? stagedBinding(installation)?.generationId;
+  const stage = stagedBinding(installation);
+  const generationId = installation.activeGenerationId ?? stage?.generationId;
   if (!generationId) return;
   const pending = await mfaAccounts(database).find({ generationId, 'localAuth.factorAudit': { $exists: true } }, { limit: 2 }).toArray();
   if (pending.length > 1) throw new CommandRecoveryError('Multiple multifactor transitions are pending.');
-  if (pending[0]) await finishFactorChange(database, installationId, pending[0]);
+  const account = pending[0];
+  if (!account) return;
+  if (stage) {
+    const audit = account.localAuth?.factorAudit;
+    const factor = getFactor(account);
+    if (account.id !== stage.userId || account.role !== 'admin' || !factor || audit?.action !== 'enabled'
+        || audit.revision !== stage.accountRevision + 1 || audit.credentialsVersion !== stage.credentialsVersion + 1
+        || !isStoredDate(audit.time) || !await hasStagedRecovery(database, installationId, stage, audit.time)
+        || !await hasConsumedStagedProof(database, { installationId, generationId, userId: stage.userId,
+          credentialsVersion: stage.credentialsVersion }, stage.recoveryId, factor.id, audit.time)) {
+      throw new CommandRecoveryError('The staged multifactor transition does not match the authorized recovery.');
+    }
+  }
+  await finishFactorChange(database, installationId, account);
 }
