@@ -34,7 +34,8 @@ export async function authorizeTaskMove(scope: WorkspaceAuthorization, input: Re
   const access = await authorizeTaskEdit(scope, input.id);
   const id = access.card.card.id;
   const destination = input.toChecklistId === access.checklist.id ? access.checklist : (await scope.requireChecklist(input.toChecklistId, id)).checklist;
-  if (!access.task.linkedUnavailable && access.task.linkedCardId != null) {
+  if (access.task.linkedUnavailable) throw new WorkspaceAccessError('missing');
+  if (access.task.linkedCardId != null) {
     const link = publicIdSchema.safeParse(access.task.linkedCardId);
     if (!link.success) throw new WorkspaceAccessError('missing');
     await scope.requireCard(link.data);

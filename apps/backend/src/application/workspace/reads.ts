@@ -230,7 +230,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       if (!search.valid) return invalid;
       const filter: Document = { boardId: input.id, kind: input.context };
       if (input.listIds.length) filter.listId = { $in: input.listIds };
-      const filters = await cardFilters(records, board, input);
+      const filters = await cardFilters(records, access, board, input);
       let rows: (WorkspaceRow<'cards'> & { placement: WorkspaceRow<'lists'>[] })[];
       try {
         rows = await records.aggregate('cards', filter,
@@ -278,8 +278,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       return { data: (await scopedLabels(records, generationId, board.id)).map(labelDto) };
     },
 
-    async cardChecklists({ id }: WorkspaceReadInput<'cardChecklists'>) {
-      const { card, board } = await access.requireCard(id);
+    async cardChecklists({ id, boardId }: WorkspaceReadInput<'cardChecklists'>) {
+      const { card, board } = await access.requireCard(id, boardId);
       return { data: await checklistReads.list(card.id, board.board.id) };
     },
 

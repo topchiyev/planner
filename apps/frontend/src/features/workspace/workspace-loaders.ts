@@ -86,6 +86,8 @@ export function loadNativeCard({ params, request }: LoaderFunctionArgs) {
   if (!boardId.success || !id.success) return null;
   return loadVisible(request, async () => {
     const card = (await readWorkspace('cardGet', id.data, new URLSearchParams({ boardId: boardId.data }), request.signal)).data;
-    return card.boardId === boardId.data ? card : null;
+    if (card.boardId !== boardId.data) return null;
+    const checklists = (await readWorkspace('cardChecklists', id.data, new URLSearchParams({ boardId: boardId.data }), request.signal)).data;
+    return { ...card, checklists };
   });
 }

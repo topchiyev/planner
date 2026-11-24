@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
 import { BoardCardPlacement, CardAppendTarget, DraggableBoardCard } from './card-placement-dnd.js';
 import { ClearTrash, ListMaintenanceButtons } from '../lists/list-maintenance.js';
+import { FrontChecklists } from '../checklists/checklist-display.js';
 import { DeleteList } from '../lists/delete-list.js';
 import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-lists.js';
 import { relationshipCommand } from '../projects/project-api.js';
@@ -76,7 +77,7 @@ function CardsInList({ workspace, list, cards, editable, search }: {
     {cards.length > 0 && <ul className="board-cards" aria-label={'Cards in ' + list.name}>
       {cards.map((card) => {
         const content = <><Link to={{ pathname: cardPath(card.boardId, card.id), search }}>{card.name}</Link>
-          {card.closed && <span>Closed</span>}</>;
+          {card.closed && <span>Closed</span>}<FrontChecklists groups={card.frontChecklists} /></>;
         return editable ? <DraggableBoardCard card={card} key={card.id}>{content}</DraggableBoardCard> : <li key={card.id}>{content}</li>;
       })}
     </ul>}
