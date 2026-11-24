@@ -195,7 +195,9 @@ for config_file in planner.json mongod.conf; do
     install -o root -g "$group" -m 0640 /dev/null "/etc/planner/$config_file"
     systemctl start planner.service
     [ "$(systemctl show -p ConditionResult --value planner.service)" = no ]
-    [ "$(systemctl show -p MainPID --value planner.service planner-mongodb.service | sort -u)" = 0 ]
+    for unit in planner.service planner-mongodb.service; do
+        [ "$(systemctl show -p MainPID --value "$unit")" = 0 ]
+    done
     unlink "/etc/planner/$config_file"
 done
 
