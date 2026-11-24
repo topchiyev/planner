@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boardLifecycleCommands } from './board-lifecycle.js';
 import { publicIdSchema, revisionSchema } from './storage.js';
 import { workspaceData, workspacePage, workspacePageQuery, workspacePersonSchema, workspaceProjectType } from './workspace.js';
 
@@ -64,6 +65,7 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 }
 
 export const relationshipCommands = {
+  ...boardLifecycleCommands,
   'projects.favorite': command('projects.favorite', 'PUT', '/api/v1/projects/:id/favorite', 200, 'parent', projectRevision, changedFavorite),
   'projects.unfavorite': command('projects.unfavorite', 'DELETE', '/api/v1/projects/:id/favorite', 204, 'parent', projectRevision, changedFavorite),
   'projects.update': command('projects.update', 'PATCH', '/api/v1/projects/:id', 200, 'parent', projectUpdate, changedProject),
