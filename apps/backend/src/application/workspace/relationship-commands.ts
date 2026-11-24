@@ -3,7 +3,7 @@ import { relationshipCommands, type RelationshipBoardInvalidation, type Relation
 import type { Db } from 'mongodb';
 import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields, JournalOperation, PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
-import { availableProjectImage, effectiveProjectBackground } from './project-background.js';
+import { availableProjectImage } from './project-background.js';
 import { authorizeProjectDelete, planProjectCreate, planProjectDelete } from './project-lifecycle.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
@@ -152,7 +152,6 @@ export function createRelationshipJournalOperations(
           id: input.id, revision: revision + 1, name: input.name ?? project.name,
           description: input.description === undefined ? project.description ?? null : input.description,
           hidden: input.hidden ?? project.hidden, type: input.type ?? project.type,
-          background: input.background === undefined ? await effectiveProjectBackground(database, context.generationId, project) : input.background,
         } : { id: input.id, applied: true } },
         audit: { action: 'projects.update', resourceId: input.id, resourceType: 'project' },
         events: await projectEvents(records, context.generationId, input.id),

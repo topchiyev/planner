@@ -41,7 +41,7 @@ export type RelationshipBoardInvalidation = z.infer<typeof relationshipBoardInva
 const changedProject = workspaceData(z.union([
   z.strictObject({
     id: publicIdSchema, name: z.string(), description: z.string().nullable(), type: workspaceProjectType,
-    hidden: z.boolean(), revision: revisionSchema, background: projectBackgroundSchema,
+    hidden: z.boolean(), revision: revisionSchema,
   }),
   id.extend({ applied: z.literal(true) }),
 ]));
