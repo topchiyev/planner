@@ -235,6 +235,7 @@ test('refuses substituted BSON parts, symlinks and foreign source data without d
   await scratch((root) => withFixtureMongo(async (mongo) => {
     const source = await sourceFixture(root, mongo);
     try {
+      await chmod(join(root, 'source'), 0o100);
       const receipt = await source.backup();
       const path = join(source.src.backups, receipt.backupId);
       const copy = join(root, 'copied');
@@ -253,6 +254,9 @@ test('refuses substituted BSON parts, symlinks and foreign source data without d
       await assert.rejects(source.backup(), /unrecognized collection/);
       assert.equal(await source.f.db.collection('foreignFixture').countDocuments(), 1);
       assert.equal(source.f.gate.ready, true);
-    } finally { await source.close(); }
+    } finally {
+      await chmod(join(root, 'source'), 0o700);
+      await source.close();
+    }
   }));
 });

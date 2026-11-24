@@ -8,6 +8,8 @@ import { workspaceCollections } from '../../storage/catalog.js';
 
 const { O_RDONLY, O_RDWR, O_NOFOLLOW, O_DIRECTORY, O_NONBLOCK, O_CREAT, O_EXCL } = constants;
 export const backupCollections = ['installation', ...workspaceCollections].sort();
+// Linux O_PATH lets the service search an owned namespace without reading its root-owned 0711 ancestors.
+const searchOnly = 0o10000000;
 const maximumManifestBytes = 32 * 1024 * 1024;
 export const digestPattern = /^[0-9a-f]{64}$/u;
 
@@ -78,22 +80,22 @@ export function parseManifest(bytes: Buffer): BackupManifest {
   } catch { throw new BackupError('The Planner backup manifest is invalid or unsupported.'); }
 }
 
-async function openDirectory(path: string) {
-  return open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY);
+async function openDirectory(path: string, search = false) {
+  return open(path, (search ? searchOnly : O_RDONLY) | O_NOFOLLOW | O_DIRECTORY);
 }
 
 // A descriptor anchors each component before the next component is opened. No input directory can redirect a later lookup.
 export async function anchoredDirectory(path: string, owner: Owner, mode: number) {
   if (!isAbsolute(path) || normalize(path) !== path || path === '/') throw new BackupError('Use an absolute private backup directory.');
   const components = path.slice(1).split('/');
-  let directory = await openDirectory('/');
+  let directory = await openDirectory('/', true);
   try {
     for (const [index, component] of components.entries()) {
-      const next = await openDirectory(`${fdPath(directory)}/${component}`);
+      const last = index === components.length - 1;
+      const next = await openDirectory(`${fdPath(directory)}/${component}`, !last);
       await directory.close();
       directory = next;
       const stat = await directory.stat();
-      const last = index === components.length - 1;
       if (last ? !own(stat, owner) || (stat.mode & 0o7777) !== mode
         : (stat.uid !== 0 && stat.uid !== owner.uid) || (stat.mode & 0o022) !== 0) {
         throw new BackupError('The backup directory or an ancestor has unsafe ownership or permissions.');
