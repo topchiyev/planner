@@ -15,6 +15,7 @@ type MoveSnapshot = {
 };
 
 const appendTarget = 'list-end';
+const listDrag = 'list-placement';
 const pointerSensors = [PointerSensor];
 const listErrors = new Map([
   ['LIST_ORDER_CONFLICT', 'The list order changed. Review the current order and try again.'],
@@ -45,8 +46,8 @@ function EditableList({ list, busy, allowMove, dragging, edit, move, focus, chil
   list: BoardList; busy: boolean; allowMove: boolean; dragging?: string;
   edit: () => void; move: () => void; focus: (node: HTMLButtonElement | null) => void; children?: ReactNode;
 }) {
-  const drag = useDraggable({ id: list.id, disabled: busy || !allowMove });
-  const drop = useDroppable({ id: 'before-' + list.id, disabled: !dragging || dragging === list.id });
+  const drag = useDraggable({ id: list.id, type: listDrag, disabled: busy || !allowMove });
+  const drop = useDroppable({ id: 'before-' + list.id, accept: listDrag, disabled: !dragging || dragging === list.id });
   const register = useCallback((node: HTMLLIElement | null) => {
     drag.ref(node);
     drop.ref(node);
@@ -67,15 +68,16 @@ function EditableList({ list, busy, allowMove, dragging, edit, move, focus, chil
 }
 
 function AppendTarget({ active }: { active: boolean }) {
-  const end = useDroppable({ id: appendTarget, disabled: !active });
+  const end = useDroppable({ id: appendTarget, accept: listDrag, disabled: !active });
   return active ? <div className="board-list-append" aria-hidden="true" ref={end.ref}
     data-list-drop-target={end.isDropTarget || undefined}>Drop at the end</div> : null;
 }
 
 type Dialog = { kind: 'create' } | { kind: 'edit'; listId: string } | { kind: 'move'; snapshot: MoveSnapshot };
 
-export function BoardLists({ workspace, lists, renderContents }: {
+export function BoardLists({ workspace, lists, renderContents, wrapDragContents }: {
   workspace: Workspace; lists: BoardList[]; renderContents?: (list: BoardList) => ReactNode;
+  wrapDragContents?: (content: ReactNode) => ReactNode;
 }) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [message, setMessage] = useState('');
@@ -121,6 +123,7 @@ export function BoardLists({ workspace, lists, renderContents }: {
   }
 
   function dragStart({ operation }: DragStartEvent) {
+    if (operation.source?.type !== listDrag) return;
     gesture.current = typeof operation.source?.id === 'string' ? snapshot(operation.source.id) : null;
     setDragging(gesture.current?.list.id);
   }
@@ -141,6 +144,18 @@ export function BoardLists({ workspace, lists, renderContents }: {
 
   const edit = dialog?.kind === 'edit' ? lists.find(({ id }) => id === dialog.listId) : undefined;
   const details = dialog?.kind === 'create' || edit;
+  const dragContents = <>
+    <ul className="workspace-list-summary board-editable-lists" aria-label="Board lists">
+      {lists.map((list) => <EditableList key={list.id} list={list} busy={action.busy} dragging={dragging}
+        allowMove={lists.length > 1} edit={() => {
+          action.clearProblem(); setMessage(''); setDialog({ kind: 'edit', listId: list.id });
+        }} move={() => {
+          const captured = snapshot(list.id);
+          if (captured) { action.clearProblem(); setMessage(''); setDialog({ kind: 'move', snapshot: captured }); }
+        }} focus={(node) => { if (node) moveButtons.current.set(list.id, node); else moveButtons.current.delete(list.id); }}>{renderContents?.(list)}</EditableList>)}
+    </ul>
+    <AppendTarget active={!!dragging} />
+  </>;
   return <section className="board-lists" aria-label="Lists">
     <div className="board-list-controls">
       <button className="workspace-button workspace-button-primary" type="button" ref={createButton} disabled={action.busy || !!dragging}
@@ -149,16 +164,7 @@ export function BoardLists({ workspace, lists, renderContents }: {
     {message && <p role="status">{message}</p>}
     {action.problem && !details && <p role="alert" className="workspace-problem">{action.problem}</p>}
     {lists.length > 0 ? <DragDropProvider sensors={pointerSensors} onDragStart={dragStart} onDragEnd={dragEnd}>
-      <ul className="workspace-list-summary board-editable-lists" aria-label="Board lists">
-        {lists.map((list) => <EditableList key={list.id} list={list} busy={action.busy} dragging={dragging}
-          allowMove={lists.length > 1} edit={() => {
-            action.clearProblem(); setMessage(''); setDialog({ kind: 'edit', listId: list.id });
-          }} move={() => {
-            const captured = snapshot(list.id);
-            if (captured) { action.clearProblem(); setMessage(''); setDialog({ kind: 'move', snapshot: captured }); }
-          }} focus={(node) => { if (node) moveButtons.current.set(list.id, node); else moveButtons.current.delete(list.id); }}>{renderContents?.(list)}</EditableList>)}
-      </ul>
-      <AppendTarget active={!!dragging} />
+      {wrapDragContents ? wrapDragContents(dragContents) : dragContents}
     </DragDropProvider> : <EmptyState title="No lists to show" />}
     {details && <ListDetailsDialog list={edit} busy={action.busy} problem={action.problem} close={close} save={(body) => {
       const command = edit ? 'lists.update' : 'lists.create';

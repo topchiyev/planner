@@ -10,6 +10,8 @@ import {
   authorizeBoardCreate, authorizeBoardDelete, authorizeBoardManage, planBoardCreate, planBoardDelete, planBoardMove, planBoardUpdate,
 } from './board-lifecycle.js';
 import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
+import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
+import { authorizeFiniteListDeletion, planFiniteListDeletion } from './finite-list-deletion.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -121,6 +123,15 @@ export function createRelationshipJournalOperations(
     'lists.create': define('lists.create', (scope, input) => authorizeListCreate(scope, input.id), planListCreate),
     'lists.update': define('lists.update', (scope, input) => authorizeListEdit(scope, input.id), planListUpdate),
     'lists.move': define('lists.move', authorizeListMove, planListMove),
+    'cards.move': define('cards.move', authorizeCardTransition,
+      (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.move', input }, context)),
+    'cards.archive': define('cards.archive', authorizeCardTransition,
+      (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.archive', input }, context)),
+    'cards.trash': define('cards.trash', authorizeCardTransition,
+      (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.trash', input }, context)),
+    'cards.restore': define('cards.restore', authorizeCardTransition,
+      (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.restore', input }, context)),
+    'lists.delete': define('lists.delete', (scope, input) => authorizeFiniteListDeletion(database, scope, input, idempotencyKey), planFiniteListDeletion),
     'cards.create': define('cards.create', (scope, input) => authorizeCardCreate(scope, input.id), planCardCreate),
     'cards.update': define('cards.update', (scope, input) => authorizeCardUpdate(scope, input.id), planCardUpdate),
     'boards.create': define('boards.create', (scope, input) => authorizeBoardCreate(scope, input.id),

@@ -1,5 +1,5 @@
 import {
-  boardDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
+  boardDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
   type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
@@ -13,7 +13,7 @@ import { CommandConflict, CommandInputError } from '../application/command-journ
 import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../application/workspace/relationship-commands.js';
-import { RelationshipError } from '../application/workspace/relationship-policy.js';
+import { CardPlacementConflict, RelationshipError } from '../application/workspace/relationship-policy.js';
 import { createRelationshipReads } from '../application/workspace/relationship-reads.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
@@ -85,6 +85,11 @@ function badInput(request: FastifyRequest, reply: FastifyReply) {
 }
 
 function requestError(error: unknown, request: FastifyRequest, reply: FastifyReply) {
+  if (error instanceof CardPlacementConflict) {
+    return reply.code(error.statusCode).send({ error: {
+      code: error.code, message: error.message, requestId: request.id, fields: { current: error.current },
+    } });
+  }
   if (error instanceof WorkspaceAccessError || error instanceof RelationshipError) {
     return fail(request, reply, error.statusCode, error.code, error.message);
   }
@@ -146,6 +151,8 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             if (operation.status === 204) {
               if (operation.id === 'boards.delete') {
                 reply.header(relationshipParentRevisionHeader, boardDeleteReceipt.parse(result).data.parentRevision);
+              } else if (operation.id === 'lists.delete') {
+                reply.header(relationshipParentRevisionHeader, listDeleteReceipt.parse(result).data.parentRevision);
               } else if (operation.target === 'edge') {
                 const { parentRevision } = removedRelationship.parse(result).data;
                 if (parentRevision !== null) reply.header(relationshipParentRevisionHeader, parentRevision);

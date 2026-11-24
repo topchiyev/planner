@@ -827,3 +827,145 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
       url.searchParams.get('returnTo') === new URL(target).pathname);
   });
 });
+
+test('editors move cards by pointer and keyboard, recover stale placement, and use historical actions', { timeout: 150_000 }, async () => {
+  await workspaceBrowser(async ({ origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    const colleague = await page({ width: 1240, height: 900 });
+    const reader = await page({ width: 390, height: 844 });
+    const root = board(ids.privateBoard);
+    const path = root + '?context=board&view=kanban';
+    const name = 'Moving an assigned card';
+    const missingTitle = 'Story with a missing prior list';
+    const cardLink = (p, label = name) => p.getByRole('link', { name: label, exact: true });
+    const listRow = (p, title) => p.getByRole('list', { name: 'Board lists' }).locator(':scope > li')
+      .filter({ has: p.getByText(title, { exact: true }) });
+    await signIn(editor, origin, 'first-editor');
+    await signIn(colleague, origin, 'second-editor');
+    await signIn(reader, origin, 'viewer');
+    await editor.goto(origin + path);
+    await colleague.goto(origin + path);
+
+    const lane = listRow(editor, 'To do');
+    const closed = listRow(editor, 'Done');
+    const source = lane.locator('[data-card-drag-handle]');
+    await source.hover();
+    const handle = await source.boundingBox();
+    assert.ok(handle);
+    await editor.mouse.down();
+    await editor.mouse.move(handle.x + handle.width / 2 - 12, handle.y + handle.height / 2, { steps: 4 });
+    const target = closed.getByText('Drop card at the end', { exact: true });
+    await expect(target).toBeVisible();
+    const targetBox = await target.boundingBox();
+    assert.ok(targetBox);
+    await editor.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 });
+    await expect(target).toHaveAttribute('data-card-drop-target', 'true');
+    await editor.mouse.up();
+    await expect(closed.getByRole('link', { name, exact: true })).toBeVisible();
+
+    const move = editor.getByRole('button', { name: 'Move card ' + name, exact: true });
+    await move.focus();
+    await editor.keyboard.press('Enter');
+    const picker = editor.getByRole('dialog', { name: 'Move card' });
+    const destination = picker.getByLabel('Destination list');
+    await expect(destination).toBeFocused();
+    await destination.selectOption({ label: 'To do' });
+    await colleague.reload();
+    await colleague.getByRole('button', { name: 'Add card to To do', exact: true }).click();
+    const add = colleague.getByRole('dialog', { name: 'Add card' });
+    await add.getByLabel('Card name').fill('Concurrent card');
+    await add.getByRole('button', { name: 'Create card' }).click();
+    await expect(colleague.getByRole('heading', { name: 'Concurrent card', exact: true })).toBeVisible();
+    await picker.getByRole('button', { name: 'Move card', exact: true }).press('Enter');
+    await expect(editor.getByRole('alert')).toContainText('The card order changed');
+    await expect(closed.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(move).toBeFocused();
+    await editor.keyboard.press('Enter');
+    await destination.selectOption({ label: 'To do' });
+    await picker.getByLabel('Position').selectOption({ label: 'Before Concurrent card' });
+    await picker.getByRole('button', { name: 'Move card', exact: true }).click();
+    await expect(lane.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(move).toBeFocused();
+    await expect(editor).toHaveURL(origin + path);
+
+    await cardLink(editor).click();
+    const inspector = editor.getByRole('complementary', { name });
+    const placement = inspector.getByRole('region', { name: 'Card placement' });
+    await placement.getByRole('button', { name: 'Archive card', exact: true }).click();
+    await expect(placement.getByRole('status')).toContainText('Card archived.');
+    await expect(inspector.getByRole('textbox', { name: 'Card name' })).toHaveCount(0);
+    await reader.goto(origin + root + '/cards/' + ids.activeCard + '?context=archive&view=list');
+    await expect(reader.getByRole('heading', { name, exact: true })).toBeVisible();
+    await expect(reader.getByRole('button', { name: 'Restore card', exact: true })).toHaveCount(0);
+    await expect(reader.getByRole('button', { name: 'Move to trash', exact: true })).toHaveCount(0);
+
+    await placement.getByRole('button', { name: 'Move to trash', exact: true }).click();
+    await expect(placement.getByRole('status')).toContainText('Card moved to trash.');
+    await placement.getByRole('button', { name: 'Restore card', exact: true }).click();
+    await expect(placement.getByRole('status')).toContainText('Card restored.');
+
+    await editor.goto(origin + root + '?context=archive&view=list');
+    await cardLink(editor, missingTitle).click();
+    const missing = editor.getByRole('complementary', { name: missingTitle }).getByRole('region', { name: 'Card placement' });
+    const unavailable = editor.waitForResponse((response) =>
+      response.request().method() === 'POST' && response.url().endsWith('/api/v1/cards/' + ids.archivedStory + '/restore'));
+    await missing.getByRole('button', { name: 'Restore card', exact: true }).click();
+    assert.equal((await unavailable).status(), 422);
+    const restore = editor.getByRole('dialog', { name: 'Restore card' });
+    await restore.getByLabel('Destination list').selectOption({ label: 'Done' });
+    await restore.getByRole('button', { name: 'Restore card', exact: true }).click();
+    await expect(missing.getByRole('status')).toContainText('Card restored.');
+
+    await editor.goto(origin + path);
+    await expect(closed.getByRole('link', { name: missingTitle, exact: true })).toBeVisible();
+    await closed.getByRole('button', { name: 'Delete list Done', exact: true }).click();
+    await editor.getByRole('dialog', { name: 'Delete list' }).getByRole('button', { name: 'Confirm list deletion' }).click();
+    await expect(closed).toHaveCount(0);
+    await editor.getByRole('link', { name: 'Trash', exact: true }).click();
+    await expect(cardLink(editor, missingTitle)).toBeVisible();
+    await expect(editor.getByRole('button', { name: 'Delete list Trash' })).toHaveCount(0);
+  });
+});
+
+test('keyboard placement continues past the first anchor page and closes when protected access is lost', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const p = await page({ width: 390, height: 844 });
+    const target = ids.privateClosedList;
+    const anchor = fixtureId(8102);
+    for (let index = 1; index <= 102; index++) {
+      await fixture.insert('cards', fixtureId(8000 + index), { boardId: ids.privateBoard, listId: target,
+        name: 'Anchor ' + String(index).padStart(3, '0'), kind: 'board', type: 'project', closed: true, rank: String(index * 1024) });
+    }
+    await signIn(p, origin, 'first-editor');
+    const card = ids.activeCard;
+    const path = board(ids.privateBoard) + '/cards/' + card + '?context=board&view=list';
+    await p.goto(origin + path);
+    const placement = p.getByRole('region', { name: 'Card placement' });
+    await placement.getByRole('button', { name: 'Move card', exact: true }).press('Enter');
+    const dialog = p.getByRole('dialog', { name: 'Move card' });
+    await dialog.getByLabel('Destination list').selectOption({ label: 'Done' });
+    const position = dialog.getByLabel('Position');
+    await expect(dialog.getByRole('button', { name: 'Load more positions' })).toBeVisible();
+    await expect(position.locator('option', { hasText: 'Before Anchor 102' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Load more positions' }).press('Enter');
+    await position.selectOption({ label: 'Before Anchor 102' });
+    const submitted = p.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/api/v1/cards/' + card + '/move'));
+    await dialog.getByRole('button', { name: 'Move card', exact: true }).press('Enter');
+    assert.equal((await submitted).postDataJSON().beforeCardId, anchor);
+    await expect(placement.getByRole('status')).toContainText('Card moved.');
+    const saved = await fixture.db.collection('cards').findOne({ ...fixture.scope, id: card }, { promoteLongs: false });
+    assert.equal(saved.listId, target);
+    assert.ok(saved.rank.toBigInt() > 101n * 1024n && saved.rank.toBigInt() < 102n * 1024n);
+
+    await placement.getByRole('button', { name: 'Move card', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Load more positions' })).toBeVisible();
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({ ...fixture.scope,
+      boardId: ids.privateBoard, userId: ids.firstEditor }));
+    const rejected = p.waitForResponse((response) => response.url().includes('/api/v1/boards/' + ids.privateBoard + '/cards')
+      && new URL(response.url()).searchParams.get('listIds') === ids.privateActiveList);
+    await dialog.getByLabel('Destination list').selectOption({ label: 'To do' });
+    assert.equal((await rejected).status(), 404);
+    await expect(dialog).toHaveCount(0);
+    await expect(p.getByRole('heading', { name: 'Page not found', exact: true })).toBeVisible();
+  });
+});

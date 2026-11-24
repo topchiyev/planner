@@ -19,3 +19,4 @@ export * from './workspace-destination.js';
 export * from './board-lifecycle.js';
 export * from './card-lifecycle.js';
 export * from './list-lifecycle.js';
+export * from './card-transitions.js';

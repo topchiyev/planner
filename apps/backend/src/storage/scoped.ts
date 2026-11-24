@@ -128,6 +128,7 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
         promoteLongs: false,
         ...(name === 'users' && { projection: { localAuth: 0, accountChange: 0 } }),
         ...(name === 'tasks' && { projection: { linkedUnavailableProvenance: 0 } }),
+        ...(name === 'cards' && { projection: { previousListProvenance: 0 } }),
       });
       if (!stored) return null;
       const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;
