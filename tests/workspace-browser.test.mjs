@@ -119,11 +119,13 @@ test('desktop workspace loads authorized counts, pages, search, hidden state and
     await expect(shared.getByRole('button', { name: 'Remove Shared fixture project from favorites' })).toHaveAttribute('aria-pressed', 'true');
     await expect(p.getByRole('group', { name: 'Favorites', exact: true }).getByRole('link', { name: 'Shared fixture project' })).toBeVisible();
     assert.equal((await f.db.collection('projects').findOne({ ...f.scope, id: ids.sharedProject })).revision, 1);
-    await p.getByLabel('Favorites only').check();
+    await p.getByLabel('Favorites only').click();
     await expect(p).toHaveURL((url) => url.searchParams.get('favorite') === 'true');
+    await expect(p.getByLabel('Favorites only')).toBeChecked();
     await expect(shared).toBeVisible();
-    await p.getByLabel('Show favorites in sidebar').uncheck();
+    await p.getByLabel('Show favorites in sidebar').click();
     await expect(p.getByRole('group', { name: 'Favorites', exact: true })).toHaveCount(0);
+    await expect(p.getByLabel('Show favorites in sidebar')).not.toBeChecked();
     await expect(shared).toBeVisible();
 
     await saveFromOtherClient(p, origin, { editorMode: 'markup' });
@@ -155,7 +157,7 @@ test('desktop workspace loads authorized counts, pages, search, hidden state and
     for (let index = 0; index < 26; index++) {
       await f.insert('projectFavorites', fixtureId(2100 + index), { projectId: fixtureId(1000 + index), userId: ids.admin });
     }
-    await p.getByLabel('Show favorites in sidebar').check();
+    await p.getByLabel('Show favorites in sidebar').click();
     const favoriteGroup = p.getByRole('group', { name: 'Favorites', exact: true });
     await favoriteGroup.getByRole('link', { name: 'More favorites' }).click();
     await expect(favoriteGroup.getByRole('link', { name: 'Workspace page 25' })).toBeVisible();
