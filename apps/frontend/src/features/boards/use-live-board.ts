@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { boardEventCursorSchema, boardEventFrameSchema, workspaceSignInPath } from '@planner/contracts';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { boardEventsPath, boardEventCursorSchema, boardEventFrameSchema, workspaceSignInPath } from '@planner/contracts';
 import { readBrowserSession } from '../auth/browser-session.js';
 import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import { readNativeBoard, readNativeCard } from '../workspace/workspace-loaders.js';
@@ -12,12 +12,12 @@ const retryDelays = [500, 1000, 2000, 4000, 8000] as const;
 
 type Result = {
   source: LiveBoard;
-  board: LiveBoard | null;
+  board: LiveBoard;
   card: LiveCard | undefined;
 };
 
 type State = {
-  scope: string;
+  scope: symbol;
   phase: 'visible' | 'checking' | 'unavailable' | 'missing';
   removed: ReadonlySet<string>;
   result?: Result;
@@ -31,25 +31,30 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
 }) {
   const boardId = initial?.board.id;
   const recipeScope = initial?.recipeScope;
-  const scope = JSON.stringify([actorId, recipeScope, boardId, location]);
+  const scope = useMemo(() => Symbol(), [actorId, recipeScope, boardId, location]);
   const current = useRef(initial);
-  current.current = initial;
+  useLayoutEffect(() => { current.current = initial; }, [initial]);
   const [stored, setStored] = useState<State>();
   const manual = useRef<() => void>(() => {});
   const state = stored?.scope === scope ? stored : undefined;
   const removed = state?.removed;
-  const result = state?.result?.source === initial ? state?.result : undefined;
+  const snapshot = state?.result;
+  const result = snapshot && initial && (snapshot.source === initial ||
+    BigInt(snapshot.board.latestEventSequence) > BigInt(initial.latestEventSequence)) ? snapshot : undefined;
 
   useEffect(() => {
     const first = current.current;
     if (!boardId || !recipeScope || !actorId || !first) return;
+    const eventsPath = boardEventsPath.replace(':id', boardId);
     let active = true;
     let source: EventSource | undefined;
     let refresh: AbortController | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let queued = false;
+    let nextRefreshAt = 0;
     let retry = 0;
     let reconnect = false;
+    let connectedAt = 0;
     let invalidation = 0;
     let phase: State['phase'] = 'visible';
     let result: Result | undefined;
@@ -65,6 +70,8 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
     }
 
     function stop(next: State['phase']) {
+      invalidation += 1;
+      refresh?.abort();
       close();
       queued = false;
       clearTimeout(timer);
@@ -74,12 +81,13 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
     }
 
     function schedule(delay = 60) {
+      if (!queued) nextRefreshAt = Date.now() + delay;
       queued = true;
       if (!active || timer || refresh) return;
       timer = setTimeout(() => {
         timer = undefined;
         void revalidate();
-      }, delay);
+      }, Math.max(0, nextRefreshAt - Date.now()));
     }
 
     function checkAgain(delay = 0) {
@@ -88,6 +96,8 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
       publish();
       clearTimeout(timer);
       timer = undefined;
+      queued = false;
+      refresh?.abort();
       schedule(delay);
     }
 
@@ -97,32 +107,42 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
       checkAgain(delay);
     }
 
+    function connectionLost(reset = false) {
+      if (connectedAt && Date.now() - connectedAt >= 20_000) retry = 0;
+      const delay = retryDelays[retry++];
+      if (delay === undefined) stop('unavailable');
+      else recover(reset && retry === 1 ? 0 : delay);
+    }
+
     function connect(cursor: string) {
       close();
-      const connection = new EventSource('/api/v1/boards/' + boardId + '/events?' + new URLSearchParams({ after: cursor }));
+      const connection = new EventSource(eventsPath + '?' + new URLSearchParams({ after: cursor }));
       source = connection;
+      connectedAt = 0;
       connection.onopen = () => {
         if (source !== connection) return;
-        retry = 0;
+        connectedAt = Date.now();
         // The stream and every subsequently displayed snapshot overlap, including the selected card.
         schedule();
       };
       connection.onerror = () => {
-        if (source === connection) recover(retryDelays[Math.min(retry, retryDelays.length - 1)]);
+        if (source === connection) connectionLost();
       };
+      let latest = cursor;
       for (const event of events) connection.addEventListener(event, (message: MessageEvent<string>) => {
         if (source !== connection) return;
         let data: unknown;
         try { data = JSON.parse(message.data); }
-        catch { recover(0); return; }
+        catch { connectionLost(); return; }
         const frame = boardEventFrameSchema.safeParse({ event, data });
         if (!frame.success || frame.data.data.boardId !== boardId ||
           (event !== 'reset' && !boardEventCursorSchema.safeParse(message.lastEventId).success)) {
-          recover(0);
+          connectionLost();
           return;
         }
-        if (frame.data.event === 'reset') { recover(0); return; }
-        if (frame.data.event === 'ready') return;
+        if (frame.data.event === 'reset') { connectionLost(true); return; }
+        if (frame.data.event === 'ready' || message.lastEventId === latest) return;
+        latest = message.lastEventId;
         if (frame.data.event === 'card.removed') {
           invalidation += 1;
           removed.add(frame.data.data.id);
@@ -142,8 +162,11 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
       const { signal } = controller;
       const url = new URL(location, window.location.origin);
       const ticket = invalidation;
-      let nextDelay = 60;
-      const superseded = () => !active || ticket !== invalidation || baseline !== current.current;
+      const deadline = setTimeout(() => controller.abort(), 12_000);
+      function superseded() {
+        if (active && baseline !== current.current) schedule();
+        return !active || ticket !== invalidation || baseline !== current.current;
+      }
       try {
         const session = await readBrowserSession(signal, 'passive');
         if (superseded()) return;
@@ -178,16 +201,17 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
         const delay = retryDelays[retry++];
         if (delay === undefined) stop('unavailable');
         else {
-          nextDelay = delay;
           close();
           reconnect = true;
           phase = 'checking';
           publish();
-          queued = true;
+          queued = false;
+          schedule(delay);
         }
       } finally {
+        clearTimeout(deadline);
         refresh = undefined;
-        if (queued) schedule(nextDelay);
+        if (queued) schedule();
       }
     }
 
@@ -205,11 +229,12 @@ export function useLiveBoard({ initial, actorId, cardId, location }: {
     };
   }, [scope, boardId, actorId, recipeScope, cardId, location]);
 
+  const recheck = useCallback(() => manual.current(), []);
   return {
     board: result?.board ?? initial,
     card: cardId && removed?.has(cardId) ? null : result?.card,
     removed,
     phase: state?.phase ?? 'visible',
-    recheck: () => manual.current(),
+    recheck,
   };
 }

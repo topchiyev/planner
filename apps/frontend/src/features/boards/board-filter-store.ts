@@ -39,3 +39,13 @@ export function clearBoardRecipes() {
     }
   } catch { /* The browser may disable tab storage. */ }
 }
+
+export function readBoardView(key: string) {
+  try { return sessionStorage.getItem(boardRecipeStoragePrefix + 'view/' + key); }
+  catch { return null; }
+}
+
+export function saveBoardView(key: string, view: string) {
+  try { sessionStorage.setItem(boardRecipeStoragePrefix + 'view/' + key, view); }
+  catch { /* The browser may disable tab storage. */ }
+}

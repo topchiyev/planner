@@ -18,6 +18,7 @@ export function AppShell() {
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [suspendedBoard, suspendBoard] = useState<BoardReadRefusal['deniedBoard']>();
   const [deniedBoard, refuseBoard] = useState<BoardReadRefusal['deniedBoard']>();
   const board = useRouteLoaderData<BoardReadRefusal['deniedBoard']>(workspaceBoardId);
   const sidebarToggle = useRef<HTMLButtonElement>(null);
@@ -26,7 +27,7 @@ export function AppShell() {
   const navigation = useNavigation();
   const actorScope = session && session.account.id + '/' + session.account.role;
   const authenticated = !!session;
-  const refusedBoard = !!board && deniedBoard === board;
+  const refusedBoard = !!board && (deniedBoard === board || suspendedBoard === board);
   const changingNativePage = authenticated && !!navigation.location && navigation.location.pathname !== pathname;
 
   useEffect(() => {
@@ -116,7 +117,7 @@ export function AppShell() {
       </aside>
       <main className="main-content" id="main-content" tabIndex={-1}>
         {navigation.state !== 'idle' && <p className="navigation-status" role="status">Loading…</p>}
-        {!changingNativePage && <Outlet context={{ deniedBoard, refuseBoard } satisfies BoardReadRefusal} key={actorScope} />}
+        {!changingNativePage && <Outlet context={{ deniedBoard, refuseBoard, suspendBoard } satisfies BoardReadRefusal} key={actorScope} />}
       </main>
     </div>
   );

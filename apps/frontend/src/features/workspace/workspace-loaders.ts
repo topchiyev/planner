@@ -107,7 +107,8 @@ export async function readNativeCard(boardId: string, id: string, signal: AbortS
 
 export type BoardReadRefusal = {
   deniedBoard: Awaited<ReturnType<typeof loadNativeBoard>> | undefined;
-  refuseBoard: (board: NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>) => void;
+  refuseBoard: (board: Awaited<ReturnType<typeof loadNativeBoard>> | undefined) => void;
+  suspendBoard: (board: Awaited<ReturnType<typeof loadNativeBoard>> | undefined) => void;
 };
 
 export function loadNativeCard({ params, request }: LoaderFunctionArgs) {

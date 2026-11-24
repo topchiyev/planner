@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate, useRevalidator } from 'react-router';
-import type { RelationshipCommandInput, WorkspaceReadOutput } from '@planner/contracts';
+import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
 import { BoardCardPlacement, CardAppendTarget, DraggableBoardCard, MoveCardButton } from './card-placement-dnd.js';
 import { ClearTrash, ListMaintenanceButtons } from '../lists/list-maintenance.js';
 import { CardFrontCover } from '../media/card-cover.js';
@@ -11,6 +11,8 @@ import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-l
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog, useWorkspaceMutation } from '../projects/project-controls.js';
 import { boardFilterLocation, hasBoardFilters } from '../workspace/board-filter-route.js';
+import { useBoardRefresh } from '../boards/board-refresh.js';
+import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
 import { anchorPage, type PlacementCard } from './card-placement.js';
 import './board-cards.css';
@@ -22,6 +24,13 @@ export type BoardCardContext = 'board' | 'archive' | 'trash';
 export type BoardView = 'kanban' | 'grid' | 'list';
 
 export const cardOpenerId = (id: string) => 'board-card-' + id;
+
+let cardOpener: { scope: string; path: string; search: string; key: string; id: string } | undefined;
+
+export function getCardOpener(scope: string, path: string, search: string, key: string, returnKey: unknown) {
+  if (cardOpener?.scope === scope && cardOpener.path === path && cardOpener.search === search &&
+    (cardOpener.key === key || cardOpener.key === returnKey)) return cardOpener.id;
+}
 const errors = new Map([
   ['CARD_ORDER_CONFLICT', 'The card order changed. Review the current list and try again.'],
   ['CARD_TYPE_RESTRICTED', 'This board does not allow the selected card type.'],
@@ -31,8 +40,8 @@ function cardPath(boardId: string, cardId: string) {
   return `/boards/${boardId}/cards/${cardId}`;
 }
 
-export function BoardCards({ workspace, lists, context, view }: {
-  workspace: Workspace; lists: BoardList[]; context: BoardCardContext; view: BoardView;
+export function BoardCards({ workspace, lists, context, view, removed }: {
+  workspace: Workspace; lists: BoardList[]; context: BoardCardContext; view: BoardView; removed?: ReadonlySet<string>;
 }) {
   const { pathname, search } = useLocation();
   const current = workspace.cardsPage;
@@ -42,16 +51,17 @@ export function BoardCards({ workspace, lists, context, view }: {
     Cards couldn’t load. <button className="workspace-button" type="button" disabled={revalidator.state !== 'idle'}
       onClick={() => void revalidator.revalidate()}>Retry</button>
   </p>;
+  const cards = removed?.size ? current.data.filter((card) => !removed.has(card.id)) : current.data;
   const kanban = view === 'kanban';
   const counts = new Map(current.counts.map(({ listId, count }) => [listId, count]));
   const listsById = new Map(lists.map((list) => [list.id, list]));
   const validation = current.searchValidation;
   const pageTo = (cursor: string | null) => ({ pathname, search: boardFilterLocation(search, workspace.recipe, cursor) });
   const trash = context === 'trash' ? lists.find(({ kind }) => kind === 'trash') : undefined;
-  const display = kanban ? null : <FlatCards view={view} cards={current.data} lists={listsById}
+  const display = kanban ? null : <FlatCards view={view} cards={cards} lists={listsById}
     search={search} workspace={workspace} editable={editable} />;
   const contents = (list: BoardList) => <>
-    {kanban && <ColumnCards cards={current.data.filter((card) => card.listId === list.id)}
+    {kanban && <ColumnCards cards={cards.filter((card) => card.listId === list.id)}
       list={list} search={search} workspace={workspace} editable={editable} />}
     {editable && <ListCardActions workspace={workspace} list={list} />}
   </>;
@@ -59,10 +69,10 @@ export function BoardCards({ workspace, lists, context, view }: {
   return <>
     {validation === 'invalid-pattern' ? <p role="status">Enter a valid slash-delimited search pattern.</p>
       : validation === 'search-limit' ? <p role="status">Search reached its scan limit. Narrow the filters and try again.</p>
-        : !current.data.length && <p role="status">{hasBoardFilters(workspace.recipe) ? 'No matching cards' : 'No cards to show'}</p>}
+        : !cards.length && <p role="status">{hasBoardFilters(workspace.recipe) ? 'No matching cards' : 'No cards to show'}</p>}
     {trash && <ClearTrash workspace={workspace} trash={trash} />}
     {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} counts={counts} kanban={kanban} renderContents={contents}
-      wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={current.data}>{children}{display}</BoardCardPlacement>} />
+      wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={cards}>{children}{display}</BoardCardPlacement>} />
       : <>
         {(kanban || workspace.preferences.showCardCount) && <ReadonlyBoardLists lists={lists} counts={counts}
           showCount={workspace.preferences.showCardCount} kanban={kanban} renderContents={kanban ? contents : undefined} />}
@@ -84,10 +94,17 @@ function CardAge({ date }: { date: string }) {
 }
 
 function CardFace({ card, workspace, search, list, showStatus = true }: Face) {
+  const { key, pathname } = useLocation();
+  const boardPath = '/boards/' + card.boardId;
   const { showCreator, showCardAge } = workspace.preferences;
   return <div className="board-card-face">
     <CardFrontCover cover={card.cover} />
-    <Link id={cardOpenerId(card.id)} to={{ pathname: cardPath(card.boardId, card.id), search }}>{card.name}</Link>
+    <Link id={cardOpenerId(card.id)} to={{ pathname: cardPath(card.boardId, card.id), search }}
+      state={pathname === boardPath ? { cardReturnKey: key } : undefined}
+      onClick={(event) => {
+        if (pathname === boardPath && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey)
+          cardOpener = { scope: workspace.recipeScope, path: boardPath, search, key, id: card.id };
+      }}>{card.name}</Link>
     {(list || (showStatus && card.closed) || (showCreator && card.creator) || showCardAge) &&
       <div className="board-card-meta">
         {list && <span>{list.name}</span>}{showStatus && card.closed && <span>Closed</span>}
@@ -154,30 +171,38 @@ function NewCardPosition({ boardId, listId, value, choose }: {
   boardId: string; listId: string; value: string; choose: (value: string) => void;
 }) {
   const [page, setPage] = useState<{ cards: PlacementCard[]; cursor: string | null }>();
-  const [more, setMore] = useState(false);
+  const [request, setRequest] = useState<{ cursor?: string }>({});
+  const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState(false);
-  const [attempt, setAttempt] = useState(0);
+  const { pathname, search } = useLocation();
+  const refresh = useBoardRefresh();
   useEffect(() => {
     const controller = new AbortController();
-    const cursor = more ? page?.cursor ?? undefined : undefined;
+    const { cursor } = request;
+    setLoading(true);
+    setProblem(false);
     void anchorPage(boardId, listId, controller.signal, cursor).then((result) => {
       if (!controller.signal.aborted) {
         setPage((old) => ({ cards: cursor ? [...(old?.cards ?? []), ...result.data] : result.data, cursor: result.page.nextCursor }));
-        setProblem(false);
       }
-    }).catch(() => { if (!controller.signal.aborted) setProblem(true); });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      if (error instanceof WorkspaceRequestError && error.status === 401)
+        window.location.replace(workspaceSignInPath(pathname + search));
+      else if (error instanceof WorkspaceRequestError && (error.status === 403 || error.status === 404)) refresh();
+      else setProblem(true);
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [boardId, listId, attempt]);
+  }, [boardId, listId, request, pathname, search, refresh]);
   return <>
     {page?.cards.length ? <label>Position<select value={value} onChange={(event) => choose(event.target.value)}>
       <option value="">At the end</option>
       {page.cards.map((card) => <option key={card.id} value={card.id}>Before {card.name}</option>)}
     </select></label> : null}
-    {page?.cursor && <button className="workspace-button" type="button" onClick={() => { setMore(true); setAttempt((next) => next + 1); }}>
-      More positions
-    </button>}
+    {page?.cursor && !problem && <button className="workspace-button" type="button" disabled={loading}
+      onClick={() => setRequest({ cursor: page.cursor ?? undefined })}>More positions</button>}
     {problem && <p role="alert">Positions couldn’t load. <button className="workspace-button" type="button"
-      onClick={() => setAttempt((next) => next + 1)}>Retry</button></p>}
+      onClick={() => setRequest({ cursor: request.cursor })}>Retry</button></p>}
   </>;
 }
 

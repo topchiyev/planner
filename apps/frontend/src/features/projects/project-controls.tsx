@@ -21,6 +21,7 @@ export function useWorkspaceMutation(errors: ReadonlyMap<string, string>, change
   const { pathname, search } = useLocation();
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  const [problemCode, setProblemCode] = useState<string>();
   const pending = useRef(false);
   const attempt = useRef<{ signature: string; key: string } | null>(null);
   const mounted = useRef(false);
@@ -29,12 +30,13 @@ export function useWorkspaceMutation(errors: ReadonlyMap<string, string>, change
     return () => { mounted.current = false; };
   }, []);
   return {
-    busy, problem, clearProblem: () => setProblem(''), actorId: session?.account.id,
+    busy, problem, problemCode, clearProblem: () => { setProblem(''); setProblemCode(undefined); }, actorId: session?.account.id,
     run: async <T,>(input: readonly unknown[], execute: (csrf: string, key: string) => Promise<T>, done?: (result: T) => void | Promise<void>, refresh = true) => {
       if (!session || pending.current) return;
       pending.current = true;
       setBusy(true);
       setProblem('');
+      setProblemCode(undefined);
       try {
         const signature = JSON.stringify(input);
         if (attempt.current?.signature !== signature) attempt.current = { signature, key: crypto.randomUUID() };
@@ -46,6 +48,7 @@ export function useWorkspaceMutation(errors: ReadonlyMap<string, string>, change
       } catch (error) {
         if (!mounted.current) return;
         if (error instanceof WorkspaceRequestError) {
+          setProblemCode(typeof error.code === 'string' ? error.code : undefined);
           if (error.status === 401) { window.location.replace(workspaceSignInPath(pathname + search)); return; }
           if (error.status === 409 || error.status === 403 || error.status === 404) {
             setProblem(errors.get(String(error.code)) ?? changed);

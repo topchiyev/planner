@@ -20,6 +20,7 @@ export async function tlsBridge(directory, startProxy) {
       response.pipe(reply);
     });
     forwarded.once('error', () => reply.destroy());
+    reply.once('close', () => forwarded.destroy());
     incoming.pipe(forwarded);
   });
   server.listen(0, '127.0.0.1');
