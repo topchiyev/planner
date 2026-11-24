@@ -66,10 +66,11 @@ test('finite list sorting uses folded name ties, two date directions and exact i
     const names = ['Zulu', 'Fuß', 'FUSS', 'A\u030Angström', 'Ångström'];
     const dates = [null, '2026-03-19T13:13:59.719Z', '2026-03-19T13:13:59.719Z', '2026-02-01T22:00:00.000Z', null];
     const slots = ['-9223372036854775808', '-9', '0', '4', '9223372036854775807'];
-    await f.db.collection('cards').updateOne({ ...f.scope, id: existing }, { $set: { name: names[0], rank: Long.fromString(slots[0]), dueDate: null } });
+    const created = ['2026-01-20', '2026-01-15', '2026-01-17', '2026-01-16', '2026-01-16'].map((day) => day + 'T10:00:00.000Z');
+    await f.db.collection('cards').updateOne({ ...f.scope, id: existing }, { $set: { name: names[0], rank: Long.fromString(slots[0]), dueDate: null, createdAt: new Date(created[0]) } });
     for (let i = 1; i < idsInList.length; i++) {
       await f.insert('cards', idsInList[i], { boardId: ids.privateBoard, listId: id, type: 'project', kind: 'board',
-        name: names[i], dueDate: dates[i], rank: slots[i], closed: i === 3 });
+        name: names[i], dueDate: dates[i], rank: slots[i], closed: i === 3, createdAt: created[i] });
     }
     const archived = await get(f, 'cards', ids.archivedStory);
     await response(post(f, viewer, list(id) + '/sort', 1, { field: 'name', direction: 'asc', sourceOrderVersion: 1 }), 403);
@@ -86,10 +87,23 @@ test('finite list sorting uses folded name ties, two date directions and exact i
       assert.deepEqual(current.map(({ rank }) => String(rank)), slots);
     }
     const key = randomUUID();
+    const interruption = new Error('test interruption after first durable sort effect');
+    const journal = new CommandJournal(f.gate, f.db, f.installationId, journalOptions(f, readSessionCookie(editor), key, (point, index) => {
+      if (point === 'effectApplied' && index === 0) throw interruption;
+    }));
+    await assert.rejects(journal.execute({ actorId: ids.firstEditor, idempotencyKey: key, operationId: 'lists.sort',
+      input: { id, expectedRevision: 1, sourceOrderVersion: 1, field: 'name', direction: 'asc' } }), (error) => error === interruption);
+    const interrupted = await ranked(f, f.generationId, id);
+    assert.equal(interrupted.filter(({ revision }) => revision === 2).length, 1);
+    assert.equal((await get(f, 'lists', id)).revision, 1);
+    await response(f.call(board(ids.privateBoard) + '/cards', editor), 503);
+    await new CommandJournal(f.gate, f.db, f.installationId).recover();
     const sorted = (await response(sort('name', 'asc', 1, 1, key), 200)).data;
     assert.deepEqual(sorted.source, { listId: id, revision: 2, orderVersion: 2 });
     assert.equal(sorted.changedCount, 5);
     await order([decomposed, composed, sharp, double, existing]);
+    assert.ok((await ranked(f, f.generationId, id)).every(({ revision }) => revision === 2));
+    assert.equal(await f.db.collection('events').countDocuments(f.scope), 1);
     assert.deepEqual((await response(sort('name', 'asc', 1, 1, key), 200)).data, sorted);
     await response(sort('name', 'desc', 1), 409, 'REVISION_CONFLICT');
     await response(sort('name', 'desc', 2, 1), 409, 'CARD_ORDER_CONFLICT');
@@ -105,7 +119,9 @@ test('finite list sorting uses folded name ties, two date directions and exact i
     await response(sort('dueDate', 'desc', 4), 200);
     await order([sharp, double, decomposed, existing, composed]);
     await response(sort('createdAt', 'asc', 5), 200);
-    await order([existing, sharp, double, decomposed, composed]);
+    await order([sharp, decomposed, composed, double, existing]);
+    await response(sort('createdAt', 'desc', 6), 200);
+    await order([existing, double, decomposed, composed, sharp]);
 
     assert.deepEqual(await get(f, 'cards', ids.archivedStory), archived);
     assert.deepEqual([(await get(f, 'boards', ids.privateBoard)).revision, (await get(f, 'boards', ids.privateBoard)).orderVersion], [1, 1]);
