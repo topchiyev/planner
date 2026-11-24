@@ -102,7 +102,7 @@ test('card updates preserve hidden fields and exact imported text and synchroniz
     await expectResponse(mutate(f, editor, 'PATCH', cardPath(ids.archivedStory), 1, { closed: true }), 403);
     await expectResponse(mutate(f, viewer, 'PATCH', cardPath(ids.activeCard), 1, { closed: true }), 403);
     await expectResponse(mutate(f, privateOwner, 'PATCH', cardPath(id), 1, { closed: true }), 404);
-    await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 1, { coverAttachmentId: null }), 422, 'INVALID_REQUEST');
+    await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 1, { coverAttachmentId: fixtureId(9500) }), 422, 'INVALID_CARD_COVER');
     await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 1, { description: 'x'.repeat(8001) }), 422, 'INVALID_REQUEST');
     await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 2, { closed: false }), 409, 'REVISION_CONFLICT');
     const change = (await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 1,

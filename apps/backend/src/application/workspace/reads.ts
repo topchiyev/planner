@@ -5,6 +5,7 @@ import type { Db, Document, Long } from 'mongodb';
 import { decodeRank } from '../../storage/identity.js';
 import type { BoardEventCursors } from '../board-events/cursor.js';
 import { createBoardEventStore } from '../board-events/store.js';
+import { mediaByteLength } from '../media/records.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
@@ -283,8 +284,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const visibleAttachments = attachments.map((row) => {
         const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
         const file = files.get(row.id);
-        const { byteLength: length } = row;
-        const byteLength = row.kind === 'file' && typeof length === 'number' && Number.isSafeInteger(length) && length >= 0 ? length : null;
+        const byteLength = row.kind === 'file' ? file?.byteLength ?? mediaByteLength(row.byteLength) : null;
         return { ...entity(row), name: row.name, cardId: row.cardId, kind: row.kind,
           available: !!url || !!file, hasThumbnail: file?.hasThumbnail ?? false, byteLength, url };
       });

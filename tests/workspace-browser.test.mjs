@@ -1325,6 +1325,25 @@ test('project, board and card fields share templates and preserve exact values t
       response.request().method() === 'PUT' && response.url().includes('/field-values/'));
     await boardFields.getByRole('button', { name: 'Save value' }).click();
     assert.equal((await reapplied).status(), 200);
+    await expect(boardFields.getByRole('button', { name: 'Save value' })).toBeDisabled();
+
+    await local.getByRole('button', { name: 'Edit field Deployment note' }).click();
+    const editorDefinition = editor.getByRole('dialog', { name: 'Edit field', exact: true });
+    await editorDefinition.getByLabel('Field name').fill('Revised deployment note');
+    await ownerLocal.getByRole('button', { name: 'Edit field Deployment note' }).click();
+    const ownerDefinition = owner.getByRole('dialog', { name: 'Edit field', exact: true });
+    await ownerDefinition.getByLabel('Show on card front').uncheck();
+    await ownerDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(ownerLocal.getByText('Inspector only')).toBeVisible();
+    await editorDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(editorDefinition.getByRole('alert')).toContainText('Inspector only');
+    await expect(editorDefinition.getByLabel('Field name')).toHaveValue('Revised deployment note');
+    await expect(editorDefinition.getByLabel('Show on card front')).not.toBeChecked();
+    await expect(editorDefinition.getByRole('button', { name: 'Save field' })).toBeDisabled();
+    await editorDefinition.getByRole('button', { name: 'Review current version' }).click();
+    await editorDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(local.getByLabel('Revised deployment note value')).toHaveValue('0\n');
+    await expect(local.getByText('Inspector only')).toBeVisible();
 
     await signIn(viewer, origin, 'viewer');
     await viewer.goto(cardPath);
@@ -1332,7 +1351,8 @@ test('project, board and card fields share templates and preserve exact values t
     await expect(readOnly.getByRole('region', { name: 'Release window', exact: true }).locator('.field-value')).toHaveJSProperty('textContent', dirty);
     await expect(readOnly.getByRole('button', { name: 'Save value' })).toHaveCount(0);
     await viewer.getByRole('link', { name: 'Close card' }).click();
-    await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(2);
+    await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(1);
+    await expect(viewer.locator('.card-front-fields').getByText('Revised deployment note')).toHaveCount(0);
   });
 });
 
@@ -1363,6 +1383,13 @@ test('native card media keeps files private, manages covers by revision and open
         await expect(dialog).toHaveCount(0, { timeout: 15_000 });
       };
       const stored = () => fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard });
+      const renameFile = async (target, previous, next) => {
+        await file(target, previous).getByRole('button', { name: 'Rename ' + previous }).click();
+        const form = target.getByRole('dialog', { name: 'Rename attachment' });
+        await form.getByLabel('Name').fill(next);
+        await form.getByRole('button', { name: 'Save name' }).click();
+        await expect(file(target, next)).toBeVisible();
+      };
 
       await signIn(editor, origin, 'first-editor');
       await signIn(secondEditor, origin, 'second-editor');
@@ -1373,7 +1400,7 @@ test('native card media keeps files private, manages covers by revision and open
       const originalLink = file(editor, 'notes.dat').getByRole('link', { name: 'Download notes.dat' });
       await expect(originalLink).toBeVisible();
       await expect(file(editor, 'notes.dat').locator('img')).toHaveCount(0);
-      assert.equal((await stored()).coverAttachmentId, null);
+      assert.equal((await stored()).coverAttachmentId ?? null, null);
       const downloadPath = await originalLink.getAttribute('href');
       const [download] = await Promise.all([editor.waitForEvent('download'), originalLink.click()]);
       assert.equal(download.suggestedFilename(), 'notes.dat');
@@ -1401,8 +1428,13 @@ test('native card media keeps files private, manages covers by revision and open
       await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
       const secondImageId = (await stored()).coverAttachmentId;
       assert.notEqual(secondImageId, firstImageId);
-      await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
-      await expect(panel(secondEditor).getByRole('alert')).toContainText('The card changed');
+      const [stale] = await Promise.all([
+        secondEditor.waitForResponse((response) =>
+          response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard)),
+        panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click(),
+      ]);
+      assert.equal(stale.status(), 409);
+      await expect(panel(secondEditor).getByRole('alert')).toContainText('Review the current information');
       await expect(file(secondEditor, 'sample.jpeg').getByText('Cover', { exact: true })).toBeVisible();
       await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
       await expect(panel(secondEditor).getByRole('button', { name: 'Clear cover' })).toHaveCount(0);
@@ -1423,22 +1455,50 @@ test('native card media keeps files private, manages covers by revision and open
       await firstImage.getByRole('button', { name: 'Rename sample.png' }).click();
       const rename = editor.getByRole('dialog', { name: 'Rename attachment' });
       await rename.getByLabel('Name').fill('Current cover.png');
+      await secondEditor.reload();
+      await renameFile(secondEditor, 'sample.png', 'Coworker cover.png');
       await rename.getByRole('button', { name: 'Save name' }).click();
+      await expect(rename.getByRole('alert')).toContainText('Coworker cover.png');
+      await expect(rename.getByLabel('Name')).toHaveValue('Current cover.png');
+      await expect(rename.getByRole('button', { name: 'Save name' })).toBeDisabled();
+      await rename.getByRole('button', { name: 'Close', exact: true }).click();
+      await renameFile(editor, 'Coworker cover.png', 'Current cover.png');
       const cover = file(editor, 'Current cover.png');
       await expect(cover.getByText('Cover', { exact: true })).toBeVisible();
       assert.equal((await stored()).coverAttachmentId, firstImageId);
+
       await cover.getByRole('button', { name: 'Remove Current cover.png' }).click();
-      await editor.getByRole('dialog', { name: 'Remove attachment' }).getByRole('button', { name: 'Confirm removal' }).click();
-      await expect(cover).toHaveCount(0);
+      const remove = editor.getByRole('dialog', { name: 'Remove attachment' });
+      await secondEditor.reload();
+      await renameFile(secondEditor, 'Current cover.png', 'Ready to remove.png');
+      await remove.getByRole('button', { name: 'Confirm removal' }).click();
+      await expect(remove.getByRole('alert')).toContainText('This attachment changed');
+      await expect(remove.getByText('Ready to remove.png', { exact: true })).toBeVisible();
+      await expect(remove.getByRole('button', { name: 'Confirm removal' })).toBeDisabled();
+      await remove.getByRole('button', { name: 'Close', exact: true }).click();
+      await file(editor, 'Ready to remove.png').getByRole('button', { name: 'Remove Ready to remove.png' }).click();
+      await remove.getByRole('button', { name: 'Confirm removal' }).click();
+      await expect(file(editor, 'Ready to remove.png')).toHaveCount(0);
       assert.equal((await stored()).coverAttachmentId, null);
       assert.equal((await viewer.request.head(origin + '/api/v1/attachments/' + firstImageId + '/download')).status(), 404);
 
-      await panel(editor).getByRole('button', { name: 'Add link', exact: true }).click();
+      const openLink = panel(editor).getByRole('button', { name: 'Add link', exact: true });
       const linkDialog = editor.getByRole('dialog', { name: 'Add link' });
+      const validAddress = 'http://127.0.0.1:' + sentinel.address().port + '/guide';
+      await openLink.click();
       await linkDialog.getByLabel('Name').fill('External guide');
       await linkDialog.getByLabel('URL').fill('http://user:password@127.0.0.1:' + sentinel.address().port + '/guide');
       await expect(linkDialog.getByRole('button', { name: 'Save link' })).toBeDisabled();
-      await linkDialog.getByLabel('URL').fill('http://127.0.0.1:' + sentinel.address().port + '/guide');
+      await linkDialog.getByLabel('URL').fill(validAddress);
+      await secondEditor.reload();
+      await renameFile(secondEditor, 'sample.jpeg', 'Other image.jpeg');
+      await linkDialog.getByRole('button', { name: 'Save link' }).click();
+      await expect(linkDialog.getByRole('alert')).toContainText('This card changed');
+      await expect(linkDialog.getByRole('button', { name: 'Save link' })).toBeDisabled();
+      await linkDialog.getByRole('button', { name: 'Close', exact: true }).click();
+      await openLink.click();
+      await linkDialog.getByLabel('Name').fill('External guide');
+      await linkDialog.getByLabel('URL').fill(validAddress);
       await linkDialog.getByRole('button', { name: 'Save link' }).click();
       await expect(linkDialog).toHaveCount(0);
       const external = panel(editor).getByRole('link', { name: 'Open link External guide' });

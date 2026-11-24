@@ -1,9 +1,10 @@
 import { publicIdSchema } from '@planner/contracts/storage';
 import { MediaStorageError } from '../../storage/blobs/private-store.js';
-import { availableMedia, catalogVariants, unavailableMedia, validBlobIdentity, type MediaCatalog } from '../media/records.js';
+import { availableMedia, canonicalMediaCatalog, catalogVariants, unavailableMedia, validBlobIdentity, type MediaCatalog } from '../media/records.js';
 import { canonicalRow, equal, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 type Attachment = WorkspaceRow<'attachments'>;
+type FileReference = Pick<Attachment, 'id' | 'blobDigest' | 'byteLength' | 'availability' | 'deletedAt'> & { kind: string };
 type Card = Pick<WorkspaceRow<'cards'>, 'id' | 'coverAttachmentId'>;
 
 export function cardAttachmentRows(records: WorkspaceRecords, generationId: string, cardId: string) {
@@ -12,7 +13,7 @@ export function cardAttachmentRows(records: WorkspaceRecords, generationId: stri
   }, { createdAt: 1, id: 1 });
 }
 
-export async function attachmentFiles(records: WorkspaceRecords, generationId: string, rows: readonly Attachment[]) {
+export async function attachmentFiles(records: WorkspaceRecords, generationId: string, rows: readonly FileReference[]) {
   const identities = new Map(rows.flatMap((row) => {
     const identity = { digest: row.blobDigest, byteLength: row.byteLength };
     return row.kind === 'file' && row.deletedAt == null && row.availability === availableMedia && validBlobIdentity(identity)
@@ -20,13 +21,12 @@ export async function attachmentFiles(records: WorkspaceRecords, generationId: s
   }));
   const digests = [...new Set([...identities.values()].map(({ digest }) => digest))];
   const blobs = digests.length ? await records.aggregate<MediaCatalog>('blobs', {
-    digest: { $in: digests }, lifecycleState: availableMedia,
-    $expr: { $and: [canonicalRow(generationId), equal('lifecycleState', availableMedia), { $in: ['$digest', digests] }] },
+    ...canonicalMediaCatalog(generationId, digests), lifecycleState: availableMedia,
   }, []) : [];
   const catalog = new Map(blobs.map((row) => [row.digest, row]));
   return new Map([...identities].flatMap(([id, identity]) => {
     const blob = catalog.get(identity.digest);
-    if (!blob || !validBlobIdentity(blob) || blob.byteLength !== identity.byteLength) return [];
+    if (!blob || blob.lifecycleState !== availableMedia || !validBlobIdentity(blob) || blob.byteLength !== identity.byteLength) return [];
     let hasThumbnail = false;
     try {
       hasThumbnail = catalogVariants(blob) !== null;

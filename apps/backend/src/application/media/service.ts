@@ -15,12 +15,12 @@ import {
   requireCapability, resolveBrowserWorkspace, WorkspaceAccessError, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization,
 } from '../workspace/authorization.js';
-import { cardCovers } from '../workspace/card-media.js';
+import { attachmentFiles, cardCovers } from '../workspace/card-media.js';
 import { createWorkspaceRecords, directBoardRole } from '../workspace/records.js';
 import { detectImage, imageTypes, type MediaDecoder, type MediaVariants } from './decoder.js';
 import { MediaRejection, reserveSlots } from './errors.js';
 import { receiveMultipart } from './multipart.js';
-import { availableMedia, catalogVariants, mediaRecords, originalType, validBlobIdentity, type StoredAvatar, type StoredMediaReference } from './records.js';
+import { availableMedia, catalogVariants, mediaByteLength, mediaRecords, originalType, validBlobIdentity, type StoredAvatar, type StoredMediaReference } from './records.js';
 
 type Upload = 'uploadAttachment' | 'uploadBackground' | 'uploadAvatar';
 type Mutation = Upload | 'addLink' | 'renameAttachment' | 'removeAttachment' | 'removeBackground' | 'removeAvatar';
@@ -61,7 +61,7 @@ function referenceDto(row: {
   const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
   return {
     id: row.id, parentId: id, revision: row.revision, name: row.name, kind: row.kind,
-    byteLength: row.byteLength ?? null, url, available: row.kind === 'link' ? !!url : row.availability === availableMedia,
+    byteLength: row.kind === 'file' ? mediaByteLength(row.byteLength) : null, url, available: row.kind === 'link' ? !!url : row.availability === availableMedia,
   };
 }
 
@@ -167,7 +167,13 @@ export function createMediaService(
         name: media?.name ?? payload.name ?? null, url: payload.url ?? null, digest: media?.digest ?? null,
         byteLength: media?.byteLength ?? null,
       }),
-      authorize: async (context) => { await currentAdmission(token, admission, context.generationId); },
+      async authorize({ generationId }) {
+        await currentAdmission(token, admission, generationId);
+        if (media) {
+          const records = mediaRecords(database, generationId);
+          if (!await records.catalog(media.digest) && await records.occupiedCatalog(media.digest)) throw new MediaRejection('catalog');
+        }
+      },
       async plan({ generationId, timestamp }) {
         const parent = await currentAdmission(token, admission, generationId);
         const id = parentId(parent);
@@ -185,7 +191,8 @@ export function createMediaService(
           if ((isChange ? previous!.revision : card.revision) !== intent.expectedRevision) throw new MediaRejection('revision');
           parentRevision = revisionAfter(card.revision);
           let nextCover: string | null | undefined;
-          const currentCover = (await cardCovers(createWorkspaceRecords(database, generationId), generationId, [card])).get(id);
+          const records = createWorkspaceRecords(database, generationId);
+          const currentCover = (await cardCovers(records, generationId, [card])).get(id);
           coverAttachmentId = currentCover?.attachmentId ?? null;
           if (media) effects.push(...await ensureCatalog(generationId, media, timestamp));
           if (intent.operation === 'renameAttachment') {
@@ -194,7 +201,9 @@ export function createMediaService(
             const kind = previous!.kind === 'link' ? 'link' : 'file';
             effects.push({ kind: 'update', collection: 'attachments', id: previous!.id, revision: previous!.revision,
               fields: { name, updatedAt: timestamp } });
-            reference = referenceDto({ ...previous!, name, revision, kind }, id);
+            const original = (await attachmentFiles(records, generationId, [previous!])).get(previous!.id);
+            reference = referenceDto({ ...previous!, name, revision, kind,
+              availability: original && availableMedia }, id);
           } else if (intent.operation === 'removeAttachment') {
             revisionAfter(previous!.revision);
             effects.push({ kind: 'update', collection: 'attachments', id: previous!.id, revision: previous!.revision,

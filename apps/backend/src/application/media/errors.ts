@@ -7,6 +7,7 @@ export const mediaErrors = {
   limit: [413, 'MEDIA_TOO_LARGE', 'The uploaded file exceeds 32 MiB or its envelope limit.'],
   timeout: [408, 'UPLOAD_TIMEOUT', 'The time allowed to upload the file elapsed.'],
   busy: [429, 'MEDIA_BUSY', 'Too many media operations are active. Try again shortly.'],
+  catalog: [503, 'UNAVAILABLE', 'Planner is unavailable.'],
   revision: [409, 'REVISION_CONFLICT', 'The media or its parent changed. Reload and try again.'],
 } as const;
 
