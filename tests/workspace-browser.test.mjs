@@ -599,37 +599,51 @@ test('direct editors create, edit and move board lists by keyboard and pointer, 
     await expect(editor.getByText('Moved Finished.', { exact: true })).toBeVisible();
     await expect(moveFinished).toBeFocused();
 
-    const source = listRow(editor, 'Review queue').locator('[data-list-drag-handle]');
-    const target = listRow(editor, 'Done');
-    const handle = await source.boundingBox();
-    const box = await target.boundingBox();
-    assert.ok(handle && box);
-    await editor.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
-    await editor.mouse.down();
-    await editor.mouse.move(handle.x + handle.width / 2 - 15, handle.y + handle.height / 2, { steps: 4 });
-    await editor.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 12 });
-    await expect(target).toHaveAttribute('data-list-drop-target', 'true');
-    await editor.mouse.up();
+    async function drag(from, target, cancel = false) {
+      const handle = await listRow(editor, from).locator('[data-list-drag-handle]').boundingBox();
+      assert.ok(handle);
+      await editor.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+      await editor.mouse.down();
+      await editor.mouse.move(handle.x + handle.width / 2 - 15, handle.y + handle.height / 2, { steps: 4 });
+      await expect(target).toBeVisible();
+      const box = await target.boundingBox();
+      assert.ok(box);
+      await editor.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 12 });
+      await expect(target).toHaveAttribute('data-list-drop-target', 'true');
+      if (cancel) await editor.keyboard.press('Escape');
+      await editor.mouse.up();
+    }
+    await drag('Review queue', listRow(editor, 'Done'));
     await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Review queue', 'Done']);
     assert.equal(moveRequests, 2);
+
+    const dropEnd = editor.getByText('Drop at the end', { exact: true });
+    await drag('Finished', dropEnd, true);
+    await expect(dropEnd).toHaveCount(0);
+    await expect(moveFinished).toBeFocused();
+    assert.equal(moveRequests, 2);
+    await drag('Finished', dropEnd);
+    await expect(listNames(editor)).toHaveText(['To do', 'Review queue', 'Done', 'Finished']);
+    assert.equal(moveRequests, 3);
+
     await expect(editor).toHaveURL(origin + path);
     await editor.reload();
-    await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Review queue', 'Done']);
+    await expect(listNames(editor)).toHaveText(['To do', 'Review queue', 'Done', 'Finished']);
 
     await colleague.goto(origin + path);
     const stale = colleague.getByRole('button', { name: 'Move Done', exact: true });
     await stale.click();
     const staleDialog = colleague.getByRole('dialog', { name: 'Move list' });
-    await staleDialog.getByLabel('Place list').selectOption({ label: 'Before Finished' });
+    await staleDialog.getByLabel('Place list').selectOption({ label: 'Before To do' });
     await add(editor, 'Concurrent addition', 'active');
     await staleDialog.getByRole('button', { name: 'Move list', exact: true }).click();
     await expect(colleague.getByRole('alert')).toContainText('The list order changed');
-    await expect(listNames(colleague)).toHaveText(['Finished', 'To do', 'Review queue', 'Done', 'Concurrent addition']);
+    await expect(listNames(colleague)).toHaveText(['To do', 'Review queue', 'Done', 'Finished', 'Concurrent addition']);
     await expect(stale).toBeFocused();
     await expect(colleague).toHaveURL(origin + path);
 
     await viewer.goto(origin + path);
-    await expect(listNames(viewer)).toHaveText(['Finished', 'To do', 'Review queue', 'Done', 'Concurrent addition']);
+    await expect(listNames(viewer)).toHaveText(['To do', 'Review queue', 'Done', 'Finished', 'Concurrent addition']);
     await expect(viewer.getByRole('button', { name: 'Add list' })).toHaveCount(0);
     await expect(viewer.getByRole('button', { name: 'Move Done' })).toHaveCount(0);
     await editor.getByRole('link', { name: 'Archive', exact: true }).click();
