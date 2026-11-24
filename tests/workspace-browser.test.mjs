@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
+import { passiveSessionHeader } from '@planner/contracts';
 import { Secret, TOTP } from 'otpauth';
 import { CommandJournal } from '../apps/backend/dist/application/command-journal/journal.js';
 import { createMediaDecoder } from '../apps/backend/dist/application/media/decoder.js';
@@ -1992,7 +1993,7 @@ test('native browser applies verified live updates passively and preserves a dir
     });
     const sessionReads = [];
     editor.on('request', (request) => {
-      if (new URL(request.url()).pathname === '/api/v1/session') sessionReads.push(request.headers()['x-planner-passive']);
+      if (new URL(request.url()).pathname === '/api/v1/session') sessionReads.push(request.headers()[passiveSessionHeader]);
     });
     await editor.goto(origin + path);
     await peer.goto(origin + path);

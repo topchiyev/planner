@@ -26,7 +26,8 @@ export const sessionActorSchema = z.strictObject({
   name: accountNameSchema,
   role: siteRoleSchema,
 });
-export const passiveSessionHeader = 'x-planner-passive';
+// The proxy forwarding namespace is deliberately stripped from application requests.
+export const passiveSessionHeader = 'planner-passive-read';
 
 export const sessionSchema = z.strictObject({
   status: z.literal('authenticated'),
