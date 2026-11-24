@@ -8,7 +8,8 @@ import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type Ca
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
-import { createWorkspaceRecords, directBoardRole, rankSort, together, type WorkspaceRow } from './records.js';
+import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
+import { projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
 
 const nameAnchor = (name: string) => createHash('sha256').update(name, 'utf8').digest('hex');
 const iso = (value?: Date | null) => value?.toISOString() ?? null;
@@ -41,6 +42,7 @@ const fieldDefinition = (row: WorkspaceRow<'fieldDefinitions'>) => ({
 export function createWorkspaceReads(database: Db, access: WorkspaceAuthorization) {
   const { generationId, actor } = access;
   const records = createWorkspaceRecords(database, generationId);
+  const canonical = canonicalRow(generationId);
   function cursorScope(operation: string, order: string, query: readonly string[]) {
     return { generationId, actorId: actor.id, operation, order, query: [actor.role, ...query] };
   }
@@ -48,17 +50,14 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   async function ownershipCanChange(context: ProjectAccessContext) {
     if (context.ownsProject) return true;
     if (!context.sharedAdmin) return false;
-    const managers = await records.find('projectManagers', { projectId: context.project.id });
-    if (managers.length !== 1 || !publicIdSchema.safeParse(managers[0].userId).success) return false;
-    const manager = await records.get('users', managers[0].userId);
-    return manager?.disabledAt === null && (manager.role === 'admin' || manager.role === 'projectOwner');
+    return !!await soleEligibleManager(records, generationId, context.project.id);
   }
 
   async function projectSummary(context: ProjectAccessContext, visibleBoardCount?: number) {
     const { project, permissions } = context;
     const favorite = await records.first('projectFavorites', { projectId: project.id, userId: actor.id });
     const boardCount = visibleBoardCount ?? (context.manager || context.sharedAdmin
-      ? await records.count('boards', { projectId: project.id }) : (await access.visibleBoards(context)).length);
+      ? await records.count('boards', { projectId: project.id, $expr: { $and: [canonical, equal('projectId', project.id)] } }) : (await access.visibleBoards(context)).length);
     return {
       ...ordered(project), name: project.name, type: project.type, hidden: project.hidden, favorite: !!favorite,
       permissions: { ...permissions, canDelete: permissions.canDelete && boardCount === 0,
@@ -72,7 +71,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   }
 
   async function visiblePeople(ids: string[]) {
-    return (await records.find('users', { id: { $in: ids } }, { id: 1 })).map(person);
+    return (await records.find('users', { id: { $in: ids }, $expr: canonical }, { id: 1 })).map(person);
   }
 
   async function blobAvailable(blobDigest?: string | null) {
@@ -197,7 +196,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const description = context.project.description ?? null;
       if (!context.manager) return { data: { ...summary, description, boards, managers: null, backgrounds: null, fieldTemplates: null } };
       const [managerRows, backgrounds, templates] = await together([
-        records.find('projectManagers', { projectId: id }), records.find('projectBackgrounds', { projectId: id }),
+        records.find('projectManagers', projectManagerFilter(generationId, id)), records.find('projectBackgrounds', { projectId: id }),
         records.find('fieldGroups', { scopeType: 'project', scopeId: id }, rankSort),
       ]);
       const allowedBackgrounds = await together(backgrounds.map(async (background) =>

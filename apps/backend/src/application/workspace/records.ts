@@ -1,5 +1,6 @@
 import type { AggregateOptions, Db, Document, Filter, Long, Sort } from 'mongodb';
 import type { SessionActor } from '@planner/contracts';
+import { publicIdPattern } from '@planner/contracts/storage';
 import { workspaceKey } from '../../storage/identity.js';
 
 type SiteRole = SessionActor['role'];
@@ -40,6 +41,8 @@ interface Records {
   labels: Omit<Ordered, 'name'> & { name?: string | null; boardId: string; color?: string | null };
   cardLabels: { cardId: string; labelId: string };
   cardAssignees: { cardId: string; userId: string };
+  boardFollows: { boardId: string; userId: string };
+  cardFollows: { cardId: string; userId: string };
   checklists: Ordered & { cardId: string; showOnFront?: boolean; hideCompleted?: boolean };
   tasks: {
     checklistId: string; rank?: Long | null; name?: string; completed?: boolean; assigneeId?: string | null;
@@ -57,6 +60,24 @@ export type WorkspaceRecordName = keyof Records;
 export type WorkspaceRow<K extends WorkspaceRecordName> = Entity & Records[K];
 
 export const rankSort = { rank: 1, id: 1 } as const;
+
+export const equal = (field: string, value: string) => ({ $eq: ['$' + field, value] });
+
+export function publicIdField(field: string) {
+  return { $cond: [
+    { $eq: [{ $type: '$' + field }, 'string'] },
+    { $regexMatch: { input: '$' + field, regex: publicIdPattern } },
+    false,
+  ] };
+}
+
+export function canonicalRow(generationId: string) {
+  return { $cond: [
+    publicIdField('id'),
+    { $and: [equal('generationId', generationId), { $eq: ['$_id', { $concat: [generationId, '/', '$id'] }] }] },
+    false,
+  ] };
+}
 
 export const directBoardRole = { $in: ['$role', ['editor', 'viewer']] };
 
@@ -76,7 +97,9 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
   const personProjection = { _id: 1, generationId: 1, id: 1, name: 1, username: 1, role: 1, disabledAt: 1 };
   return {
     get<K extends WorkspaceRecordName>(name: K, id: string) {
-      return collection(name).findOne(scoped<K>({ _id: workspaceKey(generationId, id), id }),
+      return collection(name).findOne(scoped<K>({
+        _id: workspaceKey(generationId, id), id, $expr: { $and: [equal('id', id), equal('generationId', generationId)] },
+      }),
         { promoteLongs: false, ...(name === 'users' && { projection: personProjection }) });
     },
     first<K extends WorkspaceRecordName>(name: K, filter: Document, sort?: Sort) {

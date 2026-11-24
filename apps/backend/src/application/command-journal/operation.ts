@@ -7,8 +7,8 @@ import type { openActiveWorkspace } from '../../storage/scoped.js';
 export type JournalValue = null | boolean | number | string | JournalValue[] | { [key: string]: JournalValue };
 export type JournalFields = Record<string, JournalValue>;
 export type PlannedEffect =
-  | { kind: 'insert'; collection: WorkspaceCollection; id: string; fields: JournalFields }
-  | { kind: 'update'; collection: WorkspaceCollection; id: string; revision: number; fields: JournalFields }
+  | { kind: 'insert'; collection: WorkspaceCollection; id: string; revision?: number; fields: JournalFields }
+  | { kind: 'update'; collection: WorkspaceCollection; id: string; revision: number | null; fields: JournalFields }
   | { kind: 'delete'; collection: WorkspaceCollection; id: string; revision: number | null };
 
 export interface CommandPlan {

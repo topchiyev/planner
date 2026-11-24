@@ -13,6 +13,7 @@ import { proxyTokenPattern } from './native/http-boundary.js';
 import { assertNativeMfaKey, readNativeMfaKey } from './native/mfa-key.js';
 import { readProtectedFile } from './native/mongo-host.js';
 import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
+import { createNativeWorkspaceRelationships } from './native/relationship-routes.js';
 import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
 import { readInstallationConfig } from './native/setup-state.js';
 import { createNativeCommandGate } from './native/writer.js';
@@ -57,6 +58,7 @@ try {
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth, workspace: createNativeWorkspaceReader(config, gate),
+      relationships: createNativeWorkspaceRelationships(config, gate),
     } };
     port = config.appPort;
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {

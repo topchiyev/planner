@@ -3,7 +3,7 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document } from 'mongodb';
 import { loadCurrentBrowserSession } from '../auth/sessions.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
-import { createWorkspaceRecords, directBoardRole, rankSort, together, type WorkspaceRow } from './records.js';
+import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
 
 const errors = {
   session: [401, 'UNAUTHENTICATED', 'Sign in to continue.'],
@@ -115,7 +115,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
       permissions: {
         canEdit: !!manager, canToggleHidden: !!manager || sharedAdmin,
         canChangeOwnership: ownsProject || sharedAdmin, canCreateBoard: !!manager,
-        canManageManagers: project.type === 'shared' && (!!manager || sharedAdmin),
+        canManageManagers: project.type === 'shared' && project.ownerProjectManagerId === null && (!!manager || sharedAdmin),
         canDelete: !!manager, canFavorite: true,
       },
     };
@@ -136,16 +136,22 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     };
   }
 
-  const managerRow = (project: Project) => records.first('projectManagers', { projectId: project.id, userId: principal.id });
-  const membershipRow = (board: Board) => records.first('boardMembers', { boardId: board.id, userId: principal.id, $expr: directBoardRole });
+  const canonical = canonicalRow(generationId);
+  const exactActorEdge = [canonical, equal('userId', principal.id)];
+  const managerRow = (project: Project) => records.first('projectManagers', {
+    projectId: project.id, userId: principal.id, $expr: { $and: [...exactActorEdge, equal('projectId', project.id)] },
+  });
+  const membershipRow = (board: Board) => records.first('boardMembers', {
+    boardId: board.id, userId: principal.id, $expr: { $and: [...exactActorEdge, equal('boardId', board.id), directBoardRole] },
+  });
 
   function visibleBoards(project: ProjectAccessContext) {
-    if (project.manager || project.sharedAdmin) {
-      return records.find('boards', { projectId: project.project.id }, rankSort);
-    }
-    return records.aggregate<Board>('boards', { projectId: project.project.id }, [
+    const id = project.project.id;
+    const filter = { projectId: id, $expr: { $and: [equal('projectId', id), canonical] } };
+    if (project.manager || project.sharedAdmin) return records.find('boards', filter, rankSort);
+    return records.aggregate<Board>('boards', filter, [
       records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, {
-        userId: principal.id, $expr: { $and: [{ $eq: ['$boardId', '$$boardId'] }, directBoardRole] },
+        userId: principal.id, $expr: { $and: [...exactActorEdge, { $eq: ['$boardId', '$$boardId'] }, directBoardRole] },
       }, [{ $limit: 1 }]),
       { $match: { 'actorMembership.0': { $exists: true } } },
       { $sort: rankSort },
@@ -166,14 +172,15 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     const hasManager = { 'actorManager.0': { $exists: true } };
     const hasBoard = { 'memberBoard.0': { $exists: true } };
     return [
+      { $match: { $expr: canonical } },
       records.lookup('projectManagers', 'actorManager', { projectId: '$id' }, {
-        userId: principal.id, $expr: { $eq: ['$projectId', '$$projectId'] },
+        userId: principal.id, $expr: { $and: [...exactActorEdge, { $eq: ['$projectId', '$$projectId'] }] },
       }, [{ $limit: 1 }]),
       records.lookup('boards', 'memberBoard', { projectId: '$id' }, {
-        $expr: { $eq: ['$projectId', '$$projectId'] },
+        $expr: { $and: [canonical, { $eq: ['$projectId', '$$projectId'] }] },
       }, [
         records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, {
-          userId: principal.id, $expr: { $and: [{ $eq: ['$boardId', '$$boardId'] }, directBoardRole] },
+          userId: principal.id, $expr: { $and: [...exactActorEdge, { $eq: ['$boardId', '$$boardId'] }, directBoardRole] },
         }, [{ $limit: 1 }]),
         { $match: { 'actorMembership.0': { $exists: true } } },
         { $limit: 1 },
