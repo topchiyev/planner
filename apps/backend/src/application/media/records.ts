@@ -4,6 +4,7 @@ import { digestPattern, MediaStorageError, type BlobIdentity } from '../../stora
 import { imageTypes, type MediaVariants } from './decoder.js';
 
 export const availableMedia = 'available';
+export const unavailableMedia = 'unavailable';
 export const originalType = 'application/octet-stream';
 export const derivativeType = 'image/png';
 

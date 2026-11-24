@@ -171,8 +171,17 @@ test('native Pillow derivatives are bounded and metadata-free with distinct avat
       const staleCover = fixtureId(5100);
       await f.insert('attachments', staleCover, { cardId: ids.activeCard, name: 'Unavailable imported cover', kind: 'file', availability: 'unavailable' });
       await f.db.collection('cards').updateOne({ id: ids.activeCard, generationId: f.generationId }, { $set: { coverAttachmentId: staleCover } });
+      const imported = (await f.call(cardPath(ids.activeCard), editor)).data.data;
+      assert.equal(imported.coverAttachmentId, staleCover);
+      assert.equal(imported.attachments.find(({ id }) => id === staleCover).available, false);
+      assert.equal((await socket(f, `${filePath(staleCover)}/thumbnail/small`, viewer)).status, 404);
+      const pinned = await upload(f, path, editor, 1, await readFile(new URL('sample.png', formats)), 'pinned-cover.png');
+      assert.equal(pinned.status, 201);
+      assert.equal(pinned.data.data.parent.coverAttachmentId, staleCover);
+      const missingCover = fixtureId(5101);
+      await f.db.collection('cards').updateOne({ id: ids.activeCard, generationId: f.generationId }, { $set: { coverAttachmentId: missingCover } });
       assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.coverAttachmentId, null);
-      let revision = 1;
+      let revision = 2;
       let cover;
       for (const [format, file] of uploads) {
         const source = await readFile(file);

@@ -8,6 +8,7 @@ import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type Ca
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
+import { availableMedia, unavailableMedia } from '../media/records.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
 import { projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
 
@@ -68,7 +69,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
   async function blobAvailable(blobDigest?: string | null, image = false) {
     return !!blobDigest && !!await records.first('blobs', {
-      digest: blobDigest, lifecycleState: 'available',
+      digest: blobDigest, lifecycleState: availableMedia,
       ...(image && { 'variants.small.digest': { $type: 'string' }, 'variants.large.digest': { $type: 'string' } }),
     });
   }
@@ -77,7 +78,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
     return {
       ...entity(row), name: row.name, cardId: row.cardId, kind: row.kind,
-      available: row.kind === 'link' ? !!url : row.availability === 'available' && await blobAvailable(row.blobDigest), byteLength: row.byteLength ?? null, url,
+      available: row.kind === 'link' ? !!url : row.availability === availableMedia && await blobAvailable(row.blobDigest), byteLength: row.byteLength ?? null, url,
     };
   }
 
@@ -195,7 +196,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         records.find('fieldGroups', { scopeType: 'project', scopeId: id }, rankSort),
       ]);
       const allowedBackgrounds = await together(backgrounds.map(async (background) =>
-        (background.kind === 'preset' || (background.availability === 'available' && await blobAvailable(background.blobDigest)))
+        (background.kind === 'preset' || (background.availability === availableMedia && await blobAvailable(background.blobDigest)))
           ? { ...entity(background), name: background.name } : null));
       return { data: { ...summary, description, boards, managers: await visiblePeople(managerRows.map(({ userId }) => userId)),
         backgrounds: allowedBackgrounds.filter((background) => background !== null), fieldTemplates: await together(templates.map((row) => fieldGroup(row))) } };
@@ -281,8 +282,9 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const members = await records.find('boardMembers', { boardId, userId: { $in: assignments.map(({ userId }) => userId) },
         $expr: directBoardRole });
       const visibleAttachments = await together(attachments.map(attachment));
-      const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file' && item.availability === 'available');
-      const coverAttachmentId = cover && await blobAvailable(cover.blobDigest, true) ? cover.id : null;
+      const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file');
+      const coverAttachmentId = cover && (cover.availability === unavailableMedia
+        || (cover.availability === availableMedia && await blobAvailable(cover.blobDigest, true))) ? cover.id : null;
       return { data: { ...cardDto(card, board, list), description: card.description ?? null, previousListId, labels: labels.map(labelDto),
         assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: visibleAttachments,
         coverAttachmentId, ...fields } };

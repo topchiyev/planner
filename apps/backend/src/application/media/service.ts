@@ -10,7 +10,7 @@ import { newPublicId } from '../../storage/identity.js';
 import { MediaSizeError, MediaStorageError, type BlobIdentity, type MediaPart, type PrivateMediaStore } from '../../storage/blobs/private-store.js';
 import type { CommandGate } from '../command-gate/gate.js';
 import { CommandJournal } from '../command-journal/journal.js';
-import type { JournalOperation, JournalValue, PlannedEffect } from '../command-journal/operation.js';
+import type { JournalFields, JournalOperation, JournalValue, PlannedEffect } from '../command-journal/operation.js';
 import {
   requireCapability, resolveBrowserWorkspace, WorkspaceAccessError, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization,
@@ -19,7 +19,7 @@ import { createWorkspaceRecords, directBoardRole } from '../workspace/records.js
 import { detectImage, imageTypes, type MediaDecoder, type MediaVariants } from './decoder.js';
 import { MediaRejection, reserveSlots } from './errors.js';
 import { receiveMultipart } from './multipart.js';
-import { availableMedia, catalogVariants, mediaRecords, originalType, validBlobIdentity, type StoredAvatar, type StoredMediaReference } from './records.js';
+import { availableMedia, catalogVariants, mediaRecords, originalType, unavailableMedia, validBlobIdentity, type StoredAvatar, type StoredMediaReference } from './records.js';
 
 type Upload = 'uploadAttachment' | 'uploadBackground' | 'uploadAvatar';
 type Mutation = Upload | 'addLink' | 'renameAttachment' | 'removeAttachment' | 'removeBackground' | 'removeAvatar';
@@ -159,7 +159,7 @@ export function createMediaService(
         const effects: PlannedEffect[] = [];
         let reference: MediaMutation['data']['reference'] = null;
         let coverAttachmentId: string | null | undefined;
-        const lifecycle = { blobDigest: media?.digest ?? null, byteLength: media?.byteLength ?? null, availability: media ? availableMedia : null };
+        const lifecycle: JournalFields = media ? { blobDigest: media.digest, byteLength: media.byteLength, availability: availableMedia } : {};
         let parentRevision;
 
         if (parent.type === 'card') {
@@ -190,14 +190,18 @@ export function createMediaService(
             effects.push({ kind: 'insert', collection: 'attachments', id: mediaId, fields: {
               cardId: id, name, kind, url: payload.url ?? null, createdAt: timestamp, updatedAt: null, ...lifecycle,
             } });
-            reference = referenceDto({ id: mediaId, revision: 1, name, kind, url: payload.url, ...lifecycle }, id);
+            reference = referenceDto({ id: mediaId, revision: 1, name, kind, url: payload.url, byteLength: media?.byteLength,
+              availability: media && availableMedia }, id);
             if (media?.variants) {
               const records = mediaRecords(database, generationId);
               const oldCover = coverAttachmentId ? await records.attachment(coverAttachmentId) : null;
-              const eligible = live(oldCover) && oldCover.cardId === id && oldCover.kind === 'file'
-                && oldCover.availability === availableMedia && oldCover.blobDigest;
-              const catalog = eligible ? await records.catalog(oldCover.blobDigest!) : null;
-              if (!catalog || catalog.lifecycleState !== availableMedia || !catalogVariants(catalog)) coverAttachmentId = mediaId;
+              const belongs = live(oldCover) && oldCover.cardId === id && oldCover.kind === 'file';
+              const catalog = belongs && oldCover.availability === availableMedia && oldCover.blobDigest
+                ? await records.catalog(oldCover.blobDigest) : null;
+              const approvedUnavailable = belongs && oldCover.availability === unavailableMedia;
+              if (!approvedUnavailable && (!catalog || catalog.lifecycleState !== availableMedia || !catalogVariants(catalog))) {
+                coverAttachmentId = mediaId;
+              }
             }
           }
           effects.push({ kind: 'update', collection: 'cards', id, revision: card.revision,
@@ -212,7 +216,8 @@ export function createMediaService(
             const mediaId = newPublicId();
             effects.push({ kind: 'insert', collection: 'projectBackgrounds', id: mediaId,
               fields: { projectId: id, name: media.name, kind: 'file', createdAt: timestamp, updatedAt: null, ...lifecycle } });
-            reference = referenceDto({ id: mediaId, revision: 1, name: media.name, kind: 'file', ...lifecycle }, id);
+            reference = referenceDto({ id: mediaId, revision: 1, name: media.name, kind: 'file', byteLength: media.byteLength,
+              availability: availableMedia }, id);
           } else {
             if (!live(parent.reference)) throw missing();
             effects.push({ kind: 'delete', collection: 'projectBackgrounds', id: parent.reference.id, revision: parent.reference.revision });

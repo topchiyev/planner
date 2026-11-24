@@ -81,6 +81,18 @@ wait_for() {
 }
 
 wait_for 200 /recover
+main_pid=$(systemctl show -p MainPID --value planner.service)
+nsenter --target "$main_pid" --mount -- runuser -u planner -- /bin/bash -euc '
+  [ "$(findmnt -no ID -T /var/lib/planner/staging)" = "$(findmnt -no ID -T /var/lib/planner/blobs)" ]
+  ! test -x /var/lib/planner/mongodb
+  ! ls /var/lib/planner/mongodb >/dev/null 2>&1
+  probe=$(mktemp /var/lib/planner/staging/qualification.XXXXXX)
+  link=/var/lib/planner/blobs/.qualification-atomic-link
+  trap '''rm -f -- "$probe" "$link"''' EXIT
+  ln "$probe" "$link"
+  [ "$(stat -c "%d:%i" "$probe")" = "$(stat -c "%d:%i" "$link")" ]
+'
+echo 'Planner service mount permits atomic publication and shields MongoDB data.'
 python3 - "$work/setup.json" > "$work/enroll.json" <<'PY'
 import json, sys
 from pathlib import Path
