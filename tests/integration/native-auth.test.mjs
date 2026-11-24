@@ -121,6 +121,12 @@ test('expired, foreign and concurrent first-admin grants cannot create a second 
   await withFixtureMongo(async (mongo) => {
     const fixture = await setup(mongo, { hasher: { encode: async () => inlineVerifier } });
     try {
+      fixture.setTime(new Date(issuedAt.getTime() - 1));
+      const installation = await readInstallation(mongo.db, fixture.installationId);
+      assert.equal(await hasFirstAdminGrant(mongo.db, installation, fixture.now()), false);
+      assert.equal(await fixture.confirm(fixture.input), false);
+      fixture.setTime(issuedAt);
+      assert.equal(await hasFirstAdminGrant(mongo.db, installation, fixture.now()), true);
       const other = newToken();
       assert.equal(await fixture.confirm({ ...fixture.input, grant: other }), false);
       const original = await fixture.recoveryGrants.findOne({ _id: fixture.grantKey });
@@ -129,6 +135,7 @@ test('expired, foreign and concurrent first-admin grants cannot create a second 
       assert.equal(await fixture.confirm(fixture.input), false);
       await fixture.recoveryGrants.replaceOne({ _id: fixture.grantKey }, original);
       fixture.setTime(expiresAt);
+      assert.equal(await hasFirstAdminGrant(mongo.db, installation, fixture.now()), false);
       assert.equal(await fixture.confirm(fixture.input), false);
       assert.equal((await fixture.recoveryGrants.findOne({})).consumedAt, null);
       assert.equal(await fixture.users.countDocuments({}), 0);

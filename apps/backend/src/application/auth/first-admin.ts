@@ -124,7 +124,7 @@ export async function recoverFirstAdmin(database: Db, installationId: string) {
 
 export async function hasFirstAdminGrant(database: Db, installation: InstallationDocument, now: Date) {
   const binding = firstAdminBinding(installation);
-  if (!binding || binding.published) return false;
+  if (!binding || binding.published || now < binding.issuedAt) return false;
   const grant = await grants(database).findOne({
     ...grantFilter(binding), consumedAt: { $type: 'null' }, firstAdminClaim: { $exists: false }, expiresAt: { $gt: now },
   }, { projection: { tokenDigest: 0 } });

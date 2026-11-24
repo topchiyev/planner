@@ -45,20 +45,32 @@ done
 
 plannerctl status --json > "$work/status.json"
 plannerctl setup --mode fresh --public-url "$origin" --json > "$work/confirmed.json"
-plannerctl restart --json > "$work/restarted.json"
+systemctl stop planner.service
+plannerctl status --json > "$work/db-only.json"
+plannerctl stop --json > "$work/stopped.json"
+plannerctl status --json > "$work/offline.json"
+plannerctl start --json > "$work/started.json"
 for attempt in {1..60}; do
     if [ "$(status "$origin/health/ready" 2>/dev/null)" = 200 ]; then break; fi
     sleep .2
 done
 [ "$(status "$origin/health/ready")" = 200 ]
+plannerctl status --json > "$work/resumed.json"
 python3 - "$work" <<'PY'
 import json
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
-for name in ['status', 'confirmed']:
+for name in ['status', 'confirmed', 'resumed']:
     state = json.loads((root / (name + '.json')).read_text())
     assert state['readiness'] == 'ready' and state['pendingAction'] == 'complete'
+    assert 'firstAdminGrant' not in state
+db_only = json.loads((root / 'db-only.json').read_text())
+assert db_only['readiness'] == 'unavailable' and db_only['pendingAction'] == 'complete'
+assert 'firstAdminGrant' not in db_only
+for name in ['stopped', 'offline']:
+    state = json.loads((root / (name + '.json')).read_text())
+    assert state['readiness'] == 'unavailable' and state['pendingAction'] == 'unknown'
     assert 'firstAdminGrant' not in state
 PY
 printf 'NATIVE AUTH ACCEPTANCE PASSED\n'
