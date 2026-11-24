@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { inspectObjects, parseObjectService, reconcileAssets } from '../../apps/backend/dist/application/migration/assets.js';
-import { readCaptureManifest, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
+import { inspectDirectory, inspectObjects, parseObjectService, reconcileAssets } from '../../apps/backend/dist/application/migration/assets.js';
+import { readAssetManifest, readCaptureManifest, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
 import { inspectMigration } from '../../apps/backend/dist/application/migration/preflight.js';
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { prepareMigration } from '../../apps/backend/dist/application/migration/prepare.js';
@@ -181,6 +181,26 @@ test('both synthetic restored tags match the native-source preflight through a t
   }
 });
 
+test('materialized assets resolve exact Unix filename bytes without replacement aliases', async (t) => {
+  const root = await localDirectory(t);
+  const assets = join(root, 'assets');
+  const folder = join(assets, 'private/attachments/1');
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  const leaf = '�.txt';
+  const key = 'private/attachments/1/' + leaf;
+  const bytes = Buffer.from('synthetic file bytes');
+  await writeFile(join(folder, leaf), bytes, { mode: 0o600 });
+  const manifest = new Map([[key, { key, size: bytes.length, sha256: sha256(bytes) }]]);
+  const reader = await inspectDirectory(assets, owner, manifest);
+  assert.deepEqual(await reader.inspect(manifest.get(key)), { length: bytes.length, digest: sha256(bytes) });
+  await reader.close();
+
+  const invalidPath = Buffer.concat([Buffer.from(folder + '/'), Buffer.from([0xff]), Buffer.from('.txt')]);
+  await writeFile(invalidPath, bytes, { mode: 0o600 });
+  try { await assert.rejects(inspectDirectory(assets, owner, manifest), refuses('asset-integrity')); }
+  finally { await unlink(invalidPath); }
+});
+
 test('migration object versions, streamed lengths and shared-volume capacity are verified independently', async () => {
   const release = '2.3.0';
   const value = JSON.parse(await readFile(join(synthetic(release), 'manifest.json')));
@@ -191,6 +211,9 @@ test('migration object versions, streamed lengths and shared-volume capacity are
   const key = 'private/attachments/1/Case-sensitive File.txt';
   const body = Buffer.from('independent stored length');
   const metadata = { key, versionId: 'v-locked', size: body.length, sha256: sha256(body) };
+  const mutable = Buffer.from(JSON.stringify({ formatVersion: 1, files: [{ ...metadata, versionId: 'null' }] }));
+  assert.throws(() => readAssetManifest(mutable, { ...capture, asset: { ...capture.asset, manifestSha256: sha256(mutable) } }),
+    refuses('asset-manifest'));
   const manifest = new Map([[key, metadata]]);
   const source = new Map([[key, { kind: 'original', sourceLength: null }]]);
   const good = inspectObjects(service, async (url) => {

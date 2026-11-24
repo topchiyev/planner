@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { isAbsolute, join, normalize } from 'node:path';
 import type { ClientConfig } from 'pg';
@@ -49,15 +50,17 @@ export function parseSourceService(config: string, name: string) {
 
 export async function assertSourceSocket(service: ReturnType<typeof parseSourceService>) {
   let current = '/';
+  const parents: Stats[] = [];
   try {
     for (const component of service.host.slice(1).split('/')) {
       current = join(current, component);
       const entry = await lstat(current);
       if (!entry.isDirectory() || (entry.mode & 0o022) !== 0) throw invalid();
+      parents.push(entry);
     }
     const socket = await lstat(join(service.host, versionSocket + service.port));
-    const directory = await lstat(service.host);
-    if (!socket.isSocket() || socket.uid !== directory.uid || (directory.mode & 0o077) !== 0 || (socket.mode & 0o077) !== 0)
-      throw invalid();
+    const directory = parents.at(-1);
+    if (!directory || !socket.isSocket() || socket.uid !== directory.uid || (directory.mode & 0o077) !== 0 || (socket.mode & 0o077) !== 0
+      || parents.some((entry) => entry.uid !== 0 && entry.uid !== socket.uid)) throw invalid();
   } catch { throw invalid(); }
 }

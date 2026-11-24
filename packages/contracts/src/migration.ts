@@ -25,7 +25,7 @@ export const migrationAssetSchema = z.strictObject({
   key: z.string().min(1).max(2048),
   size: z.number().int().nonnegative(),
   sha256: migrationDigestSchema,
-  versionId: z.string().regex(/^[\w.+=/-]{1,512}$/u).optional(),
+  versionId: z.string().regex(/^[\w.+=/-]{1,512}$/u).refine((value) => value !== 'null').optional(),
 });
 
 export const migrationAssetsSchema = z.strictObject({
