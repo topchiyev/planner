@@ -55,7 +55,9 @@ check_host() {
 }
 
 check_anchors() {
-    for path in /opt /etc /var /var/lib /run /usr /usr/bin /usr/lib /usr/lib/systemd /usr/lib/systemd/system /usr/lib/tmpfiles.d; do
+    for path in / /opt /etc /var /var/lib /run /usr /usr/bin /usr/lib /usr/lib/systemd /usr/lib/systemd/system /usr/lib/tmpfiles.d; do
+        # dpkg may remove /opt with its last installed child and recreate it on unpack.
+        if [ "$path" = /opt ] && ! exists "$path"; then continue; fi
         [ ! -L "$path" ] && [ -d "$path" ] && [ "$(stat -c '%u:%g' -- "$path")" = 0:0 ] ||
             fail ownership "Unexpected system directory owner or type at $path."
         bits=$(stat -c '%a' -- "$path")
@@ -207,7 +209,11 @@ check_service_path() {
 check_storage() {
     for scope in release state; do
         case "$scope" in
-            release) path=$release; parent=/opt ;;
+            release)
+                path=$release
+                parent=/
+                if [ -d /opt ]; then parent=/opt; fi
+                ;;
             state) path=$state; parent=/var/lib ;;
         esac
         [ ! -d "$path" ] || parent=$path

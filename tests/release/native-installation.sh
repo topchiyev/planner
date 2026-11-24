@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run as root inside a disposable Ubuntu guest with verified candidate media attached read-only.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "Native installation acceptance failed on line %s.\n" "$LINENO" >&2' ERR
 
 media=${1:?Pass the mount point of the read-only candidate ISO}
 [ "$(id -u)" = 0 ]
@@ -74,9 +75,14 @@ sentinel_id=$(sentinel_data seed)
 reject_install() {
     if dpkg -i "$package" > "$work/refused" 2>&1; then
         echo "Install unexpectedly succeeded for $1" >&2
+        cat "$work/refused" >&2
         exit 1
     fi
-    grep -F "$2" "$work/refused"
+    if ! grep -F "$2" "$work/refused"; then
+        printf 'Install refusal for %s did not contain the expected diagnostic.\n' "$1" >&2
+        cat "$work/refused" >&2
+        exit 1
+    fi
     for path in /opt/planner /run/planner /usr/bin/plannerctl; do [ ! -e "$path" ]; done
     [ -z "$(getent passwd planner planner-mongodb || :)" ]
 }
@@ -132,9 +138,14 @@ for conflict in /usr/lib/systemd/system/planner.service /usr/lib/tmpfiles.d/plan
     foreign=$(sha256sum "$conflict")
     if dpkg -i "$package" > "$work/refused" 2>&1; then
         echo "Upgrade unexpectedly replaced $conflict" >&2
+        cat "$work/refused" >&2
         exit 1
     fi
-    grep -F "The path $conflict is occupied outside the Planner package." "$work/refused"
+    if ! grep -F "The path $conflict is occupied outside the Planner package." "$work/refused"; then
+        printf 'Upgrade refusal for %s did not contain the expected diagnostic.\n' "$conflict" >&2
+        cat "$work/refused" >&2
+        exit 1
+    fi
     [ "$(sha256sum "$conflict")" = "$foreign" ]
     [ "$(sha256sum /usr/bin/plannerctl)" = "$old_launcher" ]
     [ ! -e /opt/planner/current/lib/native-preflight ]
