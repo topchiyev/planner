@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { useRevalidator } from 'react-router';
-import type { RelationshipReadOutput } from '@planner/contracts';
+import { useLocation, useRevalidator } from 'react-router';
+import { workspaceSignInPath, type RelationshipReadOutput } from '@planner/contracts';
 import type { loadNativeProject } from '../workspace/workspace-loaders.js';
 import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import { ProjectDialog, useProjectAction } from './project-controls.js';
@@ -20,6 +20,8 @@ export function ProjectManagersDialog({ project, close }: { project: Project; cl
   const [result, setResult] = useState<{ scope: string; managers?: ManagerPage; candidates?: CandidatePage }>();
   const action = useProjectAction();
   const revalidator = useRevalidator();
+  const { pathname, search: locationQuery } = useLocation();
+  const signIn = workspaceSignInPath(pathname + locationQuery);
   useEffect(() => {
     const controller = new AbortController();
     const managers = new URLSearchParams();
@@ -34,14 +36,14 @@ export function ProjectManagersDialog({ project, close }: { project: Project; cl
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       if (error instanceof WorkspaceRequestError && error.status === 401) {
-        window.location.replace('/sign-in');
+        window.location.replace(signIn);
       } else if (error instanceof WorkspaceRequestError && [403, 404].includes(error.status)) {
         close();
         void revalidator.revalidate();
       } else setResult({ scope });
     });
     return () => controller.abort();
-  }, [scope, id, query, managerCursor, candidateCursor]);
+  }, [scope, id, query, managerCursor, candidateCursor, signIn]);
 
   function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

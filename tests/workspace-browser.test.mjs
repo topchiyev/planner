@@ -363,6 +363,13 @@ test('project settings preserve a stale draft and refresh manager authority thro
     await deletion.getByRole('button', { name: 'Delete permanently' }).click();
     await expect(owner).toHaveURL(origin + '/workspace');
     await expect(owner.getByRole('link', { name: 'Browser draft title' })).toHaveCount(0);
+
+    const shared = project(ids.sharedProject);
+    await admin.goto(origin + shared);
+    await admin.context().clearCookies();
+    await admin.getByRole('button', { name: 'Managers', exact: true }).click();
+    await expect(admin.getByRole('heading', { name: 'Sign in', level: 1 })).toBeVisible();
+    assert.equal(new URL(admin.url()).searchParams.get('returnTo'), shared);
   });
 });
 
