@@ -1617,7 +1617,7 @@ test('keyboard destination picker duplicates and transfers cards and a populated
     await selectBoard(dialog);
     await dialog.getByRole('button', { name: 'Move list', exact: true }).click();
     await expect(editor).toHaveURL(target);
-    await expect(editor.getByText('Shipping lane', { exact: true })).toBeVisible();
+    await expect(editor.getByRole('list', { name: 'Board lists' }).getByText('Shipping lane', { exact: true })).toBeVisible();
     await expect(editor.getByRole('link', { name: 'A moving occupant' })).toHaveAttribute('href', board(ids.sharedBoard) + '/cards/' + occupied);
     assert.ok(await editor.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
   });
