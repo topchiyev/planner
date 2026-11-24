@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Long } from 'mongodb';
+import { boardFilterKeys, workspaceReturnPath } from '@planner/contracts';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
 import { assertOwnedMongoEnvironment } from '../support/mongo-environment.ts';
-import { cookieOf, fixtureId, ids, makeWorkspaceAccessFixture } from '../support/workspace-access-fixture.mjs';
+import { cookieOf, fixtureId, ids, makeWorkspaceAccessFixture, origin } from '../support/workspace-access-fixture.mjs';
 
 assertOwnedMongoEnvironment(process.env);
 const boardCards = (id = ids.privateBoard) => '/api/v1/boards/' + id + '/cards';
@@ -150,5 +151,33 @@ test('RE2 runs exact full-field matches and declines unsupported syntax or a bou
     const capped = await result(query(f, viewer, { q: '/9+/' }));
     assert.deepEqual(capped, { data: [], counts: [], page: { nextCursor: null }, searchValidation: 'search-limit' });
     assert.ok(Long.isLong((await f.db.collection('cards').findOne({ ...f.scope, id: long }, { promoteLongs: false })).rank));
+  });
+});
+
+test('the protected Unix HTTP parser accepts a complete filter redirect with ordinary forwarded headers', { timeout: 125_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await makeWorkspaceAccessFixture(mongo, { browserOrigin: origin });
+    try {
+      const params = new URLSearchParams({ context: 'archive', view: 'list', cursor: 'v1.' + 'A'.repeat(2045), q: '界'.repeat(256) });
+      for (const [group, key] of boardFilterKeys.entries()) for (let index = 0; index < 50; index++) {
+        params.append(key, fixtureId(29000 + group * 50 + index));
+      }
+      params.set('unassigned', 'true');
+      params.set('limit', '100');
+      const path = '/boards/' + ids.privateBoard + '/cards/' + ids.activeCard + '?' + params;
+      const headers = { 'User-Agent': 'Synthetic browser ' + 'x'.repeat(384) };
+      const redirect = await f.call(path, null, { headers });
+      assert.equal(redirect.status, 302);
+      assert.ok(redirect.headers.location.length > 16_000);
+      assert.equal(new URL(redirect.headers.location, origin).searchParams.get('returnTo'), path);
+      const served = await f.call(redirect.headers.location, null, { headers });
+      assert.equal(served.status, 200);
+      assert.match(served.headers['content-type'], /^text\/html/u);
+      const offsite = 'https://other.invalid' + path;
+      assert.equal(workspaceReturnPath(offsite), null);
+      const foreign = await f.call('/sign-in?' + new URLSearchParams({ returnTo: offsite }), null, { headers });
+      assert.equal(foreign.status, 200);
+      assert.equal(foreign.headers.location, undefined);
+    } finally { await f.close(); }
   });
 });

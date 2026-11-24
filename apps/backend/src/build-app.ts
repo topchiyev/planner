@@ -29,9 +29,7 @@ export type AppDependencies = {
 );
 
 export function buildApp({ isReady, frontendRoot, native, transportFixture }: AppDependencies) {
-  const app = Fastify({ requestIdHeader: false, genReqId: () => randomUUID(),
-    ...(native && { http: { maxHeaderSize: 32 * 1024 } }),
-  });
+  const app = Fastify({ requestIdHeader: false, genReqId: () => randomUUID() });
   const transport = native ?? transportFixture;
   app.decorateRequest('plannerConnection', null);
   if (transport) registerNativeHttpBoundary(app, transport);
