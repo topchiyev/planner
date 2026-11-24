@@ -4,6 +4,7 @@ import { nameBasedUuid } from '../../storage/identity.js';
 import { gradientPreset, importAccount, importAccountPreferences, importStopwatch, invalidBaseRow, nullableDate, targetTimes } from './base-fields.js';
 import type { ImportedEntity, ImportOptionalReference, ImportOrder, ImportProvenance, ImportRecords, ImportReference } from './staged-records.js';
 import type { SourceRow } from './source-projections.js';
+import { isWorkspaceRelationshipTable, reserveWorkspaceRelationship, type WorkspaceRelationship } from './workspace-relationships.js';
 
 export const baseWorkspaceTables = ['board', 'card', 'list', 'project', 'user_account'] as const;
 export const baseRelationshipTables = ['board_membership', 'project_manager'] as const;
@@ -18,6 +19,7 @@ type Reservation = { [K in ImportedEntity]: SourceReservation<K> }[ImportedEntit
 export async function reserveSourceRecord(store: ImportRecords, untyped: SourceReservation) {
   const { table, row } = untyped as Reservation;
   const provenance: ImportProvenance = { createdAt: row.created_at, updatedAt: row.updated_at };
+  if (isWorkspaceRelationshipTable(table)) return reserveWorkspaceRelationship(store, { table, row } as WorkspaceRelationship, provenance);
   let order: ImportOrder | undefined;
   let reference: ImportReference | undefined;
   switch (table) {

@@ -12,6 +12,10 @@ import { inspectMigration, withMigrationSnapshot } from '../../apps/backend/dist
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { stageBaseWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
+import { createChecklistReads } from '../../apps/backend/dist/application/workspace/checklist-reads.js';
+import { eligibleBoardPeople } from '../../apps/backend/dist/application/workspace/eligible-members.js';
+import { projectFieldGroup } from '../../apps/backend/dist/application/workspace/field-state.js';
+import { createWorkspaceRecords } from '../../apps/backend/dist/application/workspace/records.js';
 import { legacyPublicId, workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace } from '../../apps/backend/dist/storage/scoped.js';
@@ -91,7 +95,7 @@ async function loadTarget(fixture, callback) {
   finally { lease.release(); }
 }
 
-function interruptCardCheckpoint(db) {
+function interruptCheckpoint(db, interruptedPass, interruptedTable) {
   return new Proxy(db, { get(target, property) {
     if (property !== 'collection') return Reflect.get(target, property, target);
     return (name, ...options) => {
@@ -100,7 +104,7 @@ function interruptCardCheckpoint(db) {
       return new Proxy(collection, { get(rows, operation) {
         if (operation === 'updateOne') return async (query, update, settings) => {
           const { pass, table } = update.$set.checkpoint;
-          if (pass === 'base' && table === 'card') throw new MigrationError('target-write', 'Interrupted after card effects.');
+          if (pass === interruptedPass && table === interruptedTable) throw new MigrationError('target-write', 'Interrupted after staged effects.');
           return rows.updateOne(query, update, settings);
         };
         const value = Reflect.get(rows, operation, rows);
@@ -123,6 +127,10 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
   const counts = { users: 5, projects: 2, projectManagers: 2, boards: 2, boardPreferences: 2, boardMembers: 5, lists: 7, cards: 6,
     sessions: 0, trustedDevices: 0, oauthArtifacts: 0, recoveryGrants: 0, auditEntries: 0, events: 0, commands: 0 };
   for (const [name, expected] of Object.entries(counts)) assert.equal(await count(name), expected, name);
+  const relationships = { labels: 1, cardLabels: 1, cardAssignees: 1, boardFollows: 1, cardFollows: 1,
+    projectFavorites: 1, checklists: 1, tasks: 3, fieldGroups: 3, fieldDefinitions: 1, fieldValues: 2,
+    activities: 0, notifications: 0 };
+  for (const [name, expected] of Object.entries(relationships)) assert.equal(await count(name), expected, name);
   const mappedCount = ['action', 'attachment', 'background_image', 'base_custom_field_group', 'board', 'board_membership',
     'board_subscription', 'card', 'card_label', 'card_membership', 'card_subscription', 'comment', 'custom_field', 'custom_field_group',
     'custom_field_value', 'label', 'list', 'notification', 'project', 'project_favorite', 'project_manager', 'task', 'task_list',
@@ -205,6 +213,51 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
     await assert.rejects(role(user, 'boardUser').requireBoard(id('board', '302')), { code: 'NOT_FOUND' });
   }
   assert.equal((await get('boardMembers', 'board_membership', '311')).canComment, null);
+  const cardId = alignment.id;
+  const boardId = id('board', '301');
+  const label = await get('labels', 'label', '501');
+  assert.equal(label.name, null);
+  assert.equal(label.rank.toString(), '1024');
+  assert.equal((await get('cardLabels', 'card_label', '511')).labelId, label.id);
+  assert.equal((await get('projectFavorites', 'project_favorite', '231')).userId, id('user_account', '103'));
+  assert.equal((await get('boardFollows', 'board_subscription', '321')).userId, id('user_account', '103'));
+  assert.equal((await get('cardAssignees', 'card_membership', '521')).userId, ownerUser.id);
+  const follower = await get('cardFollows', 'card_subscription', '531');
+  assert.equal(follower.userId, id('user_account', '103'));
+  assert.equal(follower.isPermanent, true);
+  assert.equal(await db.collection('cardFollows').countDocuments({ generationId, userId: ownerUser.id }), 0);
+
+  const records = createWorkspaceRecords(db, generationId);
+  const viewer = role('103', 'boardUser');
+  const [viewerChecklist] = await createChecklistReads(records, viewer).list(cardId, boardId);
+  const [ownerChecklist] = await createChecklistReads(records, asOwner).list(cardId, boardId);
+  assert.equal(viewerChecklist.id, id('task_list', '541'));
+  assert.equal(viewerChecklist.showOnFront, true);
+  assert.equal(viewerChecklist.hideCompleted, true);
+  assert.deepEqual(viewerChecklist.tasks.map(({ kind, rank }) => [kind, rank]),
+    [['linked', '1024'], ['unavailable', '2048'], ['task', '3072']]);
+  assert.equal(viewerChecklist.tasks[0].linkedCard.completed, true);
+  assert.deepEqual(Object.keys(viewerChecklist.tasks[1]).sort(), ['checklistId', 'createdAt', 'id', 'kind', 'rank', 'revision', 'updatedAt']);
+  assert.deepEqual(ownerChecklist.tasks.map(({ kind }) => kind), ['linked', 'linked', 'task']);
+  assert.equal(ownerChecklist.tasks[1].linkedCard.id, id('card', '9007199254740998'));
+  assert.deepEqual(ownerChecklist.tasks[2].assignee, { id: ownerUser.id, name: ownerUser.name, username: null });
+
+  const baseId = id('base_custom_field_group', '561');
+  const definitionId = id('custom_field', '581');
+  for (const [sourceId, valueId, scope, text] of [['571', '591', 'board', '  blue / λ  '], ['572', '592', 'card', '0']]) {
+    const group = await get('fieldGroups', 'custom_field_group', sourceId);
+    assert.equal(group.name, null);
+    assert.equal(group.scopeType, scope);
+    assert.equal(group.templateGroupId, baseId);
+    const resolved = await viewer.requireCardField(cardId, group.id, definitionId);
+    assert.equal(resolved.definition.fieldGroupId, baseId);
+    const projected = await projectFieldGroup(records, generationId, group, id('project', '201'));
+    assert.equal(projected.name, 'Spectral notes');
+    assert.equal(projected.definitions[0].fieldGroupId, group.id);
+    assert.equal(projected.definitions[0].inherited, true);
+    const value = await get('fieldValues', 'custom_field_value', valueId);
+    assert.deepEqual([value.cardId, value.fieldGroupId, value.fieldDefinitionId, value.value], [cardId, group.id, definitionId, text]);
+  }
   assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, activeGenerationId);
   return alignment.id;
 }
@@ -231,7 +284,7 @@ test('both verified Community captures stage the exact inactive core graph with 
     const firstRun = await createRun(db, installationId, firstReceipt);
     const id = publicIds(firstReceipt.capture.source.instanceId);
     const cardId = id('card', '9007199254740993');
-    await assert.rejects(runStage(first, firstRun, interruptCardCheckpoint(db), lease, cursors), refuses('target-write'));
+    await assert.rejects(runStage(first, firstRun, interruptCheckpoint(db, 'base', 'card'), lease, cursors), refuses('target-write'));
     const firstCardKey = { _id: workspaceKey(firstRun.generationId, cardId) };
     const stagedCards = db.collection('cards');
     assert.equal(await stagedCards.countDocuments({ generationId: firstRun.generationId }), 2);
@@ -242,9 +295,14 @@ test('both verified Community captures stage the exact inactive core graph with 
     await assert.rejects(runStage(first, firstRun, db, lease, cursors), refuses('target-write'));
     assert.equal((await stagedCards.findOne(firstCardKey)).name, 'Different staged row');
     await stagedCards.updateOne(firstCardKey, { $set: { name: 'Rotate the test prism' } });
+    await assert.rejects(runStage(first, firstRun, interruptCheckpoint(db, 'deferred', 'custom_field_value'), lease, cursors),
+      refuses('target-write'));
+    const interruptedFields = await db.collection('importRuns').findOne(importRunKey(firstRun));
+    assert.equal(interruptedFields.checkpoint.table, 'custom_field_group');
+    assert.equal(await db.collection('fieldValues').countDocuments({ generationId: firstRun.generationId }), 2);
     const complete = await runStage(first, firstRun, db, lease, cursors);
-    assert.equal(complete.pass, 'edges');
-    assert.equal(complete.table, 'project_manager');
+    assert.equal(complete.pass, 'deferred');
+    assert.equal(complete.table, 'task_list');
     assert.deepEqual(await runStage(first, firstRun, db, lease, cursors, 1), complete);
     const firstId = await assertGraph({ ...target, receipt: firstReceipt, generationId: firstRun.generationId });
     const staged = await openTrustedStagedWorkspace(db, installationId, firstRun.generationId);
@@ -303,6 +361,15 @@ test('staging preserves exact gradient and history provenance and blocks malform
     assert.notEqual(user.disabledAt, null);
     const retainedOwner = await db.collection('projectManagers').findOne({ generationId, id: id('project_manager', '222') });
     assert.equal(retainedOwner.userId, user.id);
+    const retainedAssignment = await db.collection('cardAssignees').findOne({ generationId, id: id('card_membership', '521') });
+    assert.equal(retainedAssignment.userId, user.id);
+    const retainedTask = await db.collection('tasks').findOne({ generationId, id: id('task', '553') });
+    assert.equal(retainedTask.assigneeId, user.id);
+    const viewer = createWorkspaceAuthorization(db, generationId, { id: id('user_account', '103'), role: 'boardUser' });
+    const [readChecklist] = await createChecklistReads(createWorkspaceRecords(db, generationId), viewer)
+      .list(id('card', '9007199254740993'), id('board', '301'));
+    assert.equal(readChecklist.tasks.find(({ id: taskId }) => taskId === retainedTask.id).assignee, null);
+    assert.deepEqual(await eligibleBoardPeople(createWorkspaceRecords(db, generationId), generationId, id('board', '301'), { id: user.id }), []);
     assert.deepEqual((await provenance('user_account', '102')).unsupportedPreferences, ['editorMode']);
     const card = await db.collection('cards').findOne({ generationId, id: id('card', '9007199254740993') });
     assert.deepEqual(card.stopwatch, { startedAt: '2026-02-13T08:09:10.123Z', total: 42 });
@@ -370,5 +437,116 @@ test('staging preserves exact gradient and history provenance and blocks malform
         }
       } finally { update(undo[index]); }
     }
+  }));
+});
+
+test('staged relationship reconciliation preserves exact values and fails closed on foreign or duplicate tuples', async (t) => {
+  const root = await mkdtemp(join(homedir(), '.planner-relationships-'));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const postgres = await startFixturePostgres(t, root);
+  postgres.write('postgres', 'ALTER ROLE fixture_reader NOINHERIT');
+  await withFixtureMongo((fixture) => loadTarget(fixture, async ({ db, installationId, activeGenerationId, lease, cursors }) => {
+    const source = await configureSource(root, postgres, '2.3.1');
+    async function runForCurrentSource() {
+      const receipt = await inspect(source);
+      return { receipt, identity: await createRun(db, installationId, receipt) };
+    }
+    const stage = (identity, size) => runStage(source, identity, db, lease, cursors, size);
+    source.update(`
+      INSERT INTO public.label (id,board_id,position,name,color) VALUES (10,301,1024,NULL,'lagoon-blue');
+      UPDATE public.task SET linked_card_id=999, name='Former destination title', is_completed=TRUE WHERE id=552;
+      UPDATE public.custom_field_value SET content='' WHERE id=591;
+      UPDATE public.custom_field_value SET content=repeat('λ',600) WHERE id=592;
+      UPDATE public.card_subscription SET is_permanent=FALSE WHERE id=531;
+      UPDATE public.custom_field SET position=20 WHERE id=581;
+      INSERT INTO public.custom_field_group (id, board_id, position, name) VALUES (573, 301, 4096, 'Standalone');
+      INSERT INTO public.custom_field (id, base_custom_field_group_id, custom_field_group_id, position, name, show_on_front_of_card)
+        VALUES (580,561,NULL,10,'Earlier template field',TRUE),(9007199254741999,NULL,571,30,'Board local field',TRUE),
+          (2,NULL,572,20,'Card local tie',TRUE),(584,NULL,573,10,'Standalone field',TRUE);
+    `);
+    const { receipt, identity } = await runForCurrentSource();
+    const id = publicIds(receipt.capture.source.instanceId);
+    const { generationId } = identity;
+    await stage(identity, 2);
+    const get = (name, entity, sourceId) => db.collection(name).findOne({ generationId, id: id(entity, sourceId) }, { promoteLongs: false });
+    assert.equal((await get('labels', 'label', '10')).rank.toString(), '1024');
+    assert.equal((await get('labels', 'label', '501')).rank.toString(), '2048');
+    assert.equal((await get('fieldValues', 'custom_field_value', '591')).value, '');
+    assert.equal((await get('fieldValues', 'custom_field_value', '592')).value, 'λ'.repeat(600));
+    assert.equal((await get('cardFollows', 'card_subscription', '531')).isPermanent, false);
+    const records = createWorkspaceRecords(db, generationId);
+    for (const [sourceId, ids, ranks] of [
+      ['571', ['580', '581', '9007199254741999'], ['1024', '3072', '4096']],
+      ['572', ['580', '2', '581'], ['1024', '2048', '3072']],
+      ['573', ['584'], ['1024']],
+    ]) {
+      const group = await get('fieldGroups', 'custom_field_group', sourceId);
+      const projected = await projectFieldGroup(records, generationId, group, id('project', '201'));
+      assert.deepEqual(projected.definitions.map(({ id }) => id), ids.map((sourceId) => id('custom_field', sourceId)));
+      assert.deepEqual(projected.definitions.map(({ rank }) => rank), ranks);
+    }
+    const marker = await get('tasks', 'task', '552');
+    assert.deepEqual([marker.linkedUnavailable, marker.linkedCardId, marker.name, marker.completed], [true, null, null, null]);
+    assert.deepEqual((await get('importIds', 'task', '552')).provenance.linkedTask, {
+      sourceCardId: '999', name: 'Former destination title', completed: true, missingTarget: true,
+    });
+    const actor = createWorkspaceAuthorization(db, generationId, { id: id('user_account', '102'), role: 'projectOwner' });
+    const [checklist] = await createChecklistReads(createWorkspaceRecords(db, generationId), actor)
+      .list(id('card', '9007199254740993'), id('board', '301'));
+    assert.equal(checklist.tasks[1].kind, 'unavailable');
+    assert.equal(JSON.stringify(checklist.tasks[1]).includes('Former destination title'), false);
+
+    const badRows = [
+      ['UPDATE public.label SET board_id=302 WHERE id=501', 'UPDATE public.label SET board_id=301 WHERE id=501', 'card label'],
+      ['UPDATE public.task SET task_list_id=999 WHERE id=553', 'UPDATE public.task SET task_list_id=541 WHERE id=553', 'source checklist'],
+      ['UPDATE public.task SET assignee_user_id=105 WHERE id=553', 'UPDATE public.task SET assignee_user_id=102 WHERE id=553', 'no direct member'],
+      ['UPDATE public.task SET assignee_user_id=999 WHERE id=553', 'UPDATE public.task SET assignee_user_id=102 WHERE id=553', 'typed source reference'],
+      ['UPDATE public.card_membership SET user_id=105 WHERE id=521', 'UPDATE public.card_membership SET user_id=102 WHERE id=521', 'no direct member'],
+      ['UPDATE public.base_custom_field_group SET project_id=202 WHERE id=561',
+        'UPDATE public.base_custom_field_group SET project_id=201 WHERE id=561', 'different project'],
+      ['UPDATE public.custom_field_group SET card_id=9007199254740993 WHERE id=571',
+        'UPDATE public.custom_field_group SET card_id=NULL WHERE id=571', 'exactly one owning scope'],
+      ['UPDATE public.custom_field_value SET card_id=9007199254740994 WHERE id=592',
+        'UPDATE public.custom_field_value SET card_id=9007199254740993 WHERE id=592', 'incompatible card, group or definition'],
+      [`
+        INSERT INTO public.base_custom_field_group (id, project_id, name) VALUES (562, 201, 'Other template');
+        INSERT INTO public.custom_field (id, base_custom_field_group_id, position, name, show_on_front_of_card)
+          VALUES (582, 562, 1024, 'Other definition', TRUE);
+        UPDATE public.custom_field_value SET custom_field_id=582 WHERE id=592;
+      `, `
+        UPDATE public.custom_field_value SET custom_field_id=581 WHERE id=592;
+        DELETE FROM public.custom_field WHERE id=582;
+        DELETE FROM public.base_custom_field_group WHERE id=562;
+      `, 'incompatible card, group or definition'],
+    ];
+    for (const [edit, undo, message] of badRows) {
+      source.update(edit);
+      try {
+        const { identity: invalid } = await runForCurrentSource();
+        await assert.rejects(stage(invalid, 2), (error) => error?.fault === 'source-read' && error.message.includes(message));
+        assert.equal(await db.collection('events').countDocuments({ generationId: invalid.generationId }), 0);
+        assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, activeGenerationId);
+      } finally { source.update(undo); }
+    }
+
+    const { identity: mismatched } = await runForCurrentSource();
+    await assert.rejects(runStage(source, mismatched, interruptCheckpoint(db, 'base', 'board'), lease, cursors), refuses('target-write'));
+    await db.collection('importIds').updateOne({ generationId: mismatched.generationId, entity: 'task_list', sourceId: '541' },
+      { $set: { 'reference.parent': '9007199254740994' } });
+    await assert.rejects(stage(mismatched, 2), (error) => error?.fault === 'target-write' && error.message.includes('protected relationship parent'));
+    assert.equal(await db.collection('checklists').countDocuments({ generationId: mismatched.generationId }), 0);
+
+    const { identity: occupied } = await runForCurrentSource();
+    const existingId = randomUUID();
+    const fields = db.collection('fieldValues');
+    const conflicting = {
+      _id: workspaceKey(occupied.generationId, existingId), id: existingId, generationId: occupied.generationId, revision: 1,
+      cardId: id('card', '9007199254740993'), fieldGroupId: id('custom_field_group', '571'),
+      fieldDefinitionId: id('custom_field', '581'), value: 'different durable staged row', createdAt: new Date(receipt.capture.capturedAt),
+    };
+    await fields.insertOne(conflicting);
+    await assert.rejects(stage(occupied, 2), refuses('target-write'));
+    assert.deepEqual(await fields.find({ generationId: occupied.generationId }).toArray(), [conflicting]);
+    assert.equal((await db.collection('importRuns').findOne(importRunKey(occupied))).checkpoint.table, 'custom_field_group');
   }));
 });

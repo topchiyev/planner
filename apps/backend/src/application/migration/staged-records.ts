@@ -8,13 +8,14 @@ import type { WorkspaceCollection } from '../../storage/catalog.js';
 import { legacyPublicId, workspaceKey } from '../../storage/identity.js';
 import { verifyStorageSchema } from '../../storage/schema.js';
 import { workspaceInsertFields, type WorkspaceFields } from '../../storage/scoped.js';
+import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecordName } from '../workspace/records.js';
 import type { ImportIdentity } from './checkpoint.js';
 import { MigrationError } from './manifest.js';
 import { sourceKey, type SourceTable } from './source-projections.js';
 
 export type ImportedEntity = Exclude<SourceTable, 'internal_config' | 'storage_usage'>;
 export type SourceTimes = { createdAt: string | null; updatedAt: string | null };
-export type ImportOrder = { parent: string; position: number } | { parent: string; position: number | null; board: string; changedAt: string | null };
+export type ImportOrder = { parent: string; position: number; definitionOwnerInstance?: string } | { parent: string; position: number | null; board: string; changedAt: string | null };
 export type ImportOptionalReference = null | { sourceId: string; unresolved?: 'missing-source-record' };
 
 export type ImportProvenance = SourceTimes & {
@@ -30,9 +31,10 @@ export type ImportProvenance = SourceTimes & {
   backgroundGradient?: string | null;
   unrecognizedGradient?: true;
   unsupportedPreferences?: string[];
+  linkedTask?: { sourceCardId: string; name: string; completed: boolean; missingTarget: boolean };
 };
 
-export type ImportReference = { parent: string; kind?: string };
+export type ImportReference = { parent: string; kind?: string; templateSourceId?: string | null };
 
 type ImportMap = {
   _id: string; id: string; generationId: string; entity: ImportedEntity; sourceId: string; sourceInstanceId: string;
@@ -54,6 +56,7 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
   }
   lease.assertHeld();
   const ids = db.collection<ImportMap>('importIds');
+  const staged = createWorkspaceRecords(db, generationId);
   const key = (id: string) => ({ _id: workspaceKey(generationId, id), generationId, id });
   const publicId = (entity: ImportedEntity, id: string) => legacyPublicId(sourceInstanceId, entity, sourceKey(entity, id));
 
@@ -89,6 +92,15 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
   return {
     publicId,
     mapping,
+    get<K extends WorkspaceRecordName>(collection: K, id: string) {
+      lease.assertHeld();
+      return staged.get(collection, id);
+    },
+    async hasDirectBoardMembership(boardId: string, userId: string) {
+      lease.assertHeld();
+      return !!await staged.first('boardMembers', { boardId, userId,
+        $expr: { $and: [canonicalRow(generationId), equal('boardId', boardId), equal('userId', userId), directBoardRole] } });
+    },
     resolve,
     async hasProjectManager(projectSourceId: string) {
       lease.assertHeld();
