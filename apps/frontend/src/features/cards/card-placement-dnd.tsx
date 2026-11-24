@@ -26,7 +26,8 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
   useEffect(() => {
     if (!focus || action.busy) return;
     const card = cards.find(({ id }) => id === focus.id);
-    if (focus.expected && card && (card.listId !== focus.expected.listId || card.revision < focus.expected.revision)) return;
+    if (focus.expected && card && (card.revision < focus.expected.revision
+        || (card.revision === focus.expected.revision && card.listId !== focus.expected.listId))) return;
     (buttons.current.get(focus.id) ?? feedback.current)?.focus();
     setFocus(undefined);
   }, [focus, action.busy, cards]);
