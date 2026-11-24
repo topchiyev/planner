@@ -754,7 +754,9 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
     await expect(inspector.getByRole('button', { name: 'Stop stopwatch' })).toBeEnabled();
     const elapsed = inspector.getByLabel('Elapsed time');
     const watchRequests = [];
-    editor.on('request', (request) => { if (request.url().includes('/api/v1/cards/' + cardId)) watchRequests.push(request.method()); });
+    editor.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/api/v1/cards/' + cardId) watchRequests.push(request.method());
+    });
     const running = await f.db.collection('cards').findOne({ ...f.scope, id: cardId });
     await expect(elapsed).not.toHaveText('00:00:00');
     assert.deepEqual(watchRequests, []);
@@ -1646,7 +1648,7 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     await author.goto(path);
     const comments = author.getByRole('region', { name: 'Comments', exact: true });
     await comments.getByLabel('Write a comment').fill('Recheck <strong>this measurement</strong> ');
-    await comments.getByRole('button', { name: 'Mention a board member' }).click();
+    await comments.getByRole('button', { name: 'Mention someone in this comment' }).click();
     await comments.getByLabel('Find a board member').fill('second-editor');
     await comments.getByRole('button', { name: 'Find members' }).click();
     await comments.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
@@ -1660,7 +1662,7 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     await submitted.promise;
     try {
       await expect(comments.getByLabel('Write a comment')).toBeDisabled();
-      await expect(comments.getByRole('button', { name: 'Mention a board member' })).toBeDisabled();
+      await expect(comments.getByRole('button', { name: 'Mention someone in this comment' })).toBeDisabled();
     } finally { acknowledgment.resolve(); }
     const posted = comments.getByRole('listitem').filter({ hasText: 'Recheck <strong>this measurement</strong>' });
     await expect(posted.getByText('@Fixture second-editor', { exact: true })).toBeVisible();

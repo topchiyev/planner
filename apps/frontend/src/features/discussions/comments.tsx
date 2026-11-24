@@ -42,7 +42,7 @@ function CommentInput({ text, change, boardId, label, focus, disabled }: {
     <label htmlFor={inputId}>{label}</label>
     <textarea id={inputId} ref={input} value={text} onChange={(event) => change(event.target.value)} rows={4}
       maxLength={Math.max(maximumCommentLength, text.length)} autoFocus={focus} required />
-    <MemberPicker boardId={boardId} select={insert} />
+    <MemberPicker boardId={boardId} select={insert} label="Mention someone in this comment" />
   </fieldset>;
 }
 
