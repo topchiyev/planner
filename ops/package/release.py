@@ -243,8 +243,9 @@ def stage_package(root, source, node_dir, mongo_dir, version, runtimes, provenan
     for destination in (control / "preinst", release / "lib/native-preflight"):
         shutil.copyfile(native, destination)
         destination.chmod(0o755)
-    shutil.copyfile(source / "ops/package/postinst", control / "postinst")
-    (control / "postinst").chmod(0o755)
+    for hook in ("postinst", "prerm", "postrm"):
+        shutil.copyfile(source / "ops/package" / hook, control / hook)
+        (control / hook).chmod(0o755)
     for path in ("usr/lib/systemd/system", "usr/lib/tmpfiles.d"):
         (root / path).mkdir(parents=True, exist_ok=True)
     for unit in ("planner.service", "planner-mongodb.service"):

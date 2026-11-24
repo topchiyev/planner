@@ -8,6 +8,7 @@ ConditionPathExists=/etc/planner/mongod.conf
 User=planner
 Group=planner
 WorkingDirectory=/opt/planner/current
+Environment=PLANNER_NATIVE_INSTALLATION=1
 ExecStart=/opt/planner/current/runtime/node/bin/node /opt/planner/current/apps/backend/dist/main.js
 RuntimeDirectory=planner
 RuntimeDirectoryMode=0750

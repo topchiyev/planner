@@ -229,6 +229,24 @@ valid_port() {
     [ "${#1}" -le 5 ] && [ "$1" -le 65535 ]
 }
 
+use_configured_ports() {
+    ports=$config/native-ports
+    if ! exists "$ports"; then
+        if exists "$config/planner.json"; then fail ownership 'The Planner package ports file is missing.'; fi
+        return
+    fi
+    owned_file "$ports" 0:0:600
+    saved=$(cat -- "$ports")
+    saved_app=${saved%% *}
+    saved_db=${saved#* }
+    valid_port "$saved_app" && valid_port "$saved_db" && [ "$saved" = "$saved_app $saved_db" ] ||
+        fail port 'The Planner package ports file is invalid.'
+    [ "${PLANNER_INSTALL_APP_PORT-$saved_app}" = "$saved_app" ] && [ "${PLANNER_INSTALL_DB_PORT-$saved_db}" = "$saved_db" ] ||
+        fail port 'The requested package ports differ from the configured Planner ports.'
+    app_port=$saved_app
+    db_port=$saved_db
+}
+
 check_ports() {
     valid_port "$app_port" && valid_port "$db_port" && [ "$app_port" != "$db_port" ] && [ "$db_port" != 27017 ] ||
         fail port 'Choose distinct numeric ports from 1 to 65535 and avoid the MongoDB default port 27017.'
@@ -284,6 +302,7 @@ if [ -f "$config/planner.json" ] && [ -f "$config/mongod.conf" ]; then note runt
 else note runtime unconfigured
 fi
 check_storage
+case "$mode" in install|upgrade|provision) use_configured_ports ;; esac
 if [ "$mode" != database ]; then check_ports; fi
 
 if [ "$mode" = provision ]; then

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = remove ] && [ -d /run/systemd/system ] && [ -S /run/systemd/private ]; then
+    /usr/bin/systemctl daemon-reload
+fi

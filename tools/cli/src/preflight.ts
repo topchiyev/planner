@@ -1,42 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { parsePreflightOptions } from '@planner/contracts';
 
-const valueOptions = new Set(['--public-url', '--app-port', '--db-port']);
 const minimumAvailableKiB = 524_288;
-
-function parsePort(value: string | undefined, defaultPort: number) {
-  if (value === undefined) return defaultPort;
-  if (!/^[1-9]\d{0,4}$/u.test(value) || Number(value) > 65_535) {
-    throw new Error('Ports must be integers from 1 to 65535.');
-  }
-  return Number(value);
-}
-
-export function parsePreflightOptions(args: string[]) {
-  const values = new Map<string, string>();
-  let json = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const option = args[index];
-    if (option === '--json' && !json) {
-      json = true;
-      continue;
-    }
-    if (!valueOptions.has(option) || values.has(option) || !args[index + 1] || args[index + 1].startsWith('--')) {
-      throw new Error('Usage: plannerctl preflight --public-url URL [--app-port N] [--db-port N] [--json]');
-    }
-    values.set(option, args[++index]);
-  }
-
-  const origin = values.get('--public-url');
-  const url = origin && /^https:\/\//iu.test(origin) && URL.parse(origin);
-  if (!url || url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('Specify an HTTPS public origin without credentials, path, query or fragment.');
-  }
-  const appPort = parsePort(values.get('--app-port'), 27_430);
-  const dbPort = parsePort(values.get('--db-port'), 27_431);
-  if (appPort === dbPort || dbPort === 27_017) throw new Error('Choose distinct ports and avoid the MongoDB default port 27017.');
-  return { publicUrl: url.origin, appPort, dbPort, json };
-}
 
 export function runPreflight(args: string[], version: string) {
   let options;
