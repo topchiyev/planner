@@ -199,6 +199,15 @@ test('both synthetic restored tags match the native-source preflight through a t
     const alias = await inspectMigration({ ...request, sourceService: 'fixture-alias' }, owner,
       config.replace('[fixture]', '[fixture-alias]'));
     assert.deepEqual(alias.fingerprint, accepted.fingerprint);
+    const relocated = await mkdtemp(join(root, 'relocated-'));
+    const relocatedManifest = join(relocated, 'manifest.json');
+    await writeFile(relocatedManifest, JSON.stringify(JSON.parse(bundle.manifest)), { mode: 0o600 });
+    await writeFile(join(relocated, 'asset-manifest.json'), bundle.assetManifest, { mode: 0o600 });
+    await writeFile(join(relocated, 'source.sql'), bundle.dump, { mode: 0o600 });
+    const copied = await inspectMigration({ ...request, manifest: relocatedManifest }, owner, config);
+    assert.deepEqual(copied.fingerprint, accepted.fingerprint);
+    assert.notEqual(copied.manifestSha256, accepted.manifestSha256);
+
     const noAdmission = () => assert.fail('Changed source admitted its old run');
     const before = accepted.fingerprint.sha256;
     const concurrent = await withMigrationSnapshot(request, owner, config, undefined,
@@ -377,6 +386,13 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
       assert.equal(cursors.open(cursorScope, first.token), '9007199254740994');
       assert.deepEqual((await records.findOne(key)).checkpoint, first);
       assert.equal(await staged.countDocuments({ generationId }), 2);
+      postgres.write(database, "UPDATE public.card SET created_at='2026-02-11 08:09:10.123459' WHERE id=9007199254740993");
+      const frozen = await records.findOne(key);
+      await assert.rejects(run((proof) => batch(proof, first, false)), refuses('source-changed'));
+      assert.deepEqual(await records.findOne(key), frozen);
+      assert.equal(await staged.countDocuments({ generationId }), 2);
+      postgres.write(database, "UPDATE public.card SET created_at='2026-02-11 08:09:10.123456' WHERE id=9007199254740993");
+
       const retry = await run(async (proof) => writeMigrationBatch(lease, db, identity, proof, cursors, null, first,
         async () => assert.fail('Acknowledged batch replayed effects')));
       assert.deepEqual(retry.value, first);
