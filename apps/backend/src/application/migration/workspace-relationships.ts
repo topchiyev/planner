@@ -74,6 +74,13 @@ export async function reserveWorkspaceRelationship(store: ImportRecords, entry: 
   await store.reserve(table, row.id, provenance, order, reference);
 }
 
+async function verifyReservedParent(store: ImportRecords, table: 'label' | 'task_list', sourceId: string, parentSourceId: string) {
+  const match = await store.mapping(table, sourceId);
+  if (match?.reference?.parent !== parentSourceId) {
+    invalidBaseRow('The protected relationship parent does not match the verified source.');
+  }
+}
+
 async function cardBySource(store: ImportRecords, sourceId: string) {
   const card = await store.get('cards', await store.require('card', sourceId));
   if (!card) invalidBaseRow('An owning source card was not staged.');
@@ -177,12 +184,14 @@ export async function writeWorkspaceRelationship(store: ImportRecords, fallback:
       return store.write('cardLabels', id, { ...times, cardId: card.id, labelId: label.id });
     }
     case 'label': {
+      await verifyReservedParent(store, table, row.id, row.board_id);
       const color = labelColorSchema.safeParse(row.color);
       if (!color.success) invalidBaseRow('A source label has an unsupported color.');
       return store.write('labels', id, { ...times, boardId: await store.require('board', row.board_id), rank: requireRank(rank),
         name: row.name === null ? null : sourceName(row.name), color: color.data });
     }
     case 'task_list':
+      await verifyReservedParent(store, table, row.id, row.card_id);
       return store.write('checklists', id, { ...times, cardId: (await cardBySource(store, row.card_id)).id, rank: requireRank(rank),
         name: sourceName(row.name), showOnFront: row.show_on_front_of_card, hideCompleted: row.hide_completed_tasks, orderVersion: 1 });
     case 'task':

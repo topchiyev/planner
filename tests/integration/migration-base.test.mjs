@@ -480,6 +480,16 @@ test('staged relationship reconciliation preserves exact values and fails closed
         'UPDATE public.custom_field_group SET card_id=NULL WHERE id=571', 'exactly one owning scope'],
       ['UPDATE public.custom_field_value SET card_id=9007199254740994 WHERE id=592',
         'UPDATE public.custom_field_value SET card_id=9007199254740993 WHERE id=592', 'incompatible card, group or definition'],
+      [`
+        INSERT INTO public.base_custom_field_group (id, project_id, name) VALUES (562, 201, 'Other template');
+        INSERT INTO public.custom_field (id, base_custom_field_group_id, position, name, show_on_front_of_card)
+          VALUES (582, 562, 1024, 'Other definition', TRUE);
+        UPDATE public.custom_field_value SET custom_field_id=582 WHERE id=592;
+      `, `
+        UPDATE public.custom_field_value SET custom_field_id=581 WHERE id=592;
+        DELETE FROM public.custom_field WHERE id=582;
+        DELETE FROM public.base_custom_field_group WHERE id=562;
+      `, 'incompatible card, group or definition'],
     ];
     for (const [edit, undo, message] of badRows) {
       source.update(edit);
@@ -490,6 +500,13 @@ test('staged relationship reconciliation preserves exact values and fails closed
         assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, activeGenerationId);
       } finally { source.update(undo); }
     }
+
+    const { identity: mismatched } = await runForCurrentSource();
+    await assert.rejects(runStage(source, mismatched, interruptCheckpoint(db, 'base', 'board'), lease, cursors), refuses('target-write'));
+    await db.collection('importIds').updateOne({ generationId: mismatched.generationId, entity: 'task_list', sourceId: '541' },
+      { $set: { 'reference.parent': '9007199254740994' } });
+    await assert.rejects(stage(mismatched, 2), (error) => error?.fault === 'source-read' && error.message.includes('protected relationship parent'));
+    assert.equal(await db.collection('checklists').countDocuments({ generationId: mismatched.generationId }), 0);
 
     const { identity: occupied } = await runForCurrentSource();
     const existingId = randomUUID();
