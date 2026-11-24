@@ -454,9 +454,9 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.goBack();
     await expect(owner).toHaveURL((url) => !url.searchParams.has('view'));
-    await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
-    await owner.goto(origin + href + '?view=grid');
     await expect(view.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
+    await owner.goto(origin + href + '?view=list');
+    await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await main.getByRole('button', { name: 'Board settings', exact: true }).click();
     await expect(settings.getByLabel('Default view')).toHaveValue('grid');
     await expect(settings.getByLabel('Restrict card type')).toHaveValue('story');
