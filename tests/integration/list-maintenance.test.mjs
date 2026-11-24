@@ -133,6 +133,8 @@ test('bulk archive recovers over multiple journal batches with prior placement, 
     await f.insert('cardFollows', fixtureId(7600), { cardId: cards[0].id, userId: ids.viewer, isPermanent: true });
     await f.insert('boardFollows', fixtureId(7601), { boardId, userId: ids.viewer });
     await f.insert('attachments', fixtureId(7602), { cardId: cards[0].id, kind: 'link', url: 'https://example.test/', name: 'Keep reference' });
+    const linked = await f.insert('tasks', fixtureId(7603), { checklistId: ids.checklist, linkedCardId: cards[0].id, completed: false });
+    const linkedBefore = await get(f, 'tasks', linked);
     const body = { archiveListId: archive, sourceOrderVersion: 1, destinationOrderVersion: 1 };
     const path = list(source) + '/archive-cards';
     await response(post(f, viewer, path, 1, body), 403);
@@ -168,6 +170,7 @@ test('bulk archive recovers over multiple journal batches with prior placement, 
     assert.deepEqual((await ranked(f, f.generationId, source)).map(({ id }) => id), []);
     assert.ok(await get(f, 'cardFollows', fixtureId(7600)));
     assert.ok(await get(f, 'attachments', fixtureId(7602)));
+    assert.deepEqual(await get(f, 'tasks', linked), linkedBefore);
     assert.equal(await f.db.collection('activities').countDocuments({ ...f.scope, commandId: prepared.id, kind: 'moveCard' }), cards.length);
     assert.equal(await f.db.collection('notifications').countDocuments(f.scope), 0);
     const events = await f.db.collection('events').find({ ...f.scope, commandId: prepared.id }).toArray();
@@ -235,15 +238,27 @@ test('trash clear confirms the exact list, keeps its roots and protects links ac
     const token = readSessionCookie(owner);
     await assert.rejects(new CommandJournal(f.gate, f.db, f.installationId, journalOptions(f, token, key, undefined, 'mcp')).execute(intent),
       { statusCode: 403 });
-    const interruption = new Error('test interruption after clear effects');
-    const journal = new CommandJournal(f.gate, f.db, f.installationId, journalOptions(f, token, key, (point, index) => {
-      if (point === 'effectApplied' && index === 257) throw interruption;
-    }));
-    await assert.rejects(journal.execute(intent), (error) => error === interruption);
+    const interrupt = (message, checkpoints) => {
+      const error = new Error(message);
+      return { error, journal: new CommandJournal(f.gate, f.db, f.installationId, journalOptions(f, token, key, (point, index) => {
+        if (checkpoints(point, index)) throw error;
+      })) };
+    };
+    const prepare = interrupt('test interruption after clear preparation', (point) => point === 'prepared');
+    await assert.rejects(prepare.journal.execute(intent), (error) => error === prepare.error);
     assert.equal(f.gate.ready, false);
     const prepared = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey: key });
     assert.equal(prepared.status, 'prepared');
     assert.ok(prepared.manifest.length >= 2);
+    assert.equal(await f.db.collection('tasks').countDocuments({ ...f.scope, checklistId: victimChecklist }), 270);
+    const apply = interrupt('test interruption between clear batches', (point, index) => point === 'effectApplied' && index === 257);
+    await assert.rejects(apply.journal.recover(), (error) => error === apply.error);
+    const remaining = await f.db.collection('tasks').countDocuments({ ...f.scope, checklistId: victimChecklist });
+    assert.ok(remaining > 0 && remaining < 270);
+    await response(f.call(card(victim), owner), 503);
+    const commit = interrupt('test interruption after durable clear commit', (point) => point === 'committed');
+    await assert.rejects(commit.journal.recover(), (error) => error === commit.error);
+    assert.equal((await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey: key })).status, 'committed');
     await new CommandJournal(f.gate, f.db, f.installationId).recover();
     const receipt = (await response(post(f, owner, clear, 1, body, key), 200)).data;
     assert.deepEqual(receipt, { trash: { listId: trash, revision: 2, orderVersion: 2 }, clearedCount: 1 });

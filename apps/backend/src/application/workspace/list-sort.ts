@@ -7,10 +7,12 @@ import { RelationshipError } from './relationship-policy.js';
 type SortInput = Pick<RelationshipCommandInput<'lists.sort'>, 'field' | 'direction'>;
 type SortableCard = Pick<WorkspaceRow<'cards'>, 'id' | 'name' | 'dueDate' | 'createdAt' | 'rank'>;
 
+// Canonical caseless matching uses decomposition on each side of the Unicode default fold.
 function foldedName(name: string) {
   let key = '';
   for (const char of name.normalize('NFD')) {
     if (char === 'ı') key += char;
+    // The default mapping preserves dotless I and uses uppercase forms for Cherokee.
     else if (/[\u13a0-\u13ff\uab70-\uabbf]/u.test(char)) key += char.toUpperCase();
     else key += char.toLowerCase().toUpperCase().toLowerCase().replaceAll('ς', 'σ');
   }

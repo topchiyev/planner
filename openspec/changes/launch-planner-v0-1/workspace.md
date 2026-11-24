@@ -27,6 +27,9 @@ Board creation matches the project's revision. Board movement matches the board'
 
 Card creation matches the finite list revision and returns the card, list revision and list card-order version. Card editing accepts an explicit `stopwatchAction` of `start`, `stop` or `reset`. The timer uses command time and writes only when an explicit action changes it. A due date and its completion are independent of card closure. Card cover selection is part of attachment management and requires a validated same-card image reference.
 
+
+Finite list sort and bulk archive match the source list revision and `sourceOrderVersion`. Bulk archive also matches the same board's `archiveListId` and `destinationOrderVersion`. Clear trash matches the trash list revision, `trashListId` and `trashOrderVersion`, and requires `confirmed: true`. These commands return updated list positions and counts. Clear trash is available through the browser API.
+
 ## Workspace and card operations
 
 Prefixes below are relative to `/api/v1`. Compound requests and edits use the field rules in the rows that follow.
