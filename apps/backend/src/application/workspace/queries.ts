@@ -18,7 +18,7 @@ export function textQuery(value: string, fields: string[]) {
 
 export function cardSearch(value: string) {
   const fields = ['name', 'description'];
-  if (!value.startsWith('/') && !value.endsWith('/')) return { ...textQuery(value, fields), bounded: false, valid: true };
+  if (!value.startsWith('/')) return { ...textQuery(value, fields), bounded: false, valid: true };
   const expression = value.slice(1, -1);
   // Only accept constructs shared by RE2 and the server matcher. The server caps each match and query.
   let valid = value.startsWith('/') && value.endsWith('/') && expression.length > 0 && expression.length <= 128
@@ -109,11 +109,11 @@ export const datedOrder = [
   { field: 'createdAt', type: 'instant', direction: -1 }, { field: 'id', type: 'id', direction: -1 },
 ] as const satisfies OrderedField[];
 
-export function readPage(order: readonly OrderedField[], scope: CursorScope, limit: number, cursor?: string) {
+export function readPage(order: readonly OrderedField[], scope: CursorScope, limit: number, cursor?: string, anchor?: PagePosition) {
   const sort = Object.fromEntries(order.map(({ field, direction }) => [field, direction]));
   const stages: Document[] = [];
   if (cursor) {
-    const decoded = pageCursors.decode(scope, cursor);
+    const decoded = anchor ?? pageCursors.decode(scope, cursor);
     if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded) || Object.keys(decoded).length !== order.length) {
       throw new InvalidPageCursor('The page cursor has an invalid position.');
     }

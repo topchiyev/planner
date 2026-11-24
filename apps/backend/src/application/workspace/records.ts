@@ -1,4 +1,4 @@
-import type { Db, Document, Filter, Long, Sort } from 'mongodb';
+import type { AggregateOptions, Db, Document, Filter, Long, Sort } from 'mongodb';
 import type { SessionActor } from '@planner/contracts';
 import { workspaceKey } from '../../storage/identity.js';
 
@@ -62,8 +62,8 @@ export async function together<T extends readonly unknown[] | []>(values: T) {
   const results = await Promise.allSettled(values);
   const failure = results.find((result) => result.status === 'rejected');
   if (failure?.status === 'rejected') throw failure.reason;
-  return results.map((result) => (result as PromiseFulfilledResult<unknown>).value)
-    as { -readonly [Index in keyof T]: Awaited<T[Index]> };
+  const fulfilled = results.map((result) => (result as PromiseFulfilledResult<unknown>).value);
+  return fulfilled as { -readonly [Index in keyof T]: Awaited<T[Index]> };
 }
 
 export function createWorkspaceRecords(database: Db, generationId: string) {
@@ -88,9 +88,11 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
     count<K extends WorkspaceRecordName>(name: K, filter: Document) {
       return collection(name).countDocuments(scoped<K>(filter));
     },
-    aggregate<Result extends Document>(name: WorkspaceRecordName, filter: Document, stages: Document[], maxTimeMS?: number) {
+    aggregate<Result extends Document>(
+      name: WorkspaceRecordName, filter: Document, stages: Document[], options?: Pick<AggregateOptions, 'maxTimeMS'>,
+    ) {
       return database.collection(name).aggregate<Result>([{ $match: { ...filter, generationId } }, ...stages],
-        { promoteLongs: false, ...(maxTimeMS && { maxTimeMS }) }).toArray();
+        { promoteLongs: false, ...options }).toArray();
     },
     lookup(name: WorkspaceRecordName, as: string, variables: Document, filter: Document, tail: Document[] = []): Document {
       return { $lookup: { from: name, as, let: variables, pipeline: [{ $match: { ...filter, generationId } }, ...tail] } };

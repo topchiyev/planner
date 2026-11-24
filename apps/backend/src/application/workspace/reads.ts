@@ -2,6 +2,7 @@ import type { WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document, Long } from 'mongodb';
 import { decodeRank } from '../../storage/identity.js';
+import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
@@ -85,7 +86,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   }
 
   async function fieldGroup(row: WorkspaceRow<'fieldGroups'>, groups = [row.id]) {
-    const definitions = (await records.find('fieldDefinitions', { fieldGroupId: { $in: groups } }, rankSort)).map(fieldDefinition);
+    const definitions = (await records.find('fieldDefinitions', { fieldGroupId: { $in: groups } }, rankSort))
+      .map((definition) => ({ ...fieldDefinition(definition), fieldGroupId: row.id }));
     return { ...ordered(row), name: row.name, scopeType: row.scopeType, scopeId: row.scopeId, definitions };
   }
 
@@ -134,14 +136,33 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     }
   }
 
+  async function alphabeticalAnchor(scope: CursorScope, cursor: string): Promise<PagePosition> {
+    // Store only the ID in the cursor so an imported name can exceed the cursor size.
+    const decoded = pageCursors.decode(scope, cursor);
+    const id = decoded && typeof decoded === 'object' && !Array.isArray(decoded) && Object.keys(decoded).length === 1
+      ? publicIdSchema.safeParse((decoded as { id?: unknown }).id) : undefined;
+    if (!id?.success) throw new InvalidPageCursor('The page cursor has an invalid position.');
+    try {
+      const { project } = await access.requireProject(id.data);
+      return { id: project.id, name: project.name };
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError && error.statusCode === 404) {
+        throw new InvalidPageCursor('The page cursor no longer applies.');
+      }
+      throw error;
+    }
+  }
+
   return {
     async projectsList(input: WorkspaceReadInput<'projectsList'>) {
       const search = textQuery(input.q, ['name', 'description']);
-      const order = input.order === 'alphabetically' ? [
+      const alphabetical = input.order === 'alphabetically';
+      const order = alphabetical ? [
         { field: 'name', type: 'name', direction: 1 }, { field: 'id', type: 'id', direction: 1 },
       ] as const : input.order === 'byCreationTime' ? datedOrder : rankedOrder;
       const scope = cursorScope('projects.list', input.order, [search.binding, input.hidden, String(input.favorite), String(input.limit)]);
-      const pagination = readPage(order, scope, input.limit, input.cursor);
+      const anchor = alphabetical && input.cursor ? await alphabeticalAnchor(scope, input.cursor) : undefined;
+      const pagination = readPage(order, scope, input.limit, input.cursor, anchor);
       const stages = access.visibleProjectStages();
       if (input.favorite) {
         stages.push(records.lookup('projectFavorites', 'actorFavorite', { projectId: '$id' }, {
@@ -152,7 +173,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const rows = await records.aggregate<WorkspaceRow<'projects'>>('projects', hidden,
         [...stages, { $match: search.filter }, ...pagination.stages]);
       const { selected, page } = pagination.result(rows, (row): PagePosition => {
-        if (input.order === 'alphabetically') return { name: row.name, id: row.id };
+        if (alphabetical) return { id: row.id };
         if (input.order === 'byCreationTime') return { createdAt: iso(row.createdAt), id: row.id };
         return { rank: rank(row.rank), id: row.id };
       });
@@ -232,7 +253,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       try {
         rows = await records.aggregate('cards', filter,
           [...cardPlacementStages(records, input.id, input.context), { $match: search.filter }, ...filters, ...pagination.stages],
-          search.bounded ? 350 : undefined);
+          search.bounded ? { maxTimeMS: 350 } : undefined);
       } catch (error) {
         if (search.bounded && rejectedPattern(error)) return invalid;
         throw error;
