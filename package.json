@@ -20,7 +20,9 @@
     "typecheck": "npm run typecheck --workspaces",
     "verify": "npm run typecheck && npm run build && npm run test:health",
     "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify",
-    "test:health": "node --import tsx --test tests/health.test.mjs"
+    "test:health": "node --import tsx --test tests/health.test.mjs",
+    "dev": "npm run build --workspace @planner/contracts && npm run dev --workspace @planner/web",
+    "test:shell": "node --test tests/shell.test.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",

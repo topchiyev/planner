@@ -1,0 +1,65 @@
+import { PLANNER_VERSION } from '@planner/contracts';
+import { useRef, useState } from 'react';
+import { NavLink, Outlet, useLocation, useNavigation } from 'react-router';
+
+export function AppShell() {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const sidebarToggle = useRef<HTMLButtonElement>(null);
+  const { pathname } = useLocation();
+  const navigation = useNavigation();
+
+  function closeSidebar() {
+    setSidebarOpen(false);
+    sidebarToggle.current?.focus();
+  }
+
+  return (
+    <div className="app-shell" data-version={PLANNER_VERSION}>
+      <a className="skip-link" href="#main-content">Skip to content</a>
+      <header className="mobile-header">
+        <button
+          aria-controls="project-sidebar"
+          aria-expanded={sidebarOpen}
+          className="menu-toggle"
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          ref={sidebarToggle}
+          type="button"
+        >
+          <span className="menu-icon" aria-hidden="true" />
+          Menu
+        </button>
+        <span className="mobile-brand">Planner</span>
+      </header>
+      <aside className="project-sidebar" data-open={sidebarOpen} id="project-sidebar">
+        <div className="sidebar-brand">
+          <span className="brand-mark" aria-hidden="true" />
+          Planner
+        </div>
+        <nav
+          aria-label="Project navigation"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' && sidebarOpen) closeSidebar();
+          }}
+        >
+          <NavLink
+            className="workspace-link"
+            end
+            onClick={() => {
+              if (pathname === '/workspace' && sidebarOpen) closeSidebar();
+              else setSidebarOpen(false);
+            }}
+            to="/workspace"
+          >
+            <span className="projects-icon" aria-hidden="true" />
+            Projects
+          </NavLink>
+        </nav>
+        <span className="sidebar-version">Version {PLANNER_VERSION}</span>
+      </aside>
+      <main className="main-content" id="main-content" tabIndex={-1}>
+        {navigation.state !== 'idle' && <p className="navigation-status" role="status">Loading…</p>}
+        <Outlet />
+      </main>
+    </div>
+  );
+}

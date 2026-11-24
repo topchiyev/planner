@@ -24,3 +24,11 @@ When updating dependencies, change their exact pins in the owning workspace mani
 After `npm run build`, run `npm run test:health`. The checks start the compiled server on a temporary loopback port and exercise the injected readiness states in Fastify. They also build the browser health decoder with Vite and parse the real server responses through it. `npm run verify` includes these checks.
 
 The compiled server binds to `127.0.0.1:27430` by default. For an isolated process check, run `PLANNER_HTTP_PORT=0 node apps/server/dist/main.js` and use the loopback address printed on startup. `/health/live` responds with HTTP 200. `/health/ready` returns HTTP 503 until a storage and recovery readiness probe is wired into the main process. Both responses contain `status`, `version`, and a server-generated `requestId`. Send SIGINT or SIGTERM to stop the process.
+
+## Run the workspace shell
+
+For the built shell, run `npm run build`, then start `node apps/server/dist/main.js`. The compiled server resolves its browser assets from the built application layout, so the launch command can also use an absolute entry path from another working directory. Browse to the loopback address printed on startup.
+
+For development, start the compiled backend and run `npm run dev` in a separate terminal. Vite serves the browser and proxies the `/api` and `/health` path segments to `127.0.0.1:27430`. If the owned backend uses a different port, set `PLANNER_PROXY_PORT` to its bound port before starting Vite.
+
+After building, run `npm run test:shell` to check compiled deep links, asset headers, keyboard focus, loading and retry, and the same-origin Vite proxy. The tests use Chromium and temporary loopback ports. Install the matching Playwright browser and system dependencies with `npx playwright install --with-deps chromium` when needed.
