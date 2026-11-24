@@ -8,7 +8,7 @@ import { Long } from 'mongodb';
 export { randomUUID as newPublicId };
 export const signedLongFields = ['rank', 'historySequence', 'recoverySequence', 'sequence'] as const;
 export const storedInstantFields = [
-  'createdAt', 'updatedAt', 'dueDate', 'listChangedAt', 'issuedAt', 'expiresAt', 'consumedAt', 'revokedAt', 'readAt',
+  'createdAt', 'updatedAt', 'deletedAt', 'dueDate', 'listChangedAt', 'issuedAt', 'expiresAt', 'consumedAt', 'revokedAt', 'readAt',
 ] as const;
 
 export function legacyPublicId(sourceInstanceId: string, entity: string, sourceId: string) {

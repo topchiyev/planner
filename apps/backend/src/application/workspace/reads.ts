@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { WorkspaceReadInput } from '@planner/contracts';
+import { safeMediaLink, type WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document, Long } from 'mongodb';
 import { decodeRank, readStoredInstant } from '../../storage/identity.js';
@@ -8,6 +8,7 @@ import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type Ca
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
+import { availableMedia, unavailableMedia } from '../media/records.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
 import { projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
 
@@ -25,14 +26,6 @@ const boardDto = ({ board, permissions }: BoardAccessContext) => ({ ...ordered(b
 function cardDto(card: WorkspaceRow<'cards'>, board: BoardAccessContext, list: WorkspaceRow<'lists'>) {
   return { ...ordered(card), boardId: board.board.id, listId: list.id, name: card.name, type: card.type, kind: card.kind,
     closed: card.closed ?? list.kind === 'closed', dueDate: iso(readStoredInstant(card.dueDate ?? null, 'dueDate')), permissions: cardPermissions(board, list) };
-}
-
-function inertLink(raw?: string | null) {
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
-  } catch { return null; }
 }
 
 const fieldDefinition = (row: WorkspaceRow<'fieldDefinitions'>) => ({
@@ -74,15 +67,18 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     return (await records.find('users', { id: { $in: ids }, $expr: canonical }, { id: 1 })).map(person);
   }
 
-  async function blobAvailable(blobDigest?: string | null) {
-    return !!blobDigest && !!await records.first('blobs', { digest: blobDigest, lifecycleState: 'available' });
+  async function blobAvailable(blobDigest?: string | null, image = false) {
+    return !!blobDigest && !!await records.first('blobs', {
+      digest: blobDigest, lifecycleState: availableMedia,
+      ...(image && { 'variants.small.digest': { $type: 'string' }, 'variants.large.digest': { $type: 'string' } }),
+    });
   }
 
   async function attachment(row: WorkspaceRow<'attachments'>) {
-    const url = row.kind === 'link' ? inertLink(row.url) : null;
+    const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
     return {
       ...entity(row), name: row.name, cardId: row.cardId, kind: row.kind,
-      available: row.kind === 'link' ? !!url : await blobAvailable(row.blobDigest), byteLength: row.byteLength ?? null, url,
+      available: row.kind === 'link' ? !!url : row.availability === availableMedia && await blobAvailable(row.blobDigest), byteLength: row.byteLength ?? null, url,
     };
   }
 
@@ -200,7 +196,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         records.find('fieldGroups', { scopeType: 'project', scopeId: id }, rankSort),
       ]);
       const allowedBackgrounds = await together(backgrounds.map(async (background) =>
-        (background.kind === 'preset' || await blobAvailable(background.blobDigest))
+        (background.kind === 'preset' || (background.availability === availableMedia && await blobAvailable(background.blobDigest)))
           ? { ...entity(background), name: background.name } : null));
       return { data: { ...summary, description, boards, managers: await visiblePeople(managerRows.map(({ userId }) => userId)),
         backgrounds: allowedBackgrounds.filter((background) => background !== null), fieldTemplates: await together(templates.map((row) => fieldGroup(row))) } };
@@ -279,15 +275,18 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const boardId = board.board.id;
       const [links, assignments, attachments, previousListId, fields] = await together([
         records.find('cardLabels', { cardId: id }), records.find('cardAssignees', { cardId: id }),
-        records.find('attachments', { cardId: id, kind: { $in: ['file', 'link'] } }, { createdAt: 1, id: 1 }),
+        records.find('attachments', { cardId: id, deletedAt: null, kind: { $in: ['file', 'link'] } }, { createdAt: 1, id: 1 }),
         previousList(context), cardFields(context),
       ]);
       const labels = await records.find('labels', { boardId, id: { $in: links.map(({ labelId }) => labelId) } }, rankSort);
       const members = await records.find('boardMembers', { boardId, userId: { $in: assignments.map(({ userId }) => userId) },
         $expr: directBoardRole });
-      const coverAttachmentId = attachments.some((item) => item.id === card.coverAttachmentId && item.kind === 'file') ? card.coverAttachmentId! : null;
+      const visibleAttachments = await together(attachments.map(attachment));
+      const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file');
+      const coverAttachmentId = cover && (cover.availability === unavailableMedia
+        || (cover.availability === availableMedia && await blobAvailable(cover.blobDigest, true))) ? cover.id : null;
       return { data: { ...cardDto(card, board, list), description: card.description ?? null, previousListId, labels: labels.map(labelDto),
-        assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: await together(attachments.map(attachment)),
+        assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: visibleAttachments,
         coverAttachmentId, ...fields } };
     },
 
