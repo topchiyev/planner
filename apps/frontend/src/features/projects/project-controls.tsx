@@ -30,7 +30,7 @@ export function useWorkspaceMutation(errors: ReadonlyMap<string, string>, change
   }, []);
   return {
     busy, problem, clearProblem: () => setProblem(''), actorId: session?.account.id,
-    run: async <T,>(input: readonly unknown[], execute: (csrf: string, key: string) => Promise<T>, done?: (result: T) => void, refresh = true) => {
+    run: async <T,>(input: readonly unknown[], execute: (csrf: string, key: string) => Promise<T>, done?: (result: T) => void | Promise<void>, refresh = true) => {
       if (!session || pending.current) return;
       pending.current = true;
       setBusy(true);
@@ -41,7 +41,7 @@ export function useWorkspaceMutation(errors: ReadonlyMap<string, string>, change
         const result = await execute(session.csrfToken, attempt.current.key);
         attempt.current = null;
         if (!mounted.current) return;
-        done?.(result);
+        await done?.(result);
         if (refresh) await revalidator.revalidate();
       } catch (error) {
         if (!mounted.current) return;

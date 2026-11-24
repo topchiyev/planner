@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { useRevalidator } from 'react-router';
 import { type WorkspaceReadOutput } from '@planner/contracts';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog } from '../projects/project-controls.js';
@@ -94,7 +95,7 @@ function BoardDeleteDialog({ workspace, close }: { workspace: BoardWorkspace; cl
     if (name !== board.name) return;
     void action.run(['boards.delete', board.id, board.revision, name], (csrf, key) =>
       relationshipCommand('boards.delete', csrf, key, { id: board.id, revision: board.revision, body: { name } }),
-    () => void returnFromBoard(project.id), false);
+    () => returnFromBoard(project.id), false);
   }
 
   return <WorkspaceDialog title="Delete board" onClose={close} busy={action.busy}>
@@ -109,6 +110,7 @@ function BoardDeleteDialog({ workspace, close }: { workspace: BoardWorkspace; cl
 
 function BoardLeaveDialog({ workspace, close }: { workspace: BoardWorkspace; close: () => void }) {
   const { board, project, selfMembership } = workspace;
+  const revalidator = useRevalidator();
   const action = useBoardMutation();
   const returnFromBoard = useReturnFromBoard();
 
@@ -125,10 +127,12 @@ function BoardLeaveDialog({ workspace, close }: { workspace: BoardWorkspace; clo
         if (error instanceof WorkspaceRequestError && error.status === 404) return false;
         throw error;
       }
-    }, (retained) => {
-      if (retained) close();
-      else void returnFromBoard(project.id);
-    });
+    }, async (retained) => {
+      if (retained) {
+        close();
+        await revalidator.revalidate();
+      } else await returnFromBoard(project.id);
+    }, false);
   }
 
   return <WorkspaceDialog title="Leave board" onClose={close} busy={action.busy}>
