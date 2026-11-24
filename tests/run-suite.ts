@@ -16,7 +16,7 @@ const suites = new Map<string, Step[]>([
   ['unit', [buildContracts, unit]],
   ['health', [health]],
   ['shell', [shell]],
-  ['e2e', [build, shell]],
+  ['e2e', [build, tests('tests/shell.test.mjs', 'tests/account-browser.test.mjs')]],
   ['integration', [build, tests('tests/health.test.mjs', 'tests/integration/**/*.test.{ts,mjs}')]],
   ['verify', verify],
   ['verify:clean', [npm('ci', '--strict-peer-deps'), npm('ls', '--all'), ...verify]],

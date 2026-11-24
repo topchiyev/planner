@@ -39,7 +39,7 @@ After building, run `npm run test:shell` to check compiled deep links, asset hea
 | --- | --- |
 | `npm test` | Node and `tsx` unit tests for the shared contracts, synthetic workspace and database preflight. |
 | `npm run test:integration` | Builds the application, runs the compiled health tests, and discovers `.test.ts` and `.test.mjs` files under `tests/integration/`. |
-| `npm run test:e2e` | Builds the application and runs the pinned Playwright Chromium shell suite at 1440×900 and 390×844, with separate production and Vite development listeners. |
+| `npm run test:e2e` | Builds the application and runs the shell and account workflow tests in Chromium. The account workflow also uses OpenSSL and an isolated authenticated MongoDB fixture. |
 | `npm run verify` | Runs typechecking, the unit suite, the build and the health tests. |
 | `npm run verify:clean` | Performs a strict lockfile install and peer check before `npm run verify`. |
 
