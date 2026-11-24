@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@fastify/busboy": "3.2.6",
     "@fastify/static": "10.1.12",
     "@modelcontextprotocol/fastify": "2.0.1",
     "@modelcontextprotocol/node": "2.1.2",
