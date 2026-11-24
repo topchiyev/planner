@@ -188,7 +188,7 @@ test('populated board deletion recovers across batches and redacts surviving lin
     });
     await f.db.collection('tasks').insertMany(batch);
     const extraTask = fixtureId(7108);
-    await f.insert('tasks', extraTask, { checklistId: ids.checklist, linkedCardId: linked, completed: true, rank: '2048' });
+    await f.insert('tasks', extraTask, { checklistId: ids.checklist, linkedCardId: linked, name: 'Cross-board linked target', completed: true, rank: '2048' });
     const historicalActivity = await f.insert('activities', fixtureId(7109), { boardId: target, cardId: ids.activeCard });
     const historicalNotice = await f.insert('notifications', fixtureId(7110), { boardId: target, cardId: ids.activeCard, recipientId: ids.firstEditor });
     await response(mutate(f, siteAdmin, 'DELETE', board(target), 1, { name }), 403);
@@ -240,7 +240,8 @@ test('populated board deletion recovers across batches and redacts surviving lin
     for (const id of [ids.linkedTask, extraTask]) {
       const unavailable = await f.db.collection('tasks').findOne({ ...f.scope, id });
       assert.deepEqual(unavailable.linkedUnavailableProvenance, { id: linked, name: 'Cross-board linked target', completed: true });
-      assert.deepEqual([unavailable.linkedCardId, unavailable.linkedUnavailable, unavailable.completed, unavailable.revision], [null, true, null, 2]);
+      assert.deepEqual([unavailable.linkedCardId, unavailable.linkedUnavailable, unavailable.name, unavailable.completed, unavailable.revision],
+        [null, true, null, null, 2]);
     }
     const stored = await openActiveWorkspace(f.db, f.installationId);
     assert.equal(Object.hasOwn(await stored.read('tasks', ids.linkedTask), 'linkedUnavailableProvenance'), false);

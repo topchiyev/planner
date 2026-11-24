@@ -100,7 +100,7 @@ export async function planBoardDescendants(records: WorkspaceRecords, generation
 
     const revision = requireRevision(task, task.revision, true);
     effects.push({ kind: 'update', collection: 'tasks', id: task.id, revision, fields: {
-      linkedCardId: null, linkedUnavailable: true, completed: null, updatedAt: timestamp,
+      linkedCardId: null, linkedUnavailable: true, name: null, completed: null, updatedAt: timestamp,
       linkedUnavailableProvenance: {
         id: target.id, name: Array.from(target.name).slice(0, 512).join(''),
         completed: target.closed ?? targetLists.get(target.listId)?.kind === 'closed',
