@@ -32,12 +32,14 @@ export interface CommandRecord {
   recoverySequence?: Long;
   status: 'building' | 'prepared' | 'committed';
   applied?: number;
+  lastAppliedEffectId?: string | null;
   pendingDelete?: string;
   manifest?: BatchSummary[];
   result?: string;
   resultHash?: string;
   eventCount?: number;
   delivered?: number;
+  lastDeliveredEventId?: string | null;
   outboxPending?: boolean;
   committedAt?: Date;
 }
@@ -68,8 +70,8 @@ export function checkCommand(command: CommandRecord) {
     throw new CommandRecoveryError('A command journal identity is invalid.');
   }
   if (status === 'building') {
-    if ([command.applied, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
-      command.eventCount, command.delivered, command.outboxPending, command.recoverySequence]
+    if ([command.applied, command.lastAppliedEffectId, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
+      command.eventCount, command.delivered, command.lastDeliveredEventId, command.outboxPending, command.recoverySequence]
       .some((value) => value !== undefined)) throw new CommandRecoveryError('A building command has active effects.');
     return;
   }
@@ -87,7 +89,8 @@ export function checkCommand(command: CommandRecord) {
     }
     return sum + item.count;
   }, 0);
-  if (command.applied! > total || (status === 'committed' && (command.applied !== total || command.pendingDelete !== undefined))) {
+  if (command.applied! > total || (command.applied === 0 ? command.lastAppliedEffectId !== null
+      : !publicIdSchema.safeParse(command.lastAppliedEffectId).success) || (status === 'committed' && (command.applied !== total || command.pendingDelete !== undefined))) {
     throw new CommandRecoveryError('The command journal cursor is invalid.');
   }
   checkOutboxCursor(command);
@@ -97,9 +100,10 @@ export function checkCommand(command: CommandRecord) {
   readJournalResult(command);
 }
 
-export function checkOutboxCursor(command: Pick<CommandRecord, 'eventCount' | 'delivered' | 'outboxPending'>) {
-  if (!Number.isSafeInteger(command.eventCount) || command.eventCount! < 0
+export function checkOutboxCursor(command: Pick<CommandRecord, 'id' | 'eventCount' | 'delivered' | 'lastDeliveredEventId' | 'outboxPending'>) {
+  if (!publicIdSchema.safeParse(command.id).success || !Number.isSafeInteger(command.eventCount) || command.eventCount! < 0
       || !Number.isSafeInteger(command.delivered) || command.delivered! < 0 || command.delivered! > command.eventCount!
+      || command.lastDeliveredEventId !== (command.delivered === 0 ? null : commandUuid(command.id, ['event', String(command.delivered! - 1)]))
       || command.outboxPending !== (command.delivered! < command.eventCount!)) {
     throw new CommandRecoveryError('The command outbox cursor is invalid.');
   }

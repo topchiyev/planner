@@ -13,6 +13,7 @@ import { createWorkspaceAccess } from '../../apps/backend/dist/application/comma
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { canonicalJournalData, commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
 import { maximumBatchBytes, packBatches } from '../../apps/backend/dist/application/command-journal/records.js';
+import { keepCommandRecovery } from '../../apps/backend/dist/native/command-recovery.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace } from '../../apps/backend/dist/storage/scoped.js';
@@ -159,6 +160,74 @@ for (const [phase, index] of [['beforeIntent'], ['batchStored', 0], ['prepared']
   });
 }
 
+test('a rebuilt intent publishes after commands that prepared first', { timeout: 55_000 }, async () => {
+  await withFixtureMongo(async (fixture) => {
+    const { db } = fixture;
+    const ownerDirectory = await seed(fixture);
+    await killAt(fixture, ownerDirectory, 'batchStored', 0);
+    const building = await db.collection('commands').findOne(byGeneration);
+    assert.equal(building.status, 'building');
+    assert.equal(building.recoverySequence, undefined);
+    const emit = {
+      ...operations['projects.transfer'],
+      plan() {
+        return { effects: [], result: null,
+          audit: { resourceId: leftId, resourceType: 'project', action: 'projects.announce' },
+          events: [{ boardId, kind: 'board.announced', payload: null }] };
+      },
+    };
+    const { gate, journal } = open(db, ownerDirectory, { operations: { ...operations, 'projects.announce': emit } });
+    try {
+      await journal.recover();
+      await journal.execute({ ...request, operationId: 'projects.announce' });
+      await journal.execute(request);
+      const signals = [];
+      await journal.deliverPending((signal) => { signals.push(signal); });
+      assert.deepEqual(signals.map(({ boardId, sequence }) => [boardId, sequence]),
+        [[boardId, '1'], [boardId, '2'], [boardId, '3']]);
+      assert.equal((await db.collection('commands').findOne({ _id: building._id })).recoverySequence, 2);
+    } finally { await gate.closeAndDrain(); }
+  });
+});
+
+test('a live recovery worker replays transient failure under the retained writer lease', { timeout: 55_000 }, async () => {
+  await withFixtureMongo(async (fixture) => {
+    const { db } = fixture;
+    const ownerDirectory = await seed(fixture);
+    const { gate, journal } = open(db, ownerDirectory, {
+      checkpoint(phase, step) {
+        if (phase === 'effectApplied' && step === 0) throw new Error('Temporary interruption after the first write.');
+      },
+    });
+    let unblock;
+    let attempts = 0;
+    const held = new Promise((resolve) => { unblock = resolve; });
+    const recovery = new CommandJournal(gate, db, installationId);
+    const stop = keepCommandRecovery(gate, async (running) => {
+      attempts += 1;
+      if (attempts === 2) await held;
+      if (running()) await recovery.recover();
+    });
+    async function waitForOpen() {
+      const deadline = Date.now() + 8_000;
+      while (!gate.ready && Date.now() < deadline) await delay(25);
+      assert.equal(gate.ready, true);
+    }
+    try {
+      await waitForOpen();
+      await assert.rejects(journal.execute(request), /Temporary interruption/u);
+      assert.equal(gate.state, 'maintenance');
+      await assert.rejects(gate.readSnapshot(() => 'blocked'), GateUnavailableError);
+      assert.equal(await rawBalance(db, leftId), 7);
+      assert.equal(await rawBalance(db, rightId), 0);
+      unblock();
+      await waitForOpen();
+      await assertApplied(db);
+      assert.equal(await db.collection('commands').countDocuments(byGeneration), 1);
+    } finally { unblock(); stop(); await gate.closeAndDrain(); }
+  });
+});
+
 test('a concurrent reader never sees half of a transfer, and replay checks current access first', { timeout: 40_000 }, async () => {
   await withFixtureMongo(async (fixture) => {
     const ownerDirectory = await seed(fixture);
@@ -204,22 +273,29 @@ test('a concurrent reader never sees half of a transfer, and replay checks curre
   });
 });
 
-for (const fault of ['batch digest', 'prepared event count', 'missing deletion target', 'missing outbox event',
-  'false outbox marker', 'missing outbox marker']) {
+for (const fault of ['batch digest', 'prepared event count', 'advanced applied cursor', 'wrong applied effect', 'missing deletion target', 'missing outbox event',
+  'false outbox marker', 'missing outbox marker', 'advanced delivery cursor', 'wrong delivered event']) {
   test(`recovery closes the gate for a ${fault}`, { timeout: 45_000 }, async () => {
     await withFixtureMongo(async (fixture) => {
       const ownerDirectory = await seed(fixture);
       const { db } = fixture;
-      const prepared = fault === 'batch digest' || fault === 'prepared event count' || fault === 'missing deletion target';
+      const prepared = ['batch digest', 'prepared event count', 'advanced applied cursor',
+        'wrong applied effect', 'missing deletion target'].includes(fault);
       await killAt(fixture, ownerDirectory, prepared ? 'prepared' : 'committed');
       if (fault === 'batch digest') {
         await db.collection('commandEffectBatches').updateOne(byGeneration, { $set: { payload: '[]' } });
       } else if (fault === 'prepared event count') {
         await db.collection('commands').updateOne(byGeneration, { $set: { eventCount: 0, delivered: 0, outboxPending: false } });
+      } else if (fault === 'advanced applied cursor' || fault === 'wrong applied effect') {
+        await db.collection('commands').updateOne(byGeneration, { $set: { applied: 1,
+          ...(fault === 'wrong applied effect' && { lastAppliedEffectId: actorId }) } });
       } else if (fault === 'missing deletion target') {
         await db.collection('boardMembers').deleteOne(byGeneration);
       } else if (fault === 'missing outbox event') {
         await db.collection('events').deleteOne(byGeneration);
+      } else if (fault === 'advanced delivery cursor' || fault === 'wrong delivered event') {
+        await db.collection('commands').updateOne(byGeneration, { $set: { delivered: 1,
+          ...(fault === 'wrong delivered event' && { lastDeliveredEventId: actorId }) } });
       } else {
         await db.collection('commands').updateOne(byGeneration, fault === 'false outbox marker'
           ? { $set: { outboxPending: false } } : { $unset: { outboxPending: '' } });
@@ -234,7 +310,7 @@ for (const fault of ['batch digest', 'prepared event count', 'missing deletion t
           assert.equal((await db.collection('commands').findOne(byGeneration)).status, 'prepared');
           assert.equal(await db.collection('auditEntries').countDocuments(byGeneration), 0);
         }
-        if (fault === 'prepared event count') {
+        if (['prepared event count', 'advanced applied cursor', 'wrong applied effect'].includes(fault)) {
           assert.equal(await rawBalance(db, leftId), 10);
           assert.equal(await db.collection('events').countDocuments(byGeneration), 0);
         }
