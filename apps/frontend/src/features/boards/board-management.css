@@ -37,7 +37,6 @@
 .board-membership-controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
 .board-membership-label { display: grid; gap: .2rem; }
 .board-membership-label select { min-height: 2rem; font: inherit; }
-.board-confirm-name { overflow-wrap: anywhere; }
 @media (max-width: 32rem) {
   .board-create { grid-template-columns: minmax(0, 1fr); }
 }

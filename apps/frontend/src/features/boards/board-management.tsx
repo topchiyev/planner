@@ -3,6 +3,7 @@ import { useRevalidator } from 'react-router';
 import { type WorkspaceReadOutput } from '@planner/contracts';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog } from '../projects/project-controls.js';
+import { ConfirmResourceName, resourceNameConfirmation } from '../workspace/confirm-resource-name.js';
 import { readWorkspace, WorkspaceRequestError } from '../workspace/workspace-api.js';
 import { useBoardMutation, useReturnFromBoard } from './board-actions.js';
 import { BoardMembersDialog } from './board-members.js';
@@ -86,13 +87,15 @@ function BoardSettingsDialog({ workspace, close }: { workspace: BoardWorkspace; 
 
 function BoardDeleteDialog({ workspace, close }: { workspace: BoardWorkspace; close: () => void }) {
   const { board, project } = workspace;
-  const [name, setName] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const { name } = board;
+  const confirmed = confirmation === resourceNameConfirmation(name);
   const action = useBoardMutation();
   const returnFromBoard = useReturnFromBoard();
 
   function remove(event: FormEvent) {
     event.preventDefault();
-    if (name !== board.name) return;
+    if (!confirmed) return;
     void action.run(['boards.delete', board.id, board.revision, name], (csrf, key) =>
       relationshipCommand('boards.delete', csrf, key, { id: board.id, revision: board.revision, body: { name } }),
     () => returnFromBoard(project.id), false);
@@ -101,9 +104,8 @@ function BoardDeleteDialog({ workspace, close }: { workspace: BoardWorkspace; cl
   return <WorkspaceDialog title="Delete board" onClose={close} busy={action.busy}>
     {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
     <form className="project-form" onSubmit={remove}>
-      <p className="board-confirm-name">Type <strong>{board.name}</strong> to permanently delete this board and its contents.</p>
-      <label>Exact board name<input autoComplete="off" value={name} onChange={(event) => setName(event.target.value)} required /></label>
-      <button className="workspace-button workspace-button-danger" disabled={action.busy || name !== board.name} type="submit">Permanently delete board</button>
+      <ConfirmResourceName resource="board" name={name} value={confirmation} onChange={setConfirmation} />
+      <button className="workspace-button workspace-button-danger" disabled={action.busy || !confirmed} type="submit">Permanently delete board</button>
     </form>
   </WorkspaceDialog>;
 }

@@ -469,7 +469,7 @@ test('desktop manager creates, keyboard reorders and configures a board without 
 });
 
 test('narrow board membership grants only selected access, handles leaving and deletes with exact confirmation', { timeout: 120_000 }, async () => {
-  await workspaceBrowser(async ({ origin, page }) => {
+  await workspaceBrowser(async ({ fixture: f, origin, page }) => {
     const owner = await page({ width: 390, height: 844 });
     const viewer = await page({ width: 390, height: 844 });
     await signIn(owner, origin, 'private-owner');
@@ -514,15 +514,27 @@ test('narrow board membership grants only selected access, handles leaving and d
     await owner.getByRole('button', { name: 'Confirm leave' }).click();
     await expect(owner.getByRole('button', { name: 'Leave board' })).toHaveCount(0);
     await expect(owner.getByRole('button', { name: 'Board settings' })).toBeVisible();
+    const boardId = href.split('/').at(-1);
+    const raw = '  Shift handoff\r\nEvening  ';
+    const displayed = String.raw`"\u0020\u0020Shift\u0020handoff\r\nEvening\u0020\u0020"`;
+    await f.gate.runCommand(() => f.db.collection('boards').updateOne({ ...f.scope, id: boardId },
+      { $set: { name: raw }, $inc: { revision: 1 } }));
+    await owner.reload();
+    await expect(owner.getByRole('heading', { name: 'Shift handoff Evening' })).toBeVisible();
     await owner.getByRole('button', { name: 'Delete board', exact: true }).click();
     const confirmation = owner.getByRole('dialog', { name: 'Delete board' });
     const deleteBoard = confirmation.getByRole('button', { name: 'Permanently delete board' });
-    await confirmation.getByLabel('Exact board name').fill('shift handoff');
+    await expect(confirmation.locator('code')).toHaveText(displayed);
+    const exactName = confirmation.getByLabel('Confirm board name');
+    await exactName.fill('Shift handoff');
     await expect(deleteBoard).toBeDisabled();
-    await confirmation.getByLabel('Exact board name').fill('Shift handoff');
+    await exactName.fill(displayed);
+    const request = owner.waitForRequest((request) => request.method() === 'DELETE' && request.url().endsWith('/api/v1' + href));
     await deleteBoard.click();
+    assert.equal((await request).postDataJSON().name, raw);
     await expect(owner).toHaveURL(origin + project(ids.privateProject));
     await expect(main.getByRole('link', { name: 'Shift handoff' })).toHaveCount(0);
+    assert.equal(await f.db.collection('boards').findOne({ ...f.scope, id: boardId }), null);
     assert.ok(await main.evaluate((element) => element.scrollWidth <= element.clientWidth));
   });
 });
