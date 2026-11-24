@@ -45,7 +45,12 @@ export function registerFrontendShell(app: FastifyInstance, frontendRoot: string
         '<!doctype html><html lang="en"><meta charset="utf-8"><title>Multi-factor enrollment · Planner</title><h1>Multi-factor enrollment</h1></html>',
       ));
     }
-    for (const route of shellRoutes.flatMap((path) => [path, `${path}/`])) {
+    if (browserAuth) frontend.get('/account-recovery', (_request, reply) => {
+      reply.header('Referrer-Policy', 'no-referrer');
+      return sendShell(reply);
+    });
+    const accounts = browserAuth ? ['/settings', '/admin/accounts'] : [];
+    for (const route of [...shellRoutes, ...accounts].flatMap((path) => [path, `${path}/`])) {
       frontend.get<{ Params: Record<string, string> }>(route, (request, reply) => {
         if (Object.values(request.params).some((id) => id.length === 0)) {
           return reply.callNotFound();

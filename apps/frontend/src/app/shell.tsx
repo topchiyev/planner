@@ -76,6 +76,10 @@ export function AppShell() {
         {session && (
           <div className="sidebar-account">
             <span>{session.account.name}</span>
+            <NavLink onClick={() => setSidebarOpen(false)} to="/settings">Account settings</NavLink>
+            {session.account.role !== 'boardUser' && <NavLink onClick={() => setSidebarOpen(false)} to="/admin/accounts">
+              {session.account.role === 'admin' ? 'Manage accounts' : 'Account directory'}
+            </NavLink>}
             <button disabled={signingOut} onClick={() => void signOut()} type="button">Sign out</button>
             {signOutError && <p role="alert">Couldn’t sign out. Try again.</p>}
           </div>

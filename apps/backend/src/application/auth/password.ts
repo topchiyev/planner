@@ -1,5 +1,6 @@
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { passwordSchema } from '@planner/contracts';
+import { CleanCommandRejection } from '../command-gate/gate.js';
 
 const parameters = { N: 131072, r: 8, p: 1, maxmem: 160 * 1024 * 1024 };
 const keyLength = 32;
@@ -18,7 +19,7 @@ export function isPasswordVerifier(value: unknown): value is PasswordVerifier {
     && typeof verifier.key === 'string' && /^[0-9a-f]{64}$/u.test(verifier.key);
 }
 
-export class HashCapacityError extends Error {
+export class HashCapacityError extends CleanCommandRejection {
   constructor() { super('Password verification is busy.'); }
 }
 

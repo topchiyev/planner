@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
 import { registerFrontendShell } from './frontend-shell.js';
+import { registerAccountRoutes } from './native/account-routes.js';
 import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-auth.js';
 import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
 
@@ -20,7 +21,10 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
   const transport = native ?? transportFixture;
   app.decorateRequest('plannerConnection', null);
   if (transport) registerNativeHttpBoundary(app, transport);
-  if (native) registerNativeBrowserAuth(app, native.auth);
+  if (native) {
+    registerNativeBrowserAuth(app, native.auth);
+    if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
+  }
 
   app.get('/health/live', (request, reply) => {
     reply.header('Cache-Control', 'no-store');

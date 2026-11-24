@@ -359,3 +359,19 @@ h1, .inspector-header h2 { width: fit-content; max-width: 100%; }
 }
 
 .sidebar-account + .sidebar-version { margin-top: 0; }
+
+.account-settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: 1.15rem; align-items: start; margin-top: 1rem; }
+.account-panel { background: white; border: 1px solid var(--line); border-radius: 12px; padding: 1.1rem; }
+.account-panel h2 { margin: 0 0 .4rem; font-size: 1.05rem; }
+.account-panel p { margin: .45rem 0; color: var(--muted); }
+.account-panel .auth-form { margin-top: .8rem; }
+.account-panel select, .account-search input { font: inherit; border: 1px solid var(--line); border-radius: 7px; padding: .5rem; background: white; color: inherit; }
+.account-panel .account-check { display: flex; align-items: center; gap: .55rem; }
+.account-check input { width: auto; min-height: auto; }
+.account-list { display: grid; gap: .75rem; padding: 0; list-style: none; }
+.account-actions, .account-actions form, .account-search { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; }
+.account-actions { margin-top: .75rem; }
+.account-search { margin-block: 1rem; }
+.account-search input { margin-inline-start: .4rem; }
+.account-approval, .account-provision { margin-top: 1rem; max-width: 39rem; }
+.account-approval code { overflow-wrap: anywhere; }

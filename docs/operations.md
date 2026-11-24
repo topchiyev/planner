@@ -130,3 +130,16 @@ Run the [writer ownership acceptance test](../tests/release/native-writer.sh) in
 Run the [storage upgrade acceptance test](../tests/release/native-storage.sh) in a clean offline guest. Pair the signed current candidate at the root of the read-only ISO with the signed schema-0 operator build under `previous/`. The test uses the installed operator commands and the guest's authenticated Planner database.
 
 Run the [native command journal acceptance test](../tests/release/native-journal.sh) in a clean offline guest. Place the signed candidate and its public key at the root of the read-only ISO alongside `native-journal-fixture.mjs` and `tests/support/journal-operations.mjs` under the filename `journal-operations.mjs`. The test kills the guest-only writer after its first acknowledged domain write, then starts the installed systemd backend to finish the command. It also checks that a missing outbox record blocks enrollment until the record is restored and recovery completes.
+
+Run the [native account approval acceptance test](../tests/release/native-accounts.sh) in a clean offline guest with the signed candidate and its public key at the root of the read-only ISO. It exercises the installed CLI, the protected operator socket and the private browser proxy.
+
+### Confirm an account change
+
+A signed-in site administrator can request a role change, disablement, reactivation or password reset from Manage accounts. Take the displayed approval ID to the Planner host. Inspect the initiating administrator, target account and exact action, then explicitly confirm:
+
+```sh
+sudo plannerctl accounts inspect APPROVAL_ID
+sudo plannerctl accounts confirm APPROVAL_ID --yes
+```
+
+Approvals expire after ten minutes and can be used once. Planner checks that both accounts and the requested action still qualify when the local operator confirms. A password reset invalidates existing credentials and prints a separate 30-minute recovery grant on the local console. Give it privately to the target account holder, who can enter it under Recover your account on the sign-in page. If delivery fails, request and confirm a new reset from the account’s current revision. Disabled accounts retain their project memberships and history.
