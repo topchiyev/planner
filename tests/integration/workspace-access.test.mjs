@@ -138,6 +138,13 @@ test('protected workspace endpoints enforce ownership, hidden context, independe
       assert.equal(renamed.status, 422);
       assert.equal(renamed.data.error.code, 'INVALID_CURSOR');
       assert.deepEqual(resultIds(await verified(f, alpha, admin, 'projectsList')), [ids.hiddenProject]);
+      const binaryNames = ['Zulu', 'alpha', 'Étage'];
+      for (let index = 0; index < binaryNames.length; index += 1) {
+        await f.insert('projects', fixtureId(710 + index), { name: binaryNames[index], description: 'ordering-sample',
+          type: 'shared', hidden: false, ownerProjectManagerId: null, rank: '8192' });
+      }
+      const mixed = await verified(f, projects + '?order=alphabetically&q=ordering-sample', admin, 'projectsList');
+      assert.deepEqual(mixed.data.data.map(({ name }) => name), binaryNames);
 
       await assert.rejects(f.gate.runCommand(async () => {
         const context = await resolveBrowserWorkspace(f.db, f.installationId, readSessionCookie(manager), f.now());
