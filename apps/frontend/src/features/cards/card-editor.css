@@ -21,3 +21,6 @@
 .card-readonly-content dd { margin: 0; }
 .card-stopwatch { display: grid; gap: .5rem; border-block-start: 1px solid var(--line); padding-block-start: .7rem; }
 .card-elapsed { font-variant-numeric: tabular-nums; }
+
+.card-editing-fields { display: grid; gap: .75rem; border: 0; padding: 0; margin: 0; min-width: 0; }
+.card-rich-input pre, .card-rendered-description pre { max-width: 100%; overflow: auto; }

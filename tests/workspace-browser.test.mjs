@@ -698,6 +698,12 @@ test('project deletion confirms and sends an exact imported name with spaces and
 
 test('desktop editors create a closed card and use rich text, ID-backed mentions and a local-only stopwatch', { timeout: 120_000 }, async () => {
   await workspaceBrowser(async ({ fixture: f, origin, page }) => {
+    for (let index = 0; index < 12; index++) {
+      const userId = fixtureId(12000 + index);
+      await f.insert('users', userId, { normalizedEmail: `alias-${index}@planner.invalid`, normalizedUsername: null,
+        name: 'Shared alias', username: null, role: 'boardUser', disabledAt: null });
+      await f.insert('boardMembers', fixtureId(13000 + index), { boardId: ids.privateBoard, userId, role: 'viewer', canComment: false });
+    }
     const editor = await page({ width: 1440, height: 900 });
     await signIn(editor, origin, 'first-editor');
     await editor.goto(origin + board(ids.privateBoard) + '?view=grid');
@@ -720,16 +726,28 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
     await inspector.getByRole('button', { name: 'Find members' }).click();
     await inspector.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
     await expect(inspector.locator('.card-mention')).toHaveText('@Fixture second-editor');
+    await inspector.getByRole('button', { name: 'Mention a board member' }).click();
+    await inspector.getByLabel('Find a board member').fill('Shared alias');
+    await inspector.getByRole('button', { name: 'Find members' }).click();
+    await expect(inspector.getByRole('button', { name: 'Mention Shared alias' })).toHaveCount(10);
+    await inspector.getByRole('button', { name: 'Next members page' }).click();
+    await expect(inspector.getByRole('button', { name: 'Mention Shared alias' })).toHaveCount(2);
+    await inspector.getByRole('button', { name: 'Mention Shared alias' }).last().click();
     await modes.getByRole('button', { name: 'Markdown' }).click();
     await expect(inspector.getByRole('textbox', { name: 'Description' })).toHaveValue(
       new RegExp('Spectral log 🌱 .*\\[Fixture second-editor\\]\\(' + ids.secondEditor + '\\)'));
     await inspector.getByLabel('Due date and time (UTC)').fill('2026-03-19T13:13');
+    const saved = editor.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + cardId));
     await inspector.getByRole('button', { name: 'Save card', exact: true }).click();
+    const receipt = await saved;
+    assert.equal(receipt.status(), 200);
+    assert.equal(receipt.request().postDataJSON().dueDate, '2026-03-19T13:13:00.000Z');
     await expect(inspector.getByRole('button', { name: 'Save card', exact: true })).toBeDisabled();
     const persisted = await f.db.collection('cards').findOne({ ...f.scope, id: cardId });
     assert.equal(persisted.dueDate.toISOString(), '2026-03-19T13:13:00.000Z');
     assert.equal(persisted.dueDateCompleted, false);
     assert.ok(persisted.description.includes(`@[Fixture second-editor](${ids.secondEditor})`));
+    assert.ok(persisted.description.includes(`@[Shared alias](${fixtureId(12011)})`));
 
     await inspector.getByRole('button', { name: 'Start stopwatch' }).click();
     await expect(inspector.getByRole('button', { name: 'Stop stopwatch' })).toBeEnabled();
@@ -755,7 +773,7 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
 
 test('narrow card inspector retains exact imported Markdown and stale drafts, then clears the editor on access loss', { timeout: 120_000 }, async () => {
   await workspaceBrowser(async ({ fixture: f, origin, page }) => {
-    const raw = '  <span>Imported text</span>\r\n\r\nUnicode 🌱 [Unsafe](javascript:example)  ';
+    const raw = '  <span>Imported text</span>\r\n\r\n<div data-fixture-html>Imported block</div>\r\n\r\nUnicode 🌱 [Unsafe](javascript:example) and `a < b`\r\n\r\n```js\r\nif (a < b) work()\r\n```  ';
     await f.db.collection('cards').updateOne({ ...f.scope, id: ids.activeCard }, { $set: { description: raw, stopwatch: { startedAt: null, total: 19 } } });
     await f.db.collection('users').updateOne({ ...f.scope, id: ids.firstEditor }, { $set: { 'preferences.editorMode': 'markup' } });
     const first = await page({ width: 390, height: 844 });
@@ -771,6 +789,10 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await mode.getByRole('button', { name: 'Rich text' }).click();
     await expect(editor.getByRole('textbox', { name: 'Description' })).toContainText('Imported text');
     await expect(editor.locator('a[href^="javascript:"]')).toHaveCount(0);
+    await expect(editor.locator('[data-fixture-html]')).toHaveCount(0);
+    await expect(editor.getByRole('textbox', { name: 'Description' })).toContainText('Imported block');
+    await expect(editor.locator('code').filter({ hasText: /^a < b$/u })).toBeVisible();
+    await expect(editor.locator('pre code')).toContainText('if (a < b) work()');
     await mode.getByRole('button', { name: 'Markdown' }).click();
     await editor.getByLabel('Card type').selectOption('story');
     await expect(editor.getByLabel('Due date and time (UTC)')).toHaveCount(0);
@@ -782,7 +804,7 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await expect(editor.getByLabel('Elapsed time')).toHaveText('00:00:19');
 
     await second.reload();
-    await editor.getByLabel('Description').fill('Keep this local draft 🌱');
+    await editor.getByRole('textbox', { name: 'Description', exact: true }).fill('Keep this local draft 🌱');
     const competing = second.getByRole('complementary', { name: 'Moving an assigned card' });
     await competing.getByLabel('Card name').fill('Name from another editor');
     await competing.getByRole('button', { name: 'Save card', exact: true }).click();
@@ -790,7 +812,7 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await editor.getByRole('button', { name: 'Save card', exact: true }).click();
     const current = first.getByRole('complementary', { name: 'Name from another editor' });
     await expect(current.getByText('The card changed while you were editing.')).toBeVisible();
-    await expect(current.getByLabel('Description')).toHaveValue('Keep this local draft 🌱');
+    await expect(current.getByRole('textbox', { name: 'Description', exact: true })).toHaveValue('Keep this local draft 🌱');
     await current.getByRole('button', { name: 'Keep edits and use current revision' }).click();
     await f.gate.runCommand(() => f.db.collection('boardMembers').updateOne({ ...f.scope, boardId: ids.privateBoard, userId: ids.firstEditor },
       { $set: { role: 'viewer', canComment: false }, $inc: { revision: 1 } }));
@@ -798,6 +820,11 @@ test('narrow card inspector retains exact imported Markdown and stale drafts, th
     await expect(current.getByRole('button', { name: 'Save card', exact: true })).toHaveCount(0);
     await expect(current.getByText('Keep this local draft 🌱')).toHaveCount(0);
     assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: ids.activeCard })).description, raw);
+    await f.gate.runCommand(() => f.db.collection('sessions').updateMany({ ...f.scope, userId: ids.secondEditor },
+      { $set: { expiresAt: new Date('2025-01-01T00:00:00.000Z') } }));
+    await second.getByRole('button', { name: 'Mention a board member' }).click();
+    await expect(second).toHaveURL((url) => url.pathname === '/sign-in' &&
+      url.searchParams.get('returnTo') === new URL(target).pathname);
   });
 });
 
