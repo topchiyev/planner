@@ -52,6 +52,7 @@ check_host() {
     [ "${ID:-}:${VERSION_ID:-}" = ubuntu:24.04 ] || fail host 'Planner requires Ubuntu 24.04.'
     grep -Eq '^flags[[:space:]]*:.*[[:space:]]avx([[:space:]]|$)' /proc/cpuinfo ||
         fail host 'The bundled MongoDB requires AVX support.'
+    [ -x /usr/bin/flock ] || fail host 'Planner requires the util-linux flock executable.'
     note host supported
 }
 
