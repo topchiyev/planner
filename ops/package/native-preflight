@@ -313,6 +313,7 @@ check_payload
 check_service_path "$state/mongodb" planner-mongodb 700
 for path in blobs staging backups; do check_service_path "$state/$path" planner 700; done
 check_service_path /run/planner planner 750
+check_service_path /run/planner-proxy planner 711
 check_service_path "$config/planner.json" planner file
 check_service_path "$config/mongod.conf" planner-mongodb file
 note ownership valid
@@ -334,4 +335,5 @@ if [ "$mode" = provision ]; then
     create_service_directory "$state/mongodb" planner-mongodb 0700
     for path in blobs staging backups; do create_service_directory "$state/$path" planner 0700; done
     create_service_directory /run/planner planner 0750
+    create_service_directory /run/planner-proxy planner 0711
 fi

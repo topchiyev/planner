@@ -57,7 +57,7 @@ export async function verifyNativeMongo(credentials: MongoCredentials) {
   await (await connectVerifiedNativeMongo(credentials)).close();
 }
 
-export async function checkMongoReadiness(expected?: { installationId: string; dbPort: number }) {
+export async function connectConfiguredNativeMongo(expected?: { installationId: string; dbPort: number }) {
   const info = await lstat(mongoCredentialFile);
   if (!info.isFile() || info.nlink !== 1 || info.uid !== 0 || info.gid !== process.getgid?.() || (info.mode & 0o7777) !== 0o640) {
     throw new NativeMongoError('The Planner database credentials have unsafe ownership or permissions.');
@@ -66,5 +66,9 @@ export async function checkMongoReadiness(expected?: { installationId: string; d
   if (expected && (credentials.installationId !== expected.installationId || credentials.port !== expected.dbPort)) {
     throw new NativeMongoError('The Planner database credential does not match the application configuration.');
   }
-  await verifyNativeMongo(credentials);
+  return connectVerifiedNativeMongo(credentials);
+}
+
+export async function checkMongoReadiness(expected?: { installationId: string; dbPort: number }) {
+  await (await connectConfiguredNativeMongo(expected)).close();
 }
