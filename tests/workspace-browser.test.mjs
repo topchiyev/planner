@@ -152,6 +152,22 @@ test('desktop workspace loads authorized counts, pages, search, hidden state and
     assert.equal(await f.db.collection('events').countDocuments(f.scope), 0);
     await p.goto(origin + '/workspace');
     await expect(main.getByRole('article').first().getByRole('heading')).toHaveText('Alphabetically first');
+    for (let index = 0; index < 26; index++) {
+      await f.insert('projectFavorites', fixtureId(2100 + index), { projectId: fixtureId(1000 + index), userId: ids.admin });
+    }
+    await p.getByLabel('Show favorites in sidebar').check();
+    const favoriteGroup = p.getByRole('group', { name: 'Favorites', exact: true });
+    await favoriteGroup.getByRole('link', { name: 'More favorites' }).click();
+    await expect(favoriteGroup.getByRole('link', { name: 'Workspace page 25' })).toBeVisible();
+    const session = await (await p.request.get(origin + '/api/v1/session')).json();
+    const removed = await p.request.delete(origin + '/api/v1/projects/' + fixtureId(1025) + '/favorite', {
+      headers: { Origin: origin, 'X-CSRF-Token': session.csrfToken, 'Idempotency-Key': randomUUID(), 'If-Match': '"1"' },
+    });
+    assert.equal(removed.status(), 204);
+    await p.reload();
+    await expect(favoriteGroup.getByRole('link', { name: 'Workspace page 25' })).toHaveCount(0);
+    await favoriteGroup.getByRole('link', { name: 'First favorites page' }).click();
+    await expect(favoriteGroup.getByRole('link', { name: 'Workspace page 00' })).toBeVisible();
     await p.route('**/api/v1/projects?*', (route) => route.fulfill({ status: 503 }));
     await p.goto(origin + '/settings');
     await expect(p.getByRole('heading', { name: 'Account settings', level: 1 })).toBeVisible();

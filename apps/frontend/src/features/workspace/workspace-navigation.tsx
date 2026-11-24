@@ -59,7 +59,7 @@ export function WorkspaceSidebar({ onFollow }: { onFollow: () => void }) {
   return (
     <>
       {projects.length > 0 && <div aria-label="Project list" role="group">{projectLinks(projects, true)}</div>}
-      {navigation.favoritesPage && favorites.length > 0 && <div className="sidebar-favorites" aria-label="Favorites" role="group">
+      {navigation.favoritesPage && (favorites.length > 0 || navigation.filters.favoriteCursor) && <div className="sidebar-favorites" aria-label="Favorites" role="group">
         <h2>Favorites</h2>
         {projectLinks(favorites, false)}
         {navigation.filters.favoriteCursor && <Link className="sidebar-more" onClick={onFollow} to={firstFavoritePage}>First favorites page</Link>}
