@@ -13,7 +13,7 @@ type SourceEntry = { [K in DiscussionTable]: { table: K; row: SourceRow<K> } }[D
 type DecodeFailure = 'unsupported-kind' | 'invalid-snapshot';
 type QuarantineReason = DecodeFailure | 'missing-card' | 'missing-comment' | 'missing-activity' | 'missing-board' | 'board-mismatch'
   | 'missing-recipient' | 'disabled-recipient' | 'recipient-cannot-read-card' | 'target-kind-mismatch' | 'target-scope-mismatch'
-  | 'target-actor-mismatch' | 'assignment-recipient-mismatch';
+  | 'target-actor-mismatch' | 'target-snapshot-mismatch' | 'assignment-recipient-mismatch';
 
 export type SourceDiscussion = {
   type: 'comment'; cardSourceId: string; authorSourceId: string | null;
@@ -105,23 +105,33 @@ async function commentTarget(store: ImportRecords, sourceId: string | null, kind
   return comment?.id ?? null;
 }
 
-async function activityTarget(store: ImportRecords, sourceId: string | null, kind: string | undefined, row: SourceRow<'notification'>,
-  card: WorkspaceRow<'cards'> | null, reasons: QuarantineReason[]) {
+async function activityTarget(store: ImportRecords, sourceId: string | null, decoded: ImportedNoticeSnapshot | undefined,
+  row: SourceRow<'notification'>, card: WorkspaceRow<'cards'> | null, boardId: string | null, reasons: QuarantineReason[]) {
+  const kind = decoded?.kind;
   const mapping = sourceId === null ? null : await store.mapping('action', sourceId);
   const activity = mapping ? await store.get('activities', mapping.id) : null;
+  let corroboratesBoard = false;
   if (!activity) reasons.push('missing-activity');
   else {
     if (activity.kind !== kind || (kind !== 'moveCard' && kind !== 'assignCard')) reasons.push('target-kind-mismatch');
     const source = mapping?.provenance.discussion;
+    corroboratesBoard = !!boardId && activity.boardId === boardId && activity.cardId === card?.id
+      && (kind === 'moveCard' || kind === 'assignCard') && activity.kind === kind
+      && source?.type === 'action' && source.boardSourceId === row.board_id;
     if ((card && activity.cardId !== card.id) || (source?.type === 'action' && source.boardSourceId !== null
       && row.board_id !== source.boardSourceId)) reasons.push('target-scope-mismatch');
     if (source?.type === 'action' && source.actorSourceId !== null && row.creator_user_id !== null
       && source.actorSourceId !== row.creator_user_id) reasons.push('target-actor-mismatch');
+    if (decoded?.kind === 'moveCard' && source?.type === 'action' && source.decoded?.kind === 'moveCard'
+      && (decoded.snapshot.fromList.id !== source.decoded.snapshot.fromList.id || decoded.snapshot.toList.id !== source.decoded.snapshot.toList.id)) {
+      reasons.push('target-snapshot-mismatch');
+      corroboratesBoard = false;
+    }
     if (source?.type === 'action' && source.decoded?.kind === 'assignCard' && source.decoded.snapshot.user.id !== row.user_id) {
       reasons.push('assignment-recipient-mismatch');
     }
   }
-  return activity?.id ?? null;
+  return { id: activity?.id ?? null, corroboratesBoard };
 }
 
 async function writeNotice(store: ImportRecords, runId: string, capturedAt: string, row: SourceRow<'notification'>) {
@@ -135,14 +145,15 @@ async function writeNotice(store: ImportRecords, runId: string, capturedAt: stri
   if (decoded.reason) reasons.push(decoded.reason);
   if (!card) reasons.push('missing-card');
   if (!boardId) reasons.push('missing-board');
-  if (card && boardId && card.boardId !== boardId) reasons.push('board-mismatch');
   const expectsComment = kind === 'commentCard' || kind === 'mentionInComment';
   if ((expectsComment && row.action_id !== null) || (kind && !expectsComment && row.comment_id !== null)) {
     reasons.push('target-kind-mismatch');
   }
   const commentId = expectsComment || row.comment_id !== null ? await commentTarget(store, row.comment_id, kind, row, card, reasons) : null;
-  const activityId = (!expectsComment && kind !== undefined) || row.action_id !== null
-    ? await activityTarget(store, row.action_id, kind, row, card, reasons) : null;
+  const activity = (!expectsComment && kind !== undefined) || row.action_id !== null
+    ? await activityTarget(store, row.action_id, decoded.data, row, card, boardId, reasons) : null;
+  // An exact linked action can corroborate an earlier board for the currently readable card.
+  if (card && boardId && card.boardId !== boardId && !activity?.corroboratesBoard) reasons.push('board-mismatch');
   const recipient = recipientId ? await store.get('users', recipientId) : null;
   if (!recipient) reasons.push('missing-recipient');
   else if (recipient.disabledAt !== null) reasons.push('disabled-recipient');
@@ -156,7 +167,7 @@ async function writeNotice(store: ImportRecords, runId: string, capturedAt: stri
   if (!kind || !card || !boardId || !recipientId) invalidBaseRow('A source inbox record has an unresolved scope.');
   const { createdAt, updatedAt } = targetTimes(row, capturedAt);
   await store.write('notifications', store.publicId('notification', row.id), {
-    boardId, cardId: card.id, recipientId, actorId, commentId, activityId, kind, createdAt, updatedAt,
+    boardId, cardId: card.id, recipientId, actorId, commentId, activityId: activity?.id ?? null, kind, createdAt, updatedAt,
     readAt: row.is_read ? updatedAt ?? createdAt : null,
   });
 }

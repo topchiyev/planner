@@ -10,18 +10,39 @@ function escaped(text: string, start: number) {
   return (start - first) % 2 !== 0;
 }
 
-function fencedCode(text: string) {
+function codeBlocks(text: string) {
   const spans: Span[] = [];
-  let fence: { start: number; marker: string } | undefined;
+  let fence: { start: number; marker: string; quoteDepth: number; listIndent: number } | undefined;
   for (const line of text.matchAll(/^[^\r\n]*/gmu)) {
-    const boundary = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)$/u.exec(line[0]);
-    if (!boundary) continue;
-    const [, marker, suffix] = boundary;
-    if (!fence) {
-      fence = { start: line.index, marker };
-    } else if (fence.marker[0] === marker[0] && marker.length >= fence.marker.length && !suffix.trim()) {
-      spans.push({ start: fence.start, end: line.index + line[0].length });
+    let content = line[0];
+    let quoteDepth = 0;
+    while (true) {
+      const quote = /^ {0,3}>[ \t]?/u.exec(content);
+      if (!quote) break;
+      content = content.slice(quote[0].length);
+      quoteDepth++;
+    }
+    const indent = /^[ \t]*/u.exec(content)![0];
+    if (fence && (quoteDepth < fence.quoteDepth || (content.trim() && indent.length < fence.listIndent))) {
+      spans.push({ start: fence.start, end: line.index });
       fence = undefined;
+    }
+    if (fence) {
+      const boundary = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(content);
+      if (boundary && boundary[1][0] === fence.marker[0] && boundary[1].length >= fence.marker.length) {
+        spans.push({ start: fence.start, end: line.index + line[0].length });
+        fence = undefined;
+      }
+      continue;
+    }
+    // Opening fences may start at the content column of a list item. Indented code needs no fence.
+    const list = /^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/u.exec(content);
+    const listIndent = list?.[0].length ?? 0;
+    const boundary = /^ {0,3}(`{3,}|~{3,})/u.exec(content.slice(listIndent));
+    if (boundary) {
+      fence = { start: line.index, marker: boundary[1], quoteDepth, listIndent };
+    } else if (indent.includes('\t') || indent.length >= 4) {
+      spans.push({ start: line.index, end: line.index + line[0].length });
     }
   }
   if (fence) spans.push({ start: fence.start, end: text.length });
@@ -96,7 +117,7 @@ function links(text: string, code: Span[]) {
 }
 
 function literalSpans(text: string) {
-  const fences = fencedCode(text);
+  const fences = codeBlocks(text);
   const code = [...fences, ...inlineCode(text, fences)].sort((first, second) => first.start - second.start);
   const spans = [...code, ...links(text, code)].sort((first, second) => first.start - second.start || second.end - first.end);
   const combined: Span[] = [];

@@ -131,7 +131,7 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
   for (const [name, expected] of Object.entries(counts)) assert.equal(await count(name), expected, name);
   const relationships = { labels: 1, cardLabels: 1, cardAssignees: 1, boardFollows: 1, cardFollows: 1,
     projectFavorites: 1, checklists: 1, tasks: 3, fieldGroups: 3, fieldDefinitions: 1, fieldValues: 2,
-    activities: 0, notifications: 0 };
+  };
   for (const [name, expected] of Object.entries(relationships)) assert.equal(await count(name), expected, name);
   const mappedCount = ['action', 'attachment', 'background_image', 'base_custom_field_group', 'board', 'board_membership',
     'board_subscription', 'card', 'card_label', 'card_membership', 'card_subscription', 'comment', 'custom_field', 'custom_field_group',
@@ -578,8 +578,13 @@ test('legacy mention rewriting replaces only recognized text tokens while retain
   const twoFences = ['```fixture', '@[fenced](' + known + ')', '```', '~~~', '@[tilde](' + known + ')', '~~~'].join('\n');
   const unresolved = '@[Past Observer](999)';
   const invalid = '@[Invalid](09007199254740993)';
-  const text = [recognized + recognized, escaped, code, linkedText, rawUrl, twoFences, unresolved, invalid].join('\n');
-  assert.equal(await rewriteImportedMentions(text, store), text.replace(recognized + recognized, recognized.replace(known, current).repeat(2)));
+  const indented = ['    @[four spaces](' + known + ')', '\t@[tab](' + known + ')'].join('\n');
+  const nested = ['> ```note', '> @[quote](' + known + ')', '> ```', '- ~~~', '  @[list](' + known + ')', '  ~~~'].join('\n');
+  const malformed = '@[missing end](' + known;
+  const text = [recognized + recognized, escaped, code, linkedText, rawUrl, twoFences, '', indented, '', nested,
+    recognized, unresolved, invalid, malformed].join('\n');
+  const expected = text.replaceAll(recognized, recognized.replace(known, current));
+  assert.equal(await rewriteImportedMentions(text, store), expected);
   assert.deepEqual(lookups, [known, '999']);
   const raw = JSON.stringify({ fixture: '@[json](' + known + ')' });
   assert.equal(await rewriteImportedMentions(raw, store), raw);
@@ -596,7 +601,7 @@ test('staged discussions validate every kind, retain private snapshots and admit
     source.update(`
       INSERT INTO public.comment (id,card_id,user_id,text,created_at) VALUES
       (702,9007199254740998,999,'Private remark only','2026-02-13 12:45:00.026789'),
-      (703,9007199254740993,NULL,'Exact @[Teal Fixture](104) and @[Past Observer](999).','2026-02-13 12:45:00.036789');
+      (703,9007199254740993,NULL,repeat('λ',8101) || chr(10) || 'Exact @[Teal Fixture](104) and @[Past Observer](999).','2026-02-13 12:45:00.036789');
       INSERT INTO public.action (id,board_id,card_id,user_id,type,data) VALUES
       (713,301,9007199254740993,102,'addMemberToCard','{"card":{"name":"Old card heading"},"user":{"id":"103","name":"Assignment snapshot"}}'),
       (714,301,9007199254740993,102,'removeMemberFromCard','{"card":{"name":"Old card heading"},"user":{"id":"104","name":"Former assignee"}}'),
@@ -617,7 +622,9 @@ test('staged discussions validate every kind, retain private snapshots and admit
       (730,105,103,301,9007199254740993,701,NULL,'commentCard','{"card":{"name":"Disabled target"},"text":"Old comment"}',false,NULL),
       (731,104,NULL,301,9007199254740993,703,NULL,'mentionInComment','{"card":{"name":"Old card heading"},"text":"Old plain text"}',true,'2026-02-20 12:00:00.999999'),
       (732,103,102,301,9007199254740996,NULL,711,'moveCard','{"fromList":{"id":"499","type":"closed","name":"Earlier batch"},"toList":{"id":"403","type":"archive","name":null}}',true,NULL),
-      (733,104,101,301,9007199254740993,701,NULL,'commentCard','{"card":{"name":"Wrong actor"},"text":"Old comment"}',false,NULL);
+      (733,104,101,301,9007199254740993,701,NULL,'commentCard','{"card":{"name":"Wrong actor"},"text":"Old comment"}',false,NULL),
+      (734,103,102,302,9007199254740993,NULL,719,'moveCard','{"fromList":{"id":"405","type":"active","name":"Old archived display"},"toList":{"id":"401","type":"active","name":"Different current display"}}',false,NULL),
+      (735,103,102,302,9007199254740993,NULL,719,'moveCard','{"fromList":{"id":"402","type":"closed","name":"Unrelated historic move"},"toList":{"id":"401","type":"active","name":"Align"}}',false,NULL);
     `);
     const receipt = await inspect(source);
     const identity = await createRun(db, installationId, receipt);
@@ -632,12 +639,12 @@ test('staged discussions validate every kind, retain private snapshots and admit
     assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'notification' }), 1);
     await resumable(db, 3);
     const committed = await resumable(db, 2);
-    assert.equal(committed.lastSourceId, '733');
+    assert.equal(committed.lastSourceId, '735');
     assert.equal(await db.collection('comments').countDocuments(scope), 3);
     assert.equal(await db.collection('activities').countDocuments(scope), 7);
-    assert.equal(await db.collection('notifications').countDocuments(scope), 4);
+    assert.equal(await db.collection('notifications').countDocuments(scope), 5);
     assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'action' }), 3);
-    assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'notification' }), 9);
+    assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'notification' }), 10);
     for (const name of ['auditEntries', 'events', 'commands', 'commandEffectBatches']) {
       assert.equal(await db.collection(name).countDocuments(scope), 0);
     }
@@ -651,7 +658,7 @@ test('staged discussions validate every kind, retain private snapshots and admit
     assert.equal(matches.data.length, 2);
     const retained = matches.data.find((entry) => entry.id === id('comment', '703'));
     assert.equal(retained.author, null);
-    assert.equal(retained.text, `Exact @[Teal Fixture](${id('user_account', '104')}) and @[Past Observer](999).`);
+    assert.equal(retained.text, 'λ'.repeat(8101) + `\nExact @[Teal Fixture](${id('user_account', '104')}) and @[Past Observer](999).`);
     const counts = (await normal('importIds', 'card', '9007199254740993')).provenance;
     assert.deepEqual([counts.sourceCommentCount, counts.observedCommentCount], [1, matches.data.length]);
     const unknownAuthor = await normal('comments', 'comment', '702');
@@ -675,10 +682,14 @@ test('staged discussions validate every kind, retain private snapshots and admit
     assert.equal((await normal('importQuarantine', 'action', '720')).reason, 'missing-card');
 
     const own = await accessible.notificationsList({ unread: true, limit: 25 });
-    assert.equal(own.data.length, 1);
-    assert.equal(own.data[0].id, id('notification', '723'));
-    assert.equal(own.data[0].kind, 'assignCard');
-    assert.equal(own.unreadCount, 1);
+    assert.equal(own.data.length, 2);
+    assert.equal(own.data.find((row) => row.id === id('notification', '723')).kind, 'assignCard');
+    const historicalDelivery = own.data.find((row) => row.id === id('notification', '734'));
+    assert.equal(historicalDelivery.kind, 'moveCard');
+    assert.equal(historicalDelivery.card.boardId, sourceBoard);
+    assert.equal(historicalDelivery.actor, null);
+    assert.equal(JSON.stringify(historicalDelivery).includes('Old archived display'), false);
+    assert.equal(own.unreadCount, 2);
     const movement = (await accessible.notificationsList({ unread: false, limit: 25 })).data.find((row) => row.id === id('notification', '732'));
     assert.equal(movement.kind, 'moveCard');
     assert.equal(movement.actor, null);
@@ -689,7 +700,7 @@ test('staged discussions validate every kind, retain private snapshots and admit
     assert.equal(mention.unreadCount, 0);
     const reasons = [['724', 'assignment-recipient-mismatch'], ['725', 'recipient-cannot-read-card'], ['726', 'target-kind-mismatch'],
       ['727', 'target-kind-mismatch'], ['728', 'target-scope-mismatch'], ['729', 'board-mismatch'], ['730', 'disabled-recipient'],
-      ['733', 'target-actor-mismatch']];
+      ['733', 'target-actor-mismatch'], ['735', 'target-snapshot-mismatch']];
     for (const [sourceId, reason] of reasons) assert.ok((await normal('importQuarantine', 'notification', sourceId)).reasons.includes(reason));
     assert.equal((await normal('importQuarantine', 'notification', '725')).sourceIsRead, true);
     const staged = await openTrustedStagedWorkspace(db, installationId, generationId);
@@ -708,7 +719,7 @@ test('staged discussions validate every kind, retain private snapshots and admit
     assert.equal(transferredNotice.data[0].card.boardId, targetBoard);
     assert.equal(transferredNotice.data[0].actor, null);
     assert.equal(transferredNotice.unreadCount, 0);
-    assert.equal(source.query('SELECT count(*) FROM public.notification'), '13');
+    assert.equal(source.query('SELECT count(*) FROM public.notification'), '15');
 
     source.update("INSERT INTO public.comment (id,card_id,text) VALUES (799,9007199254740999,'No source parent')");
     const missingParent = await createRun(db, installationId, await inspect(source));
