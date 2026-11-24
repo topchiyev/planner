@@ -17,8 +17,8 @@ case "$mode" in
         app_port=${PLANNER_INSTALL_APP_PORT-27430}
         db_port=${PLANNER_INSTALL_DB_PORT-27431}
         ;;
-    report) app_port=$2; db_port=$3 ;;
-    database) ;;
+    report|ports) app_port=$2; db_port=$3 ;;
+    database|ownership) ;;
     abort-upgrade) exit 0 ;;
     *) exit 2 ;;
 esac
@@ -229,9 +229,40 @@ valid_port() {
     [ "${#1}" -le 5 ] && [ "$1" -le 65535 ]
 }
 
-check_ports() {
+use_configured_ports() {
+    ports=$config/native-ports
+    if ! exists "$ports"; then
+        if exists "$config/planner.json"; then fail ownership 'The Planner package ports file is missing.'; fi
+        return
+    fi
+    owned_file "$ports" 0:0:600
+    saved=$(cat -- "$ports")
+    saved_app=${saved%% *}
+    saved_db=${saved#* }
+    valid_port "$saved_app" && valid_port "$saved_db" && [ "$saved" = "$saved_app $saved_db" ] ||
+        fail port 'The Planner package ports file is invalid.'
+    [ "${PLANNER_INSTALL_APP_PORT-$saved_app}" = "$saved_app" ] && [ "${PLANNER_INSTALL_DB_PORT-$saved_db}" = "$saved_db" ] ||
+        fail port 'The requested package ports differ from the configured Planner ports.'
+    app_port=$saved_app
+    db_port=$saved_db
+}
+
+validate_ports() {
     valid_port "$app_port" && valid_port "$db_port" && [ "$app_port" != "$db_port" ] && [ "$db_port" != 27017 ] ||
         fail port 'Choose distinct numeric ports from 1 to 65535 and avoid the MongoDB default port 27017.'
+    minimum_port=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null) ||
+        fail port 'Unable to determine the lowest port the Planner service accounts can bind.'
+    case "$minimum_port" in
+        ''|*[!0-9]*) fail port 'The kernel returned an invalid unprivileged port threshold.' ;;
+    esac
+    [ "${#minimum_port}" -le 5 ] && [ "$minimum_port" -le 65535 ] ||
+        fail port 'The kernel returned an invalid unprivileged port threshold.'
+    [ "$app_port" -ge "$minimum_port" ] && [ "$db_port" -ge "$minimum_port" ] ||
+        fail port "Choose ports at or above $minimum_port so the Planner service accounts can bind them."
+}
+
+check_ports() {
+    validate_ports
     listeners=$(ss -H -ltn) || fail port 'Unable to inspect local TCP listeners.'
     app_state=available; db_state=available
     if printf '%s\n' "$listeners" | awk -v port="$app_port" '$4 ~ ":" port "$" {found=1} END {exit !found}'; then app_state=busy; fi
@@ -268,6 +299,11 @@ create_service_directory() {
     if [ ! -d "$1" ]; then install -d -o "$2" -g "$2" -m "$3" -- "$1"; fi
 }
 
+if [ "$mode" = ports ]; then
+    validate_ports
+    exit 0
+fi
+
 check_host
 check_anchors
 check_receipts
@@ -283,7 +319,9 @@ note ownership valid
 if [ -f "$config/planner.json" ] && [ -f "$config/mongod.conf" ]; then note runtime configured
 else note runtime unconfigured
 fi
+if [ "$mode" = ownership ]; then exit 0; fi
 check_storage
+case "$mode" in install|upgrade|provision) use_configured_ports ;; esac
 if [ "$mode" != database ]; then check_ports; fi
 
 if [ "$mode" = provision ]; then

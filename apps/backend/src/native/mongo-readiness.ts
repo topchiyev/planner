@@ -23,7 +23,7 @@ export async function assertLoopbackListener(port: number, uid: number) {
   }
 }
 
-export async function verifyNativeMongo(credentials: MongoCredentials) {
+export async function connectVerifiedNativeMongo(credentials: MongoCredentials) {
   await assertLoopbackListener(credentials.port, credentials.dbUid);
   const { stdout } = await run('/usr/bin/ss', ['-H', '-ltn', '--cgroup', `sport = :${credentials.port}`], {
     timeout: 1_000,
@@ -46,16 +46,25 @@ export async function verifyNativeMongo(credentials: MongoCredentials) {
   const client = mongoClient(encodeURIComponent(mongoRuntimeSocket), databaseName, appUsername, credentials.password);
   try {
     await assertMongoIdentity(client, credentials.installationId);
-  } finally {
+    return client;
+  } catch (error) {
     await client.close();
+    throw error;
   }
 }
 
-export async function checkMongoReadiness() {
+export async function verifyNativeMongo(credentials: MongoCredentials) {
+  await (await connectVerifiedNativeMongo(credentials)).close();
+}
+
+export async function checkMongoReadiness(expected?: { installationId: string; dbPort: number }) {
   const info = await lstat(mongoCredentialFile);
   if (!info.isFile() || info.nlink !== 1 || info.uid !== 0 || info.gid !== process.getgid?.() || (info.mode & 0o7777) !== 0o640) {
     throw new NativeMongoError('The Planner database credentials have unsafe ownership or permissions.');
   }
   const credentials = parseMongoCredentials(JSON.parse(await readFile(mongoCredentialFile, 'utf8')));
+  if (expected && (credentials.installationId !== expected.installationId || credentials.port !== expected.dbPort)) {
+    throw new NativeMongoError('The Planner database credential does not match the application configuration.');
+  }
   await verifyNativeMongo(credentials);
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parsePreflightOptions } from '../../tools/cli/src/preflight.ts';
+import { parsePreflightOptions } from '../../packages/contracts/src/native-config.ts';
 
 test('native preflight canonicalizes HTTPS origins and validates private ports', () => {
   assert.deepEqual(parsePreflightOptions(['--public-url', 'https://Planner.example.test:443/']), {
@@ -9,7 +9,8 @@ test('native preflight canonicalizes HTTPS origins and validates private ports',
   assert.deepEqual(parsePreflightOptions(['--json', '--db-port', '27531', '--public-url', 'https://planner.example.test:9443', '--app-port', '27530']), {
     publicUrl: 'https://planner.example.test:9443', appPort: 27530, dbPort: 27531, json: true,
   });
-  for (const origin of ['http://example.test', 'https:/example.test', 'https://user:pass@example.test', 'https://example.test/path', 'https://example.test?q=1', 'https://example.test/#x']) {
+  for (const origin of ['http://example.test', 'https:/example.test', 'https://user:pass@example.test', 'https://@example.test',
+    'https://example.test/path', 'https://example.test/..', 'https://example.test?q=1', 'https://example.test/#x', 'https://example.test?']) {
     assert.throws(() => parsePreflightOptions(['--public-url', origin]), /HTTPS public origin/u);
   }
   const base = ['--public-url', 'https://planner.example.test'];

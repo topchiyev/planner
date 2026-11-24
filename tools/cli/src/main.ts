@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 import { PLANNER_VERSION } from '@planner/contracts';
+import { runNativeCommand } from './native-command.js';
 import { runPreflight } from './preflight.js';
 
-if (process.argv[2] === '--version') {
+const [command, ...args] = process.argv.slice(2);
+if (command === '--version') {
   console.log(PLANNER_VERSION);
-} else if (process.argv[2] === 'preflight') {
-  process.exitCode = runPreflight(process.argv.slice(3), PLANNER_VERSION);
+} else if (command === 'preflight') {
+  process.exitCode = runPreflight(args, PLANNER_VERSION);
+} else if (command === 'setup' || command === 'status' || command === 'start'
+    || command === 'stop' || command === 'restart') {
+  process.exitCode = runNativeCommand(command, args);
+} else {
+  console.error('Usage: plannerctl preflight|setup|status|start|stop|restart|--version');
+  process.exitCode = 2;
 }

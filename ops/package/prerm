@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = remove ] && [ -d /run/systemd/system ] && [ -S /run/systemd/private ]; then
+    release=/opt/planner/current
+    "$release/runtime/node/bin/node" "$release/apps/backend/dist/native/operate.js" package-remove
+fi

@@ -45,7 +45,7 @@ function optionalStat(path: string) {
   return lstatSync(path, { throwIfNoEntry: false });
 }
 
-function checkDirectory(path: string, uid: number, gid: number, mode: number) {
+export function checkDirectory(path: string, uid: number, gid: number, mode: number) {
   const info = optionalStat(path);
   if (!info?.isDirectory() || info.uid !== uid || info.gid !== gid || (info.mode & 0o7777) !== mode) {
     throw new NativeMongoError('Unexpected Planner database directory identity or permissions.');
@@ -53,7 +53,7 @@ function checkDirectory(path: string, uid: number, gid: number, mode: number) {
   return info;
 }
 
-function readProtectedFile(path: string, gid: number, mode: number) {
+export function readProtectedFile(path: string, gid: number, mode: number) {
   const info = optionalStat(path);
   if (!info) return undefined;
   if (!info.isFile() || info.nlink !== 1 || info.uid !== 0 || info.gid !== gid || (info.mode & 0o7777) !== mode) {
@@ -67,7 +67,7 @@ function syncConfigDirectory() {
   try { fsyncSync(directory); } finally { closeSync(directory); }
 }
 
-function writeProtectedFile(path: string, contents: string, gid: number, mode: number) {
+export function writeProtectedFile(path: string, contents: string, gid: number, mode: number) {
   const temporary = join(configDirectory, `.mongodb-${randomUUID()}`);
   const file = openSync(temporary, constants.O_WRONLY | constants.O_EXCL | constants.O_CREAT, mode);
   try {
@@ -92,7 +92,7 @@ function ensureProtectedFile(path: string, contents: string, gid: number, mode: 
   else if (existing !== contents) throw new NativeMongoError('The Planner database configuration does not match this installation.');
 }
 
-function fileJson(value: unknown) {
+export function fileJson(value: unknown) {
   return JSON.stringify(value, null, 2) + '\n';
 }
 
@@ -219,11 +219,11 @@ function mongodConfiguration(bindIp: string, port: number, localhostBypass: bool
   });
 }
 
-function packageAccount(option: '-u' | '-g', name: string) {
+export function packageAccount(option: '-u' | '-g', name: string) {
   return Number(command('/usr/bin/id', [option, name], 'The dedicated Planner service accounts must be provisioned.'));
 }
 
-function checkReceipt() {
+export function checkReceipt() {
   const path = '.native-installation';
   const prefix = 'planner-workspace 1 ';
   const receipt = readProtectedFile(join(configDirectory, path), 0, 0o644);
@@ -257,7 +257,15 @@ export async function ensureNativeMongo(port: number) {
   }
 }
 
-function inspectNativeMongo(port: number) {
+export function stopNativeMongoBootstrap() {
+  const unit = units();
+  const pid = unit.pid(bootstrapUnit);
+  if (!pid) return;
+  assertProcess(pid, packageAccount('-u', account), bootstrapUnit, bootstrapConfig);
+  unit.stopBootstrap();
+}
+
+export function inspectNativeMongo(port: number) {
   const preflight = fileURLToPath(new URL('../../../../lib/native-preflight', import.meta.url));
   command(preflight, ['database'], 'Planner native database ownership checks failed.');
   const config = checkDirectory(configDirectory, 0, 0, 0o711);

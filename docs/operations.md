@@ -44,8 +44,28 @@ The backend authenticates through the permanent Unix socket in `/run/planner-mon
 
 Retry an interrupted initialization with the same port and managed data directory. Changing the port or replacing the data directory requires a supported operator workflow. Readiness checks the permanent listener’s service identity and the database UUID and account role. Public readiness stays unavailable through incomplete setup, schema checks and recovery.
 
+## Configure and operate Planner
+
+Run setup as root and pass the canonical public HTTPS origin. Omit the port flags to use `27430` for the application and `27431` for MongoDB. Both selected ports must be within the range the service accounts can bind on the host.
+
+```sh
+sudo plannerctl setup --mode fresh --public-url https://planner.example.test
+sudo plannerctl status --json
+sudo plannerctl restart
+```
+
+Fresh setup prints a local first-administrator enrollment grant that expires 30 minutes after issuance. Protect the setup output as a credential. If setup is interrupted, repeat the same command with the original mode, origin and ports. The root-only setup intent lets Planner resume and deliver the same unexpired, unconsumed grant. MongoDB stores its digest, issuance time, expiry and installation and enrollment generation identities. Status omits the grant and database credentials.
+
+Use `--mode import` to prepare an installation for migration preflight. It records that pending action and leaves the active generation unset. Both modes keep workspace readiness unavailable while their respective setup steps are pending.
+
+Setup and `plannerctl start` verify the dedicated MongoDB instance, start the application on its selected loopback port and enable the two services for boot. `plannerctl stop` stops the application before MongoDB. `plannerctl restart` applies that order and revalidates the database before starting the application again.
+
+Stop Planner before a package upgrade or reinstall. Once configured, the installer checks the recorded ports automatically. Package removal stops and disables the services and preserves the configuration, database and files. After reinstalling, run `sudo plannerctl start` to resume the existing installation. The setup intent and package ports are root-only files under `/etc/planner`; the application configuration is readable by the Planner service group.
+
 ## Offline acceptance
 
 The [native installation test](../tests/release/native-installation.sh) runs as root in a disposable Ubuntu guest with networking disabled. Attach a read-only ISO containing the signed candidate and its test public key at the root, plus the signed prior package and its test public key under `previous/`. The script takes the ISO mount path. It verifies both signatures, checks failed installs and upgrades, and then installs and reinstalls the candidate while an independently owned MongoDB sentinel runs on port `27017`.
 
 Run the [private database acceptance test](../tests/release/native-mongodb.sh) in the same disposable guest after the native installation test passes. It exercises initialization, interruption, restart, a collision and an installation identity mismatch through the installed entry points.
+
+Run the [operator acceptance test](../tests/release/native-setup.sh) for each setup mode in a clean offline guest. It takes the signed candidate ISO mount point and the mode. After the first phase succeeds, reboot the same guest and run it with the additional `reboot-check` argument.
