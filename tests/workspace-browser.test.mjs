@@ -1682,7 +1682,10 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
 
     await posted.getByRole('button', { name: 'Edit comment' }).click();
     const edit = author.getByRole('dialog', { name: 'Edit comment' });
-    await edit.getByLabel('Comment', { exact: true }).fill('Edited without another notice');
+    await expect(edit).toBeVisible();
+    const editableComment = edit.getByRole('textbox', { name: 'Comment', exact: true });
+    await expect(editableComment).toHaveValue(/Recheck/u);
+    await editableComment.fill('Edited without another notice');
     await edit.getByRole('button', { name: 'Save comment' }).click();
     await expect(comments.getByText('Edited without another notice')).toBeVisible();
     await recipient.reload();

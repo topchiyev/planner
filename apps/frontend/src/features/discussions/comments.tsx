@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { cardMentionToken, commentMentions, maximumCommentLength, type WorkspaceReadOutput } from '@planner/contracts';
 import { MemberPicker, type Mention } from '../affiliations/member-picker.js';
 import { relationshipCommand } from '../projects/project-api.js';
@@ -27,6 +27,7 @@ function CommentInput({ text, change, boardId, label, focus, disabled }: {
   text: string; change: (value: string) => void; boardId: string; label: string; focus?: boolean; disabled: boolean;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
+  const inputId = useId();
   function insert(person: Mention) {
     const area = input.current;
     if (!area) return;
@@ -38,8 +39,9 @@ function CommentInput({ text, change, boardId, label, focus, disabled }: {
     window.requestAnimationFrame(() => { area.focus(); area.setSelectionRange(start + token.length, start + token.length); });
   }
   return <fieldset className="comment-composer" disabled={disabled}>
-    <label>{label}<textarea ref={input} value={text} onChange={(event) => change(event.target.value)} rows={4}
-      maxLength={Math.max(maximumCommentLength, text.length)} autoFocus={focus} required /></label>
+    <label htmlFor={inputId}>{label}</label>
+    <textarea id={inputId} ref={input} value={text} onChange={(event) => change(event.target.value)} rows={4}
+      maxLength={Math.max(maximumCommentLength, text.length)} autoFocus={focus} required />
     <MemberPicker boardId={boardId} select={insert} />
   </fieldset>;
 }
