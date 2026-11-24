@@ -1,7 +1,7 @@
 import type { Db } from 'mongodb';
 import { workspaceKey } from '../../storage/identity.js';
 import { digestPattern, MediaStorageError, type BlobIdentity } from '../../storage/blobs/private-store.js';
-import { imageTypes, type MediaVariants } from './decoder.js';
+import { imageTypes, maximumDerivativeBytes, type MediaVariants } from './decoder.js';
 
 export const availableMedia = 'available';
 export const unavailableMedia = 'unavailable';
@@ -12,6 +12,7 @@ export interface MediaCatalog extends BlobIdentity {
   _id: string;
   generationId: string;
   id: string;
+  revision?: number;
   lifecycleState: string;
   mimeType: string;
   variants?: MediaVariants | null;
@@ -50,16 +51,22 @@ export function validBlobIdentity(identity: unknown): identity is BlobIdentity {
     && Number.isSafeInteger(byteLength) && byteLength >= 0;
 }
 
+function validDerivative(identity: unknown): identity is BlobIdentity {
+  return validBlobIdentity(identity) && identity.byteLength > 0 && identity.byteLength <= maximumDerivativeBytes;
+}
+
 export function catalogVariants(row: MediaCatalog) {
   const value = row.variants;
   if (row.mimeType === originalType && value == null) return null;
   if (!Object.values<string>(imageTypes).includes(row.mimeType) || value == null) throw new MediaStorageError();
-  if (!validBlobIdentity(value.small) || !validBlobIdentity(value.large)) throw new MediaStorageError();
+  if (!validDerivative(value.small) || !validDerivative(value.large)) throw new MediaStorageError();
   return { small: { digest: value.small.digest, byteLength: value.small.byteLength },
     large: { digest: value.large.digest, byteLength: value.large.byteLength } };
 }
 
 export function mediaRecords(database: Db, generationId: string) {
+  const availableFile = (digest: string) => ({ generationId, blobDigest: digest, availability: availableMedia, deletedAt: null });
+  const projection = { _id: 1 };
   const identity = (id: string) => ({ _id: workspaceKey(generationId, id), generationId, id });
   return {
     attachment: (id: string) => database.collection<StoredMediaReference>('attachments').findOne(identity(id)),
@@ -67,6 +74,12 @@ export function mediaRecords(database: Db, generationId: string) {
     avatar: (id: string) => database.collection<StoredAvatar>('users').findOne(identity(id), { projection: {
       id: 1, generationId: 1, revision: 1, disabledAt: 1, avatarBlobDigest: 1, avatarMedia: 1,
     } }),
+    async hasAvailableReference(digest: string) {
+      if (await database.collection('attachments').findOne(availableFile(digest), { projection })) return true;
+      if (await database.collection('projectBackgrounds').findOne(availableFile(digest), { projection })) return true;
+      return !!await database.collection('users').findOne({ generationId, avatarBlobDigest: digest,
+        'avatarMedia.availability': availableMedia }, { projection });
+    },
     catalog: (digest: string) => database.collection<MediaCatalog>('blobs').findOne({ generationId, digest }),
   };
 }

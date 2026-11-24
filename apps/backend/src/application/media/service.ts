@@ -92,7 +92,8 @@ export function createMediaService(
       case 'renameAttachment':
       case 'removeAttachment': {
         const reference = await records.attachment(intent.id!);
-        if (!reference || !reference.cardId || !publicIdSchema.safeParse(reference.cardId).success) throw missing();
+        if (!reference || !reference.cardId || !publicIdSchema.safeParse(reference.cardId).success
+            || (intent.operation === 'renameAttachment' && !live(reference))) throw missing();
         const value = await scope.requireCard(reference.cardId);
         requireCapability(value.permissions.canEdit);
         return { type: 'card', value, reference };
@@ -127,11 +128,24 @@ export function createMediaService(
   }
 
   async function ensureCatalog(generationId: string, media: PreparedMedia, timestamp: string): Promise<PlannedEffect[]> {
-    const existing = await mediaRecords(database, generationId).catalog(media.digest);
+    const records = mediaRecords(database, generationId);
+    const existing = await records.catalog(media.digest);
     if (existing) {
       if (!validBlobIdentity(existing) || existing.byteLength !== media.byteLength || existing.lifecycleState !== availableMedia
-          || existing.mimeType !== media.mimeType || Boolean(catalogVariants(existing)) !== Boolean(media.variants)) {
-        throw new MediaStorageError();
+          || existing.mimeType !== media.mimeType) throw new MediaStorageError();
+      const previous = catalogVariants(existing);
+      if (!previous || !media.variants) return [];
+      try {
+        for (const variant of ['small', 'large'] as const) {
+          const old = previous[variant];
+          const incoming = media.variants[variant];
+          if (old.digest !== incoming.digest || old.byteLength !== incoming.byteLength) await store.verifyBlob(old);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || await records.hasAvailableReference(media.digest)) throw new MediaStorageError();
+        // A sweep may have removed an unreferenced legacy rendition before its original catalog row.
+        return [{ kind: 'update', collection: 'blobs', id: existing.id, revision: existing.revision ?? null,
+          fields: { variants: media.variants, updatedAt: timestamp } }];
       }
       return [];
     }

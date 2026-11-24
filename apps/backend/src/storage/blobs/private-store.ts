@@ -65,8 +65,9 @@ export async function createPrivateMediaStore(staging: string, blobs: string) {
   let stageSweeper: Awaited<ReturnType<typeof opendir>> | undefined;
 
   async function checkRoot(path: string, expected: Stats) {
-    const current = await lstat(path);
-    if (!sameInode(parent, await lstat(root)) || !ownedDirectory(current) || !sameInode(current, expected)) {
+    const current = await lstat(path).catch(() => { throw new MediaStorageError(); });
+    const currentParent = await lstat(root).catch(() => { throw new MediaStorageError(); });
+    if (!sameInode(parent, currentParent) || !ownedDirectory(current) || !sameInode(current, expected)) {
       throw new MediaStorageError();
     }
   }
