@@ -22,7 +22,8 @@ export async function singleCardMoveNotifications(database: Db, records: Workspa
     if (!user || user.disabledAt !== null || !['admin', 'projectOwner', 'boardUser'].includes(user.role)) continue;
     const scope = createWorkspaceAuthorization(database, generationId, user);
     try {
-      await scope.requireBoard(boardId);
+      const { permissions } = await scope.requireBoard(boardId);
+      if (!permissions.canFollow) continue;
     } catch (error) {
       if (error instanceof WorkspaceAccessError && error.statusCode === 404) continue;
       throw error;

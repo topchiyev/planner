@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { useLocation } from 'react-router';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useLocation, useRevalidator } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
 import type { BoardList } from '../lists/board-lists.js';
 import { WorkspaceDialog, useWorkspaceMutation } from '../projects/project-controls.js';
@@ -37,31 +37,83 @@ export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardI
   return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion: destination.orderVersion };
 }
 
+function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
+  const query = new URLSearchParams({ context: 'board', listIds: listId, limit: '100' });
+  if (cursor) query.set('cursor', cursor);
+  return readWorkspace('boardCards', boardId, query, signal);
+}
+
+interface PlacementPage {
+  listId: string;
+  cards: PlacementCard[];
+  nextCursor: string | null;
+  problem?: string;
+}
+
 export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   state: CardPlacement; mode: 'move' | 'restore'; onClose: () => void; onPlace: (toListId: string, beforeCardId: string | null) => void;
 }) {
   const initiallySameList = mode === 'move' && state.destinations.some(({ id }) => id === state.source.id);
   const [to, setTo] = useState(initiallySameList ? state.source.id : '');
   const [before, setBefore] = useState('');
-  const [page, setPage] = useState<{ listId: string; cards: PlacementCard[]; failed?: boolean }>();
+  const [page, setPage] = useState<PlacementPage>();
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [accessLost, setAccessLost] = useState(false);
+  const requests = useRef<AbortController>(null);
+  const revalidator = useRevalidator();
   const { pathname, search } = useLocation();
   const signIn = workspaceSignInPath(pathname + search);
   const { card } = state;
   const action = mode === 'move' ? 'Move card' : 'Restore card';
 
+  const handleProtectedRead = useCallback((error: unknown) => {
+    if (!(error instanceof WorkspaceRequestError)) return false;
+    if (error.status === 401) window.location.replace(signIn);
+    else if (error.status === 403 || error.status === 404) setAccessLost(true);
+    else return false;
+    return true;
+  }, [signIn]);
+
   useEffect(() => {
+    if (accessLost) {
+      onClose();
+      void revalidator.revalidate();
+    }
+  }, [accessLost, onClose, revalidator]);
+
+  useEffect(() => {
+    setPage(undefined);
+    setLoadingMore(false);
     if (!to) return;
     const controller = new AbortController();
-    const query = new URLSearchParams({ context: 'board', listIds: to, limit: '100' });
-    void readWorkspace('boardCards', card.boardId, query, controller.signal).then(({ data }) => {
-      if (!controller.signal.aborted) setPage({ listId: to, cards: data.filter(({ id }) => id !== card.id) });
+    requests.current = controller;
+    void anchorPage(card.boardId, to, controller.signal).then(({ data, page }) => {
+      if (!controller.signal.aborted) setPage({ listId: to, cards: data.filter(({ id }) => id !== card.id), nextCursor: page.nextCursor });
     }).catch((error: unknown) => {
-      if (controller.signal.aborted) return;
-      if (error instanceof WorkspaceRequestError && error.status === 401) window.location.replace(signIn);
-      else setPage({ listId: to, cards: [], failed: true });
+      if (!controller.signal.aborted && !handleProtectedRead(error)) {
+        setPage({ listId: to, cards: [], nextCursor: null, problem: 'Positions couldn’t load. You can still place the card at the end.' });
+      }
     });
     return () => controller.abort();
-  }, [to, card.boardId, card.id, signIn]);
+  }, [to, card.boardId, card.id, handleProtectedRead]);
+
+  async function loadMore() {
+    const current = page?.listId === to ? page : undefined;
+    const controller = requests.current;
+    if (!current?.nextCursor || !controller || controller.signal.aborted || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const next = await anchorPage(card.boardId, to, controller.signal, current.nextCursor);
+      if (controller.signal.aborted) return;
+      const cards = new Map(current.cards.map((candidate) => [candidate.id, candidate]));
+      for (const candidate of next.data) if (candidate.id !== card.id) cards.set(candidate.id, candidate);
+      setPage({ listId: to, cards: [...cards.values()], nextCursor: next.page.nextCursor });
+    } catch (error) {
+      if (!controller.signal.aborted && !handleProtectedRead(error)) setPage({ ...current, problem: 'More positions couldn’t load.' });
+    } finally {
+      if (!controller.signal.aborted) setLoadingMore(false);
+    }
+  }
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -80,7 +132,9 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
         <option value="">At the end</option>
         {page?.listId === to && page.cards.map(({ id, name }) => <option key={id} value={id}>Before {name}</option>)}
       </select></label>}
-      {to && page?.listId === to && page.failed && <p role="status">Positions couldn’t load. You can still place the card at the end.</p>}
+      {to && page?.listId === to && page.nextCursor && <button className="workspace-button" type="button" disabled={loadingMore}
+        onClick={() => void loadMore()}>{loadingMore ? 'Loading positions…' : 'Load more positions'}</button>}
+      {to && page?.listId === to && page.problem && <p role="status">{page.problem}</p>}
       <button className="workspace-button workspace-button-primary" type="submit" disabled={!to}>{action}</button>
     </form>
   </WorkspaceDialog>;
