@@ -1712,3 +1712,203 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     assert.ok(await recipient.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
   });
 });
+
+test('board filters retain one URL recipe across views and pages with isolated explicit tab recall', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const label = await fixture.insert('labels', fixtureId(29000), { boardId: ids.privateBoard, name: 'Release label', rank: '1' });
+    for (let index = 0; index < 5; index++) {
+      const id = await fixture.insert('cards', fixtureId(29001 + index), { boardId: ids.privateBoard, listId: ids.privateActiveList,
+        name: 'Quartz card ' + (index + 1), description: 'Signal from the imported source', kind: 'board', type: 'project', rank: String(2048 + index * 1024) });
+      await fixture.insert('cardLabels', fixtureId(29011 + index), { cardId: id, labelId: label });
+    }
+    await fixture.insert('cards', fixtureId(29016), { boardId: ids.privateBoard, listId: ids.privateArchive,
+      name: 'Quartz archived', description: 'Signal from history', kind: 'archive', type: 'project', rank: null,
+      historySequence: '9007199254740996', listChangedAt: '2026-01-15T10:30:45.000Z' });
+    const mount = origin + board(ids.privateBoard);
+    const editor = await page({ width: 1440, height: 900 });
+    const other = await page({ width: 390, height: 844 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(mount + '?view=list&limit=2');
+    const filters = editor.getByRole('search', { name: 'Board cards' });
+    await filters.getByRole('searchbox', { name: 'Search cards' }).fill('Quartz; SIGNAL');
+    await filters.getByText('Filter by labels, members or lists').click();
+    await filters.getByRole('group', { name: 'Include any label' }).getByLabel('Release label').check();
+    await filters.getByRole('button', { name: 'Apply filters' }).click();
+    const cards = editor.getByRole('list', { name: 'Cards in To do' });
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    await expect(cards.getByRole('link')).toHaveCount(2);
+    await expect(editor.getByRole('list', { name: 'Board lists' }).getByText('5 cards', { exact: true })).toBeVisible();
+    assert.equal(new URL(editor.url()).searchParams.get('labelsAny'), label);
+    async function saveRecipe(name) {
+      await filters.getByRole('button', { name: 'Save filters' }).click();
+      await filters.getByRole('textbox', { name: 'Recipe name' }).fill(name);
+      await filters.getByRole('button', { name: 'Save recipe' }).click();
+      await expect(filters.getByText('Filters saved for this tab.')).toBeVisible();
+    }
+    await saveRecipe('Release quartz');
+    await filters.getByRole('searchbox').fill('A different filter');
+    await saveRecipe('Alternate recipe');
+    await expect(filters.getByRole('combobox', { name: 'Saved recipe' }).getByRole('option')).toHaveCount(2);
+    assert.equal(new URL(editor.url()).searchParams.get('q'), 'Quartz; SIGNAL');
+    await editor.getByRole('navigation', { name: 'Board view' }).getByRole('link', { name: 'Grid' }).click();
+    await expect(editor.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    assert.equal(new URL(editor.url()).searchParams.get('q'), 'Quartz; SIGNAL');
+    assert.equal(new URL(editor.url()).searchParams.get('view'), 'grid');
+    await cards.getByRole('link', { name: 'Quartz card 1', exact: true }).click();
+    await expect(editor.getByRole('heading', { name: 'Quartz card 1', level: 2 })).toBeVisible();
+    assert.equal(new URL(editor.url()).searchParams.get('labelsAny'), label);
+    await editor.goBack();
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+
+    const pager = editor.getByRole('navigation', { name: 'Card pages' });
+    await pager.getByRole('link', { name: 'Next page' }).click();
+    await expect(cards.getByRole('link', { name: 'Quartz card 3', exact: true })).toBeVisible();
+    assert.ok(new URL(editor.url()).searchParams.get('cursor'));
+    await expect(editor.getByRole('list', { name: 'Board lists' }).getByText('5 cards', { exact: true })).toBeVisible();
+    await editor.reload();
+    await expect(cards.getByRole('link', { name: 'Quartz card 3', exact: true })).toBeVisible();
+    const invalidCursor = new URL(editor.url());
+    invalidCursor.searchParams.set('cursor', 'v1.A');
+    await editor.goto(invalidCursor.href);
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    assert.equal(new URL(editor.url()).searchParams.has('cursor'), false);
+    await filters.getByRole('button', { name: 'Clear filters' }).click();
+    await expect(filters.getByRole('searchbox')).toHaveValue('');
+    await expect.poll(() => new URL(editor.url()).searchParams.has('q')).toBe(false);
+    await filters.getByRole('button', { name: 'Recall last cleared filters' }).click();
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Alternate recipe');
+    await filters.getByRole('button', { name: 'Recall saved filters' }).click();
+    await expect(editor.getByText('No matching cards', { exact: true })).toBeVisible();
+    await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Release quartz');
+    await filters.getByRole('button', { name: 'Recall saved filters' }).click();
+    await expect(filters.getByRole('searchbox')).toHaveValue('Quartz; SIGNAL');
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    await editor.getByRole('navigation', { name: 'Board context' }).getByRole('link', { name: 'Archive' }).click();
+    await expect(editor.getByRole('link', { name: 'Archive', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(filters.getByRole('button', { name: 'Recall saved filters' })).toHaveCount(0);
+    await filters.getByRole('button', { name: 'Clear filters' }).click();
+    await filters.getByRole('searchbox').fill('Quartz');
+    await filters.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(editor.getByRole('link', { name: 'Quartz archived', exact: true })).toBeVisible();
+    await expect(editor.getByRole('link', { name: 'Quartz card 1', exact: true })).toHaveCount(0);
+
+    const otherTab = await editor.context().newPage();
+    await otherTab.goto(mount);
+    const tabFilters = otherTab.getByRole('search', { name: 'Board cards' });
+    await expect(tabFilters).toBeVisible();
+    await expect(tabFilters.getByRole('button', { name: /Recall/u })).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await expect(filters).toHaveCount(0);
+    await expect(otherTab.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(mount);
+    await expect(filters).toBeVisible();
+    await expect(filters.getByRole('button', { name: /Recall/u })).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await signIn(editor, origin, 'viewer');
+    await editor.goto(mount);
+    await expect(filters).toBeVisible();
+    await expect(filters.getByRole('button', { name: /Recall/u })).toHaveCount(0);
+    await signIn(other, origin, 'viewer');
+    await other.goto(mount);
+    const otherFilters = other.getByRole('search', { name: 'Board cards' });
+    await expect(otherFilters.getByRole('button', { name: /Recall/u })).toHaveCount(0);
+    await otherFilters.getByRole('searchbox').fill('/([/');
+    await otherFilters.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(other.getByText('Enter a valid slash-delimited search pattern.')).toBeVisible();
+    await expect(other.getByRole('link', { name: 'Quartz card 1', exact: true })).toHaveCount(0);
+    assert.ok(await other.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+  });
+});
+
+test('a late card page cannot replace a newer recipe or survive current board access loss', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const lateCard = await fixture.insert('cards', fixtureId(29100), { boardId: ids.privateBoard, listId: ids.privateActiveList,
+      name: 'Late card from the prior recipe', description: null, kind: 'board', type: 'project', rank: '2048' });
+    const editor = await page({ width: 1440, height: 900 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(origin + board(ids.privateBoard) + '?limit=1&view=list');
+    const filters = editor.getByRole('search', { name: 'Board cards' });
+    const watched = '**/api/v1/boards/**/cards?*';
+    const held = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    await editor.route(watched, async (intercepted) => {
+      if (!new URL(intercepted.request().url()).searchParams.has('cursor')) { await intercepted.continue(); return; }
+      const response = await intercepted.fetch();
+      held.resolve((await response.json()).data.map(({ id }) => id));
+      await resume.promise;
+      await intercepted.fulfill({ response }).catch(() => {});
+    });
+    try {
+      await editor.getByRole('navigation', { name: 'Card pages' }).getByRole('link', { name: 'Next page' }).click({ noWaitAfter: true });
+      assert.deepEqual(await held.promise, [lateCard]);
+      await expect(editor.getByText('Loading cards…')).toBeVisible();
+      await filters.getByRole('searchbox').fill('No such card in this board');
+      await filters.getByRole('button', { name: 'Apply filters' }).click({ noWaitAfter: true });
+      await expect(editor.getByText('No matching cards', { exact: true })).toBeVisible();
+      resume.resolve();
+      await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toHaveCount(0);
+    } finally { resume.resolve(); await editor.unroute(watched); }
+
+    await editor.route(watched, (request) => request.fulfill({ status: 503,
+      json: { error: { code: 'UNAVAILABLE', message: 'Planner is unavailable.', requestId: 'fixture' } } }));
+    await filters.getByRole('searchbox').fill('Late card');
+    await filters.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(editor.getByRole('alert').getByText('Cards couldn’t load.')).toBeVisible();
+    await editor.unroute(watched);
+    await editor.getByRole('alert').getByRole('button', { name: 'Retry' }).click();
+    await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toBeVisible();
+
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
+      ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor,
+    }));
+    await filters.getByRole('searchbox').fill('Prior recipe');
+    await filters.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+    await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toHaveCount(0);
+    await expect(filters).toHaveCount(0);
+  });
+});
+
+test('a rejected filter-member read clears the board and open inspector before revalidation completes', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(origin + board(ids.privateBoard) + '/cards/' + ids.activeCard);
+    await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    const heading = editor.locator('#page-heading');
+    const oldName = await heading.textContent();
+    assert.ok(oldName?.trim());
+    const sidebarBoard = editor.getByRole('navigation', { name: 'Project navigation' }).getByRole('link', { name: oldName, exact: true });
+    await expect(sidebarBoard).toBeVisible();
+    const filters = editor.getByRole('search', { name: 'Board cards' });
+    await expect(filters).toBeVisible();
+    const held = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const overview = '**/api/v1/boards/' + ids.privateBoard + '/workspace';
+    await editor.route(overview, async (intercepted) => {
+      held.resolve();
+      await resume.promise;
+      await intercepted.continue().catch(() => {});
+    });
+    try {
+      await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
+        ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor,
+      }));
+      const denied = editor.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/filter-members'));
+      await filters.getByText('Filter by labels, members or lists').click();
+      assert.equal((await denied).status(), 404);
+      await held.promise;
+      await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+      await expect(editor.getByRole('heading', { name: oldName, exact: true })).toHaveCount(0);
+      await expect(sidebarBoard).toHaveCount(0);
+      await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toHaveCount(0);
+      await expect(editor.getByRole('navigation', { name: 'Board context' })).toHaveCount(0);
+      await expect(filters).toHaveCount(0);
+    } finally { resume.resolve(); }
+    await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+  });
+});

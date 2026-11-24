@@ -19,7 +19,8 @@
     "mongodb": "7.9.1",
     "oidc-provider": "9.15.1",
     "otpauth": "9.6.0",
-    "pg": "8.23.1"
+    "pg": "8.23.1",
+    "re2js": "2.10.0"
   },
   "devDependencies": {
     "@types/oidc-provider": "9.13.1",

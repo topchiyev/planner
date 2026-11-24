@@ -1,6 +1,6 @@
-import { workspaceCardContext } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { redirect, type LoaderFunctionArgs } from 'react-router';
+import { boardFilterApiQuery, boardFilterLocation, readBoardFilterLocation } from './board-filter-route.js';
 import { readWorkspace, readWorkspacePreferences, workspaceSignIn, WorkspaceRequestError } from './workspace-api.js';
 
 export const workspaceNavigationId = 'workspace-navigation';
@@ -71,14 +71,27 @@ export function loadNativeBoard({ params, request }: LoaderFunctionArgs) {
   const id = publicIdSchema.safeParse(params.boardId);
   if (!id.success) return null;
   return loadVisible(request, async () => {
-    const context = workspaceCardContext.safeParse(new URL(request.url).searchParams.get('context')).data ?? 'board';
-    const [workspace, cardsPage] = await Promise.all([
-      readWorkspace('boardWorkspace', id.data, undefined, request.signal),
-      readWorkspace('boardCards', id.data, new URLSearchParams({ context }), request.signal),
-    ]);
-    return { ...workspace.data, cardsPage };
+    const url = new URL(request.url);
+    const { recipe, context, cursor } = readBoardFilterLocation(url.searchParams);
+    if (url.searchParams.has('cursor') && !cursor) throw redirect(url.pathname + boardFilterLocation(url.search, recipe));
+    const workspace = await readWorkspace('boardWorkspace', id.data, undefined, request.signal);
+    try {
+      const cardsPage = await readWorkspace('boardCards', id.data, boardFilterApiQuery(context, recipe, cursor), request.signal);
+      return { ...workspace.data, cardsPage, recipe, recipeCursor: cursor, context };
+    } catch (error) {
+      if (!(error instanceof WorkspaceRequestError)) throw error;
+      if (error.code === 'INVALID_CURSOR' && cursor) throw redirect(url.pathname + boardFilterLocation(url.search, recipe));
+      if (error.status === 403 || error.status === 404) return null;
+      if (error.status === 401) throw error;
+      return { ...workspace.data, cardsPage: null, recipe, recipeCursor: cursor, context };
+    }
   });
 }
+
+export type BoardReadRefusal = {
+  deniedBoard: Awaited<ReturnType<typeof loadNativeBoard>> | undefined;
+  refuseBoard: (board: NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>) => void;
+};
 
 export function loadNativeCard({ params, request }: LoaderFunctionArgs) {
   const boardId = publicIdSchema.safeParse(params.boardId);

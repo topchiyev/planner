@@ -1,3 +1,4 @@
+import { readBoardFilterRecipe, writeBoardFilterRecipe } from './board-query.js';
 import { publicIdPattern, publicIdSchema } from './storage.js';
 
 const uuid = publicIdPattern.slice(1, -1);
@@ -19,23 +20,27 @@ const inboxParameters = {
 const boardParameters = {
   context: (value: string) => value === 'board' || value === 'archive' || value === 'trash',
   view: (value: string) => value === 'kanban' || value === 'grid' || value === 'list',
+  cursor: (value: string) => cursor.test(value),
 };
 
 export function workspaceReturnPath(value: unknown) {
-  if (typeof value !== 'string' || value.length > 6_000 || !value.startsWith('/') || value.startsWith('//')
+  if (typeof value !== 'string' || value.length > 15_000 || !value.startsWith('/') || value.startsWith('//')
       || /[\\\u0000-\u0020\u007f]/u.test(value)) return null;
   try {
     const base = 'https://planner.invalid';
     const url = new URL(value, base);
     if (url.origin !== base) return null;
     const pathname = url.pathname.replace(/\/$/u, '');
-    const allowed = pathname === '/workspace' ? workspaceParameters : pathname === '/inbox' ? inboxParameters : board.test(pathname) ? boardParameters : null;
+    const boardPath = board.test(pathname);
+    if (!boardPath && value.length > 6_000) return null;
+    const allowed = pathname === '/workspace' ? workspaceParameters : pathname === '/inbox' ? inboxParameters : boardPath ? boardParameters : null;
     if (!allowed && !project.test(pathname)) return null;
     const parameters = new URLSearchParams();
     for (const [field, valid] of Object.entries(allowed ?? {})) {
       const [input, ...duplicates] = url.searchParams.getAll(field);
       if (input !== undefined && !duplicates.length && valid(input)) parameters.set(field, input);
     }
+    if (boardPath) writeBoardFilterRecipe(parameters, readBoardFilterRecipe(url.searchParams));
     const query = parameters.toString();
     return pathname + (query ? '?' + query : '');
   } catch { return null; }

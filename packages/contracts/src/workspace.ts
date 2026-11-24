@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { boardPageSize, boardQueryIds, boardSearchQuery } from './board-query.js';
 import { boardEventCursorSchema } from './board-events.js';
 import { nullableUtcInstantSchema, publicIdSchema, revisionSchema, signedInt64TextSchema, utcInstantSchema } from './storage.js';
 
@@ -16,10 +17,8 @@ const maybeId = publicIdSchema.nullable();
 const maybeText = z.string().nullable();
 const nonnegative = z.number().safe().int().nonnegative();
 const cursor = z.string().regex(/^v1\.[A-Za-z0-9_-]+$/u).max(2048);
-const idList = z.union([publicIdSchema, z.array(publicIdSchema).max(50)])
-  .transform((value) => [...new Set(typeof value === 'string' ? [value] : value)].sort());
 const queryBoolean = z.enum(['true', 'false']).transform((value) => value === 'true');
-const limit = z.string().regex(/^[1-9]\d{0,8}$/u).transform((value) => Math.min(Number(value), 100)).default(25);
+const limit = boardPageSize.default(25);
 const pageQuery = { limit, cursor: cursor.optional() };
 const paginated = z.strictObject({ nextCursor: cursor.nullable() });
 const page = <S extends z.ZodType>(item: S) => z.strictObject({ data: z.array(item), page: paginated });
@@ -96,6 +95,7 @@ export const boardWorkspaceSchema = z.strictObject({
   following: z.boolean(),
   orderVersion: revisionSchema,
   latestEventSequence: signedInt64TextSchema,
+  recipeScope: z.string().regex(/^[a-f0-9]{64}$/u),
   eventCursor: boardEventCursorSchema,
 });
 export const cardStopwatchSchema = z.strictObject({ startedAt: nullableUtcInstantSchema, total: nonnegative }).nullable();
@@ -161,12 +161,15 @@ export const workspaceOperations = {
   boardGet: read('boards.get', '/api/v1/boards/:id', identifier, data(boardSummarySchema)),
   boardWorkspace: read('boards.workspace', '/api/v1/boards/:id/workspace', identifier, data(boardWorkspaceSchema)),
   boardCards: read('boards.cards', '/api/v1/boards/:id/cards', identifier.extend({
-    context: workspaceCardContext.default('board'), q: z.string().trim().max(256).default(''),
-    labelsAny: idList.default([]), labelsNone: idList.default([]), members: idList.default([]),
-    listIds: idList.default([]), unassigned: queryBoolean.default(false), ...pageQuery,
+    context: workspaceCardContext.default('board'), q: boardSearchQuery.default(''),
+    labelsAny: boardQueryIds.default([]), labelsNone: boardQueryIds.default([]), members: boardQueryIds.default([]),
+    listIds: boardQueryIds.default([]), unassigned: queryBoolean.default(false), ...pageQuery,
   }), page(cardSummarySchema.extend({ cover: z.strictObject({ attachmentId: publicIdSchema, hasThumbnail: z.boolean() }).nullable(), frontChecklists: z.array(frontChecklistSchema).max(3), frontFields: z.array(z.strictObject({
     fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, name: z.string(), value: z.string(),
-  })) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
+  })) })).extend({
+    counts: z.array(z.strictObject({ listId: publicIdSchema, count: nonnegative })),
+    searchValidation: z.enum(['ok', 'invalid-pattern', 'search-limit']),
+  })),
   cardGet: read('cards.get', '/api/v1/cards/:id', identifier.extend({ boardId: publicIdSchema.optional() }), data(cardDetailSchema)),
   boardLabels: read('labels.list', '/api/v1/boards/:id/labels', identifier, data(z.array(boardLabelSchema))),
   cardChecklists: read('checklists.list', '/api/v1/cards/:id/checklists', identifier.extend({ boardId: publicIdSchema.optional() }), data(z.array(checklistSchema))),

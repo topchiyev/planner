@@ -102,6 +102,13 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
   }
   const scoped = <K extends WorkspaceRecordName>(filter: Document) => ({ ...filter, generationId } as Filter<WorkspaceRow<K>>);
   const personProjection = { _id: 1, generationId: 1, id: 1, name: 1, username: 1, role: 1, disabledAt: 1 };
+  function scan<Result extends Document>(
+    name: WorkspaceRecordName, filter: Document, stages: Document[],
+    options?: Pick<AggregateOptions, 'maxTimeMS' | 'batchSize'>,
+  ) {
+    return database.collection(name).aggregate<Result>([{ $match: { ...filter, generationId } }, ...stages],
+      { promoteLongs: false, ...options });
+  }
   return {
     get<K extends WorkspaceRecordName>(name: K, id: string) {
       return collection(name).findOne(scoped<K>({
@@ -123,9 +130,9 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
     aggregate<Result extends Document>(
       name: WorkspaceRecordName, filter: Document, stages: Document[], options?: Pick<AggregateOptions, 'maxTimeMS'>,
     ) {
-      return database.collection(name).aggregate<Result>([{ $match: { ...filter, generationId } }, ...stages],
-        { promoteLongs: false, ...options }).toArray();
+      return scan<Result>(name, filter, stages, options).toArray();
     },
+    scan,
     lookup(name: WorkspaceRecordName, as: string, variables: Document, filter: Document, tail: Document[] = []): Document {
       return { $lookup: { from: name, as, let: variables, pipeline: [{ $match: { ...filter, generationId } }, ...tail] } };
     },

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { workspaceReturnPath, workspaceSignInPath } from '@planner/contracts';
+import { boardFilterKeys, workspaceReturnPath, workspaceSignInPath } from '@planner/contracts';
 
 const projectId = 'c0d7680f-1a44-4222-8b16-22c35e1be317';
 const boardId = 'c0d7680f-1a44-4222-8b16-22c35e1be318';
@@ -28,4 +28,23 @@ test('workspace sign-in destinations discard off-site and non-workspace routes',
     assert.equal(workspaceReturnPath(target), null, target);
     assert.equal(workspaceSignInPath(target), '/sign-in');
   }
+});
+
+test('board sign-in round trips each maximum repeated filter group and rejects oversized and off-site values', () => {
+  const params = new URLSearchParams({ q: '界'.repeat(256), limit: '100', unassigned: 'true', context: 'archive', view: 'list',
+    cursor: 'v1.' + 'A'.repeat(2045), ignore: 'unknown' });
+  for (const [group, key] of boardFilterKeys.entries()) for (let index = 0; index < 50; index++) {
+    params.append(key, '65160d3b-4e42-4023-880e-' + (group * 50 + index + 1).toString(16).padStart(12, '0'));
+  }
+  const route = '/boards/' + boardId + '/cards/' + cardId;
+  const signIn = new URL(workspaceSignInPath(route + '?' + params), 'https://planner.invalid');
+  const returned = workspaceReturnPath(signIn.searchParams.get('returnTo'));
+  assert.ok(returned && returned.length > 13_000);
+  const search = new URL(returned, 'https://planner.invalid').searchParams;
+  for (const key of boardFilterKeys) assert.deepEqual(search.getAll(key), params.getAll(key));
+  for (const key of ['q', 'limit', 'unassigned', 'context', 'view', 'cursor']) assert.equal(search.get(key), params.get(key));
+  assert.equal(search.has('ignore'), false);
+  assert.equal(workspaceSignInPath(route + '?q=' + 'x'.repeat(15_000)), '/sign-in');
+  assert.equal(workspaceSignInPath('https://other.invalid' + route + '?' + params), '/sign-in');
+  assert.equal(workspaceReturnPath(route + '?q=first&q=duplicate&labelsAny=' + boardId + '&labelsAny=foreign'), route);
 });

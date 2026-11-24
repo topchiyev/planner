@@ -27,27 +27,27 @@ const listErrors = new Map([
   ['INVALID_LIST_ANCHOR', 'Choose a different list as the destination.'],
 ]);
 
-function ListSummary({ list }: { list: BoardList }) {
+function ListSummary({ list, count = list.cardCount }: { list: BoardList; count?: number }) {
   const kind = { active: 'Active', closed: 'Closed', archive: 'Archive', trash: 'Trash' }[list.kind];
   return <div className="board-list-summary">
     <strong>{list.name}</strong>
     <div className="board-list-info">
       {list.color && <span className="board-list-swatch" data-color={list.color} title={listColorNames[list.color]} aria-label={listColorNames[list.color]} role="img" />}
-      <span>{kind}</span><span>{list.cardCount} {list.cardCount === 1 ? 'card' : 'cards'}</span>
+      <span>{kind}</span><span>{count} {count === 1 ? 'card' : 'cards'}</span>
     </div>
   </div>;
 }
 
-export function ReadonlyBoardLists({ lists, renderContents }: {
-  lists: BoardList[]; renderContents?: (list: BoardList) => ReactNode;
+export function ReadonlyBoardLists({ lists, counts, renderContents }: {
+  lists: BoardList[]; counts?: ReadonlyMap<string, number>; renderContents?: (list: BoardList) => ReactNode;
 }) {
   return lists.length ? <ul aria-label="Board lists" className="workspace-list-summary">
-    {lists.map((list) => <li key={list.id}><ListSummary list={list} />{renderContents?.(list)}</li>)}
+    {lists.map((list) => <li key={list.id}><ListSummary list={list} count={counts ? counts.get(list.id) ?? 0 : undefined} />{renderContents?.(list)}</li>)}
   </ul> : <EmptyState title="No lists to show" />;
 }
 
-function EditableList({ list, busy, allowDrag, dragging, edit, move, focus, children }: {
-  list: BoardList; busy: boolean; allowDrag: boolean; dragging?: string;
+function EditableList({ list, count, busy, allowDrag, dragging, edit, move, focus, children }: {
+  list: BoardList; count?: number; busy: boolean; allowDrag: boolean; dragging?: string;
   edit: () => void; move: () => void; focus: (node: HTMLButtonElement | null) => void; children?: ReactNode;
 }) {
   const drag = useDraggable({ id: list.id, type: listDrag, disabled: busy || !allowDrag });
@@ -58,7 +58,7 @@ function EditableList({ list, busy, allowDrag, dragging, edit, move, focus, chil
   }, [drag.ref, drop.ref]);
   return <li ref={register}
     data-list-drag-source={drag.isDragging || undefined} data-list-drop-target={drop.isDropTarget || undefined}>
-    <ListSummary list={list} />
+    <ListSummary list={list} count={count} />
     <div className="project-actions">
       <button type="button" className="workspace-button" aria-label={'Edit ' + list.name} disabled={busy || !!dragging} onClick={edit}>Edit</button>
       <button type="button" className="workspace-button" aria-label={'Move ' + list.name} disabled={busy || !!dragging} ref={focus} onClick={move}>Move</button>
@@ -77,8 +77,8 @@ function AppendTarget({ active }: { active: boolean }) {
 
 type Dialog = { kind: 'create' } | { kind: 'edit'; listId: string } | { kind: 'move'; snapshot: MoveSnapshot };
 
-export function BoardLists({ workspace, lists, renderContents, wrapDragContents }: {
-  workspace: Workspace; lists: BoardList[]; renderContents?: (list: BoardList) => ReactNode;
+export function BoardLists({ workspace, lists, counts, renderContents, wrapDragContents }: {
+  workspace: Workspace; lists: BoardList[]; counts?: ReadonlyMap<string, number>; renderContents?: (list: BoardList) => ReactNode;
   wrapDragContents?: (content: ReactNode) => ReactNode;
 }) {
   const navigate = useNavigate();
@@ -154,7 +154,7 @@ export function BoardLists({ workspace, lists, renderContents, wrapDragContents 
   const details = dialog?.kind === 'create' || edit;
   const dragContents = <>
     <ul className="workspace-list-summary board-editable-lists" aria-label="Board lists">
-      {lists.map((list) => <EditableList key={list.id} list={list} busy={action.busy} dragging={dragging}
+      {lists.map((list) => <EditableList key={list.id} list={list} count={counts ? counts.get(list.id) ?? 0 : undefined} busy={action.busy} dragging={dragging}
         allowDrag={lists.length > 1} edit={() => {
           action.clearProblem(); setMessage(''); setDialog({ kind: 'edit', listId: list.id });
         }} move={() => {

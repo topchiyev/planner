@@ -1,12 +1,13 @@
-import { Link, Outlet, useLoaderData, useLocation, useMatch, useSearchParams } from 'react-router';
+import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRevalidator, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
 
-import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
+import type { BoardReadRefusal, loadNativeBoard } from '../workspace/workspace-loaders.js';
 import { projectHref } from '../workspace/workspace-navigation.js';
 import { BoardAffiliations } from '../affiliations/board-affiliations.js';
 import { BoardManagement } from './board-management.js';
 import { BoardFieldGroups } from '../fields/workspace-fields.js';
 import { ActivityFeed } from '../discussions/feed.js';
+import { BoardFilters } from './board-filters.js';
 import { BoardCards } from '../cards/board-cards.js';
 
 const contexts = [
@@ -26,7 +27,11 @@ type View = (typeof views)[number]['id'];
 export function BoardPage() {
   const board = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
   const [params] = useSearchParams();
-  const { pathname, state: routeState } = useLocation();
+  const navigation = useNavigation();
+  const revalidator = useRevalidator();
+  const { deniedBoard, refuseBoard } = useOutletContext<BoardReadRefusal>();
+  const { pathname, search, state: routeState } = useLocation();
+  const pending = !!navigation.location && (navigation.location.pathname !== pathname || navigation.location.search !== search);
   const inspectorOpen = useMatch('/boards/:boardId/cards/:cardId') !== null;
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
@@ -36,12 +41,16 @@ export function BoardPage() {
   function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: View) {
     const nextParams = new URLSearchParams(params);
     nextParams.set('context', nextContext);
+    if (nextContext !== context.id) {
+      nextParams.delete('cursor');
+      nextParams.delete('listIds');
+    }
     if (nextView) nextParams.set('view', nextView);
     else if (nextContext !== 'board' && nextParams.get('view') === 'kanban') nextParams.delete('view');
     return { pathname, search: `?${nextParams}` };
   }
 
-  if (board === null) return <RouteNotFound />;
+  if (board === null || (board && deniedBoard === board)) return <RouteNotFound />;
   const lists = board?.lists.filter(({ kind }) => context.id === 'board' ? kind === 'active' || kind === 'closed' : kind === context.id);
 
   return (
@@ -70,8 +79,16 @@ export function BoardPage() {
             ))}
           </nav>
         </div>
-        {board && lists ? <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} />
-          : <EmptyState title={context.emptyTitle} />}
+        {board && lists ? <>
+          <BoardFilters key={JSON.stringify([board.recipeScope, board.board.id, board.context, board.recipe])}
+            workspace={board} lists={lists} loading={pending} onAccessLost={() => {
+              refuseBoard(board);
+              void revalidator.revalidate();
+            }} />
+          <div hidden={pending}>
+            <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} />
+          </div>
+        </> : !board && <EmptyState title={context.emptyTitle} />}
         {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.board.revision} />}
       </section>
       <Outlet />
