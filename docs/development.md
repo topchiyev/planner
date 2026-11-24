@@ -190,7 +190,7 @@ Project favorites use the relationship registry at `PUT /api/v1/projects/:id/fav
 
 ### Board clipboard and description drafts
 
-Cut or copy one card with the inspector controls. Use the same shortcuts on a focused card link. Navigate within Planner to an editable board and paste into an active or closed list. A paste uses the existing move or duplicate command, so the source, destination and placement versions are checked again. If the response is interrupted, **Retry paste** checks the same attempt. An acknowledged cut clears the selection. A copy stays available for another deliberate paste. Closing or refreshing the tab clears the board clipboard.
+Cut or copy one card with the inspector controls or press `Ctrl+X` or `Ctrl+C` on a focused card link. Navigate within Planner to an editable board and press `Ctrl+V` or choose **Paste card**. Use Command instead of Ctrl on macOS. Pick an active or closed list and a position. A paste uses the existing move or duplicate command, so the source, destination and placement versions are checked again. If the response is interrupted, **Retry paste** checks the same attempt. An acknowledged cut clears the selection. A copy stays available for another deliberate paste. Closing or refreshing the tab clears the board clipboard.
 
 When you edit a card description, the browser records the Markdown draft for that installation generation, account and card. Reopen the card with current edit access to recover the draft within seven days of your last text edit. If another edit changed the card, compare the local and saved descriptions before keeping, copying or discarding the draft. Saving or discarding clears the version you acted on. If browser storage is unavailable, you can still edit and save normally.
 

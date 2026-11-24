@@ -2248,6 +2248,15 @@ test('keyboard cut rechecks the source revision, cancels cleanly and reopens aft
     await switchBoard('Private fixture project', 'Transfer source');
     await source.press('Control+x');
     await switchBoard('Shared fixture project', 'Transfer destination');
+    const membership = { ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor };
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').updateOne(membership, { $set: { role: 'viewer' } }));
+    await heading.press('Control+v');
+    await expect(toolbar.getByRole('alert')).toContainText('The source card changed');
+    await expect(toolbar.getByRole('button', { name: 'Paste card', exact: true })).toHaveCount(0);
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').updateOne(membership, { $set: { role: 'editor' } }));
+    await switchBoard('Private fixture project', 'Transfer source');
+    await source.press('Control+x');
+    await switchBoard('Shared fixture project', 'Transfer destination');
     await heading.focus();
     await heading.press('Control+v');
     await expect(dialog).toBeVisible();

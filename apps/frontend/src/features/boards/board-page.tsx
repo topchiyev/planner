@@ -63,8 +63,10 @@ export function BoardPage() {
     if (clipboard.attempt || live.phase !== 'visible') return;
     const source = live.card?.id === selected.cardId ? live.card : board?.cardsPage?.data.find(({ id }) => id === selected.cardId);
     const permitted = source && (selected.action === 'cut' ? source.permissions.canMove : source.permissions.canDuplicateFrom);
-    if ((cardId === selected.cardId && live.card === null) || (source && !permitted)) clipboard.discard(selected);
-  }, [clipboard, board, boardId, initial, live.phase, cardId, live.card]);
+    if (live.removed?.has(selected.cardId) || (cardId === selected.cardId && live.card === null) || (source && !permitted)) {
+      clipboard.discard(selected);
+    }
+  }, [clipboard, board, boardId, initial, live.phase, cardId, live.card, live.removed]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
