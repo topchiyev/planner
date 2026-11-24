@@ -111,7 +111,7 @@ export function AccountSettingsPage() {
       <div className="account-settings">
         <section className="account-panel">
           <h2>Profile</h2>
-          <form className="auth-form" key={profile.revision} onSubmit={(event) => void submit(event, saveProfile)}>
+          <form className="auth-form" method="post" key={profile.revision} onSubmit={(event) => void submit(event, saveProfile)}>
             {profileFields.map(([field, label, autocomplete]) => (
               <label key={field}>{label}<input name={field} autoComplete={autocomplete} type={field === 'email' ? 'email' : 'text'}
                 defaultValue={profile[field] ?? ''} required={field === 'name' || field === 'email'} /></label>
@@ -138,7 +138,7 @@ export function AccountSettingsPage() {
         </section>
         <section className="account-panel">
           <h2>Change password</h2>
-          <form className="auth-form" onSubmit={(event) => void submit(event, changePassword)}>
+          <form className="auth-form" method="post" onSubmit={(event) => void submit(event, changePassword)}>
             <label>Current password<input autoComplete="current-password" name="oldPassword" required type="password" /></label>
             <label>New password<input autoComplete="new-password" name="newPassword" required type="password" /></label>
             <label>Confirm new password<input autoComplete="new-password" name="repeatPassword" required type="password" /></label>
