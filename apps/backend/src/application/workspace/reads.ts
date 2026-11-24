@@ -8,8 +8,8 @@ import { createBoardEventStore } from '../board-events/store.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
 import { boardListOrderVersion, listDto } from './list-state.js';
-import { boardDto, boardPreferences, projectBoardOrderVersion } from './board-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { availableMedia, unavailableMedia } from '../media/records.js';
@@ -221,7 +221,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         projectSummary(board.project),
         records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] } }, rankSort),
         records.find('labels', { boardId: id }, rankSort),
-        records.first('boardPreferences', { boardId: id }),
+        boardPreferencesRow(records, generationId, id),
         createBoardEventStore(database, generationId, id).highWater(),
         together((['board', 'archive', 'trash'] as const).map((kind) =>
           records.aggregate<{ _id: string; count: number }>('cards', { boardId: id, kind }, [

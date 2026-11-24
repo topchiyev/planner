@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import { workspaceSignInPath } from '@planner/contracts';
 import { useWorkspaceMutation } from '../projects/project-controls.js';
@@ -7,6 +8,7 @@ import './board-management.css';
 
 const errors = new Map([
   ['BOARD_ORDER_CONFLICT', 'The board order changed. Review the current order and try again.'],
+  ['BOARD_DELETE_DATA_LIMIT', 'This board has imported data too large to preserve during deletion.'],
   ['BOARD_NAME_MISMATCH', 'Enter the board name exactly as displayed.'],
   ['INELIGIBLE_ACCOUNT', 'That account is unavailable for board membership.'],
   ['RELATIONSHIP_EXISTS', 'This account already belongs to the board.'],
@@ -20,17 +22,23 @@ export function useBoardMutation() {
 export function useReturnFromBoard() {
   const navigate = useNavigate();
   const { pathname, search } = useLocation();
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => () => request.current?.abort(), []);
   return async (projectId: string) => {
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
     let path = '/workspace';
     try {
-      await readWorkspace('projectGet', projectId);
+      await readWorkspace('projectGet', projectId, undefined, controller.signal);
       path = projectHref(projectId);
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (error instanceof WorkspaceRequestError && error.status === 401) {
         window.location.replace(workspaceSignInPath(pathname + search));
         return;
       }
     }
-    await navigate(path, { replace: true });
+    if (!controller.signal.aborted) await navigate(path, { replace: true });
   };
 }

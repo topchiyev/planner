@@ -445,6 +445,8 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     const view = main.getByRole('navigation', { name: 'Board view' });
     await expect(view.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     await view.getByRole('link', { name: 'List' }).click();
+    await expect(owner).toHaveURL((url) => url.searchParams.get('view') === 'list');
+    await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.reload();
     await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.goBack();
@@ -467,7 +469,7 @@ test('desktop manager creates, keyboard reorders and configures a board without 
 });
 
 test('narrow board membership grants only selected access, handles leaving and deletes with exact confirmation', { timeout: 120_000 }, async () => {
-  await workspaceBrowser(async ({ origin, page }) => {
+  await workspaceBrowser(async ({ fixture: f, origin, page }) => {
     const owner = await page({ width: 390, height: 844 });
     const viewer = await page({ width: 390, height: 844 });
     await signIn(owner, origin, 'private-owner');
@@ -512,15 +514,27 @@ test('narrow board membership grants only selected access, handles leaving and d
     await owner.getByRole('button', { name: 'Confirm leave' }).click();
     await expect(owner.getByRole('button', { name: 'Leave board' })).toHaveCount(0);
     await expect(owner.getByRole('button', { name: 'Board settings' })).toBeVisible();
+    const boardId = href.split('/').at(-1);
+    const raw = '  Shift handoff\r\nEvening  ';
+    const displayed = String.raw`"\u0020\u0020Shift\u0020handoff\r\nEvening\u0020\u0020"`;
+    await f.gate.runCommand(() => f.db.collection('boards').updateOne({ ...f.scope, id: boardId },
+      { $set: { name: raw }, $inc: { revision: 1 } }));
+    await owner.reload();
+    await expect(owner.getByRole('heading', { name: 'Shift handoff Evening' })).toBeVisible();
     await owner.getByRole('button', { name: 'Delete board', exact: true }).click();
     const confirmation = owner.getByRole('dialog', { name: 'Delete board' });
     const deleteBoard = confirmation.getByRole('button', { name: 'Permanently delete board' });
-    await confirmation.getByLabel('Exact board name').fill('shift handoff');
+    await expect(confirmation.locator('code')).toHaveText(displayed);
+    const exactName = confirmation.getByLabel('Confirm board name');
+    await exactName.fill('Shift handoff');
     await expect(deleteBoard).toBeDisabled();
-    await confirmation.getByLabel('Exact board name').fill('Shift handoff');
+    await exactName.fill(displayed);
+    const request = owner.waitForRequest((request) => request.method() === 'DELETE' && request.url().endsWith('/api/v1' + href));
     await deleteBoard.click();
+    assert.equal((await request).postDataJSON().name, raw);
     await expect(owner).toHaveURL(origin + project(ids.privateProject));
     await expect(main.getByRole('link', { name: 'Shift handoff' })).toHaveCount(0);
+    assert.equal(await f.db.collection('boards').findOne({ ...f.scope, id: boardId }), null);
     assert.ok(await main.evaluate((element) => element.scrollWidth <= element.clientWidth));
   });
 });
@@ -622,5 +636,32 @@ test('direct editors create, edit and move board lists by keyboard and pointer, 
     await expect(listNames(editor)).toHaveText(['Archive']);
     await expect(editor.getByRole('button', { name: 'Edit Archive' })).toHaveCount(0);
     await expect(editor.getByRole('button', { name: 'Add list' })).toHaveCount(0);
+  });
+});
+
+test('project deletion confirms and sends an exact imported name with spaces and line breaks', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const id = fixtureId(2899);
+    const raw = '  Imported\r\n' + 'Long title '.repeat(15);
+    const displayed = String.raw`"\u0020\u0020Imported\r\n` + String.raw`Long\u0020title\u0020`.repeat(15) + '"';
+    await fixture.insert('projects', id, { name: raw, type: 'shared', hidden: false, ownerProjectManagerId: null, rank: '2899' });
+    await fixture.insert('projectManagers', fixtureId(2900), { projectId: id, userId: ids.projectManager });
+    const owner = await page({ width: 390, height: 844 });
+    await signIn(owner, origin, 'project-manager');
+    await owner.goto(origin + project(id));
+    await owner.getByRole('button', { name: 'Delete project', exact: true }).click();
+    const dialog = owner.getByRole('dialog', { name: 'Delete project' });
+    await expect(dialog.locator('code')).toHaveText(displayed);
+    const input = dialog.getByLabel('Confirm project name');
+    const remove = dialog.getByRole('button', { name: 'Delete permanently' });
+    await input.fill(displayed.replace(String.raw`\u0020"`, '"'));
+    await expect(remove).toBeDisabled();
+    await input.fill(displayed);
+    await expect(remove).toBeEnabled();
+    const request = owner.waitForRequest((request) => request.method() === 'DELETE' && request.url().endsWith('/api/v1' + project(id)));
+    await remove.click();
+    assert.equal((await request).postDataJSON().name, raw);
+    await expect(owner).toHaveURL(origin + '/workspace');
+    assert.equal(await fixture.db.collection('projects').findOne({ ...fixture.scope, id }), null);
   });
 });

@@ -1,18 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { boardDeleteReceipt, type RelationshipBoardInvalidation, type RelationshipCommandInput } from '@planner/contracts';
+import { boardDeleteReceipt, type RelationshipCommandInput } from '@planner/contracts';
 import { revisionSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { decodeRank, encodeRank, workspaceKey } from '../../storage/identity.js';
 import type { CommandPlan, CommandPlanningContext, PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { planBoardDescendants } from './board-deletion.js';
-import { boardPreferences, boardShape, projectBoardOrderVersion } from './board-state.js';
+import { boardPreferences, boardPreferencesRow, boardShape, projectBoardOrderVersion } from './board-state.js';
 import { readTerminalDeletionReceipt } from './deletion-receipt.js';
 import { planRankChange, RankAnchorError } from './ordered-ranks.js';
 import { RelationshipError, requireRevision, touchRevision } from './relationship-policy.js';
-import { canonicalRow, equal, type WorkspaceRecords, type WorkspaceRow } from './records.js';
+import type { WorkspaceRecords, WorkspaceRow } from './records.js';
 
-const invalidate = (boardId: string): RelationshipBoardInvalidation => ({ boardId, kind: 'board.access-changed', payload: {} });
+const invalidate = (boardId: string) => ({ boardId, kind: 'board.invalidated', payload: {} } as const);
 const audit = (action: string, resourceId: string) => ({ action, resourceId, resourceType: 'board' });
 
 export async function authorizeBoardCreate(scope: WorkspaceAuthorization, id: string) {
@@ -107,19 +107,20 @@ export async function planBoardMove(
     effects: [], result: { data: { board: boardShape(board, permissions), projectRevision: project.project.revision,
       projectBoardOrderVersion: version } }, audit: commandAudit,
   };
-  if (!ranks.has(board.id) && board.rank != null) ranks.set(board.id, decodeRank(board.rank));
+  if (!ranks.has(board.id)) {
+    if (board.rank == null) throw new Error('The board move must assign a rank.');
+    ranks.set(board.id, decodeRank(board.rank));
+  }
   const parent = advanceBoardOrder(project.project, context.timestamp);
   const effects: PlannedEffect[] = [parent];
-  const events: RelationshipBoardInvalidation[] = [];
+  const events: ReturnType<typeof invalidate>[] = [];
   for (const row of boards) {
     const rank = ranks.get(row.id);
     if (rank === undefined) continue;
     effects.push(rankEffect(row, rank, context.timestamp));
     events.push(invalidate(row.id));
   }
-  const rank = ranks.get(board.id);
-  const moved = { ...board, revision: revision + 1, updatedAt: new Date(context.timestamp),
-    rank: rank === undefined ? board.rank : encodeRank(rank) };
+  const moved = { ...board, revision: revision + 1, updatedAt: new Date(context.timestamp), rank: encodeRank(ranks.get(board.id)!) };
   return {
     effects, result: { data: { board: boardShape(moved, permissions), projectRevision: parent.revision + 1,
       projectBoardOrderVersion: parent.fields.boardOrderVersion } }, audit: commandAudit, events,
@@ -133,8 +134,7 @@ export async function planBoardUpdate(
   const { id, expectedRevision, name, ...changes } = input;
   const boardEffect = touchRevision('boards', board, context.timestamp, expectedRevision);
   const { defaultView } = changes;
-  const row = await records.first('boardPreferences', { boardId: id,
-    $expr: { $and: [canonicalRow(context.generationId), equal('boardId', id)] } });
+  const row = await boardPreferencesRow(records, context.generationId, id);
   const { revision: preferenceRevision, ...settings } = boardPreferences(board, row);
   const preferences = { ...settings, ...Object.fromEntries(Object.entries(changes).filter(([, value]) => value !== undefined)) };
   let nextPreferenceRevision = preferenceRevision;
@@ -163,7 +163,7 @@ export async function authorizeBoardDelete(database: Db, scope: WorkspaceAuthori
 ) {
   requireCapability(origin === 'web');
   try {
-    await authorizeBoardManage(scope, input.id);
+    return await authorizeBoardManage(scope, input.id);
   } catch (error) {
     if (!(error instanceof WorkspaceAccessError) || error.statusCode !== 404 || !key) throw error;
     const receipt = boardDeleteReceipt.safeParse(await readTerminalDeletionReceipt(database, scope, 'boards.delete', key, input));
@@ -172,16 +172,19 @@ export async function authorizeBoardDelete(database: Db, scope: WorkspaceAuthori
   }
 }
 
-export async function planBoardDelete(records: WorkspaceRecords, scope: WorkspaceAuthorization,
+export async function planBoardDelete(records: WorkspaceRecords, access: BoardAccessContext | undefined,
   input: RelationshipCommandInput<'boards.delete'>, context: CommandPlanningContext): Promise<CommandPlan> {
-  const { board, project } = await authorizeBoardManage(scope, input.id);
+  if (!access) throw new WorkspaceAccessError('missing');
+  const { board, project } = access;
   const revision = requireRevision(board, input.expectedRevision);
   if (board.name !== input.name) throw new RelationshipError('boardName');
   const parent = advanceBoardOrder(project.project, context.timestamp);
-  const descendants = await planBoardDescendants(records, context.generationId, board.id, context.timestamp);
+  const descendants = await planBoardDescendants(records, board.id, context);
   return {
     effects: [...descendants.effects, { kind: 'delete', collection: 'boards', id: board.id, revision }, parent],
     result: { data: { id: board.id, projectId: project.project.id, parentRevision: parent.revision + 1 } },
-    audit: audit('boards.delete', board.id), events: [board.id, ...descendants.otherBoardIds].map(invalidate),
+    audit: audit('boards.delete', board.id), events: [
+      { boardId: board.id, kind: 'board.access-changed', payload: {} }, ...descendants.otherBoardIds.map(invalidate),
+    ],
   };
 }

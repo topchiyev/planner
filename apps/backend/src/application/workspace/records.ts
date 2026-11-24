@@ -45,7 +45,7 @@ interface Records {
   cardFollows: { cardId: string; userId: string };
   checklists: Ordered & { cardId: string; showOnFront?: boolean; hideCompleted?: boolean };
   tasks: {
-    checklistId: string; rank?: Long | null; name?: string; completed?: boolean; assigneeId?: string | null;
+    checklistId: string; rank?: Long | null; name?: string | null; completed?: boolean | null; assigneeId?: string | null;
     linkedCardId?: string | null; linkedUnavailable?: boolean;
   };
   fieldGroups: Ordered & { scopeType: FieldScope; scopeId: string; templateGroupId?: string | null };

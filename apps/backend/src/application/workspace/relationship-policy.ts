@@ -15,6 +15,7 @@ const failures = {
   boardOrder: [409, 'BOARD_ORDER_CONFLICT', 'The board order changed. Reload and try again.'],
   listOrder: [409, 'LIST_ORDER_CONFLICT', 'The list order changed. Reload and try again.'],
   listAnchor: [422, 'INVALID_LIST_ANCHOR', 'Choose a different list as the destination.'],
+  boardDeleteData: [422, 'BOARD_DELETE_DATA_LIMIT', 'This board has imported data too large to preserve during deletion.'],
   boardName: [422, 'BOARD_NAME_MISMATCH', 'Enter the board name exactly as displayed.'],
   background: [422, 'INVALID_PROJECT_BACKGROUND', 'Choose an available image from this project.'],
   ownership: [409, 'OWNER_REQUIRES_SOLE_MANAGER', 'A private project requires one active eligible project manager.'],

@@ -146,8 +146,11 @@ test('populated board deletion recovers across batches and redacts surviving lin
     const survivingOwner = await signIn(f, ids.privateOwner);
     const target = ids.sharedBoard;
     const linked = ids.sharedTarget;
+    const targetName = 'Cross-board linked target ' + 'x'.repeat(650) + ' protected suffix';
     const name = 'Imported board ' + 'x'.repeat(165) + '  ';
     await f.db.collection('boards').updateOne({ ...f.scope, id: target }, { $set: { name } });
+    const targetCard = (name) => f.db.collection('cards').updateOne({ ...f.scope, id: linked }, { $set: { name } });
+    await targetCard(targetName);
     const rows = new Map([
       ['labels', { boardId: target, name: 'Board label', rank: '1' }],
       ['boardPreferences', { boardId: target, defaultView: 'list' }],
@@ -188,13 +191,19 @@ test('populated board deletion recovers across batches and redacts surviving lin
     });
     await f.db.collection('tasks').insertMany(batch);
     const extraTask = fixtureId(7108);
-    await f.insert('tasks', extraTask, { checklistId: ids.checklist, linkedCardId: linked, completed: true, rank: '2048' });
+    await f.insert('tasks', extraTask, { checklistId: ids.checklist, linkedCardId: linked, name: 'Cross-board linked target', completed: true, rank: '2048' });
     const historicalActivity = await f.insert('activities', fixtureId(7109), { boardId: target, cardId: ids.activeCard });
     const historicalNotice = await f.insert('notifications', fixtureId(7110), { boardId: target, cardId: ids.activeCard, recipientId: ids.firstEditor });
     await response(mutate(f, siteAdmin, 'DELETE', board(target), 1, { name }), 403);
     await response(mutate(f, editor, 'DELETE', board(target), 1, { name }), 403);
     await response(mutate(f, manager, 'DELETE', board(target), 1, { name: name.trim() }), 422, 'BOARD_NAME_MISMATCH');
     await response(mutate(f, manager, 'DELETE', board(target), 2, { name }), 409, 'REVISION_CONFLICT');
+    await targetCard('x'.repeat(2 * 1024 * 1024));
+    await response(mutate(f, manager, 'DELETE', board(target), 1, { name }), 422, 'BOARD_DELETE_DATA_LIMIT');
+    assert.equal(f.gate.ready, true);
+    assert.ok(await f.db.collection('boards').findOne({ ...f.scope, id: target }));
+    assert.equal(await f.db.collection('auditEntries').countDocuments({ ...f.scope, action: 'boards.delete' }), 0);
+    await targetCard(targetName);
 
     const key = randomUUID();
     const token = readSessionCookie(manager);
@@ -239,8 +248,9 @@ test('populated board deletion recovers across batches and redacts surviving lin
     }
     for (const id of [ids.linkedTask, extraTask]) {
       const unavailable = await f.db.collection('tasks').findOne({ ...f.scope, id });
-      assert.deepEqual(unavailable.linkedUnavailableProvenance, { id: linked, name: 'Cross-board linked target', completed: true });
-      assert.deepEqual([unavailable.linkedCardId, unavailable.linkedUnavailable, unavailable.completed, unavailable.revision], [null, true, null, 2]);
+      assert.deepEqual(unavailable.linkedUnavailableProvenance, { id: linked, name: targetName, completed: true });
+      assert.deepEqual([unavailable.linkedCardId, unavailable.linkedUnavailable, unavailable.name, unavailable.completed, unavailable.revision],
+        [null, true, null, null, 2]);
     }
     const stored = await openActiveWorkspace(f.db, f.installationId);
     assert.equal(Object.hasOwn(await stored.read('tasks', ids.linkedTask), 'linkedUnavailableProvenance'), false);
@@ -254,7 +264,7 @@ test('populated board deletion recovers across batches and redacts surviving lin
     assert.equal(audits.length, 1);
     const events = await f.db.collection('events').find({ ...f.scope, commandId: audits[0].commandId }).sort({ boardId: 1 }).toArray();
     assert.deepEqual(events.map(({ boardId, kind, payload }) => [boardId, kind, payload]),
-      [[ids.privateBoard, 'board.access-changed', {}], [target, 'board.access-changed', {}]]);
+      [[ids.privateBoard, 'board.invalidated', {}], [target, 'board.access-changed', {}]]);
     await f.gate.runCommand(() => f.db.collection('projectManagers').deleteOne({ ...f.scope, id: ids.sharedManager }));
     await response(mutate(f, manager, 'DELETE', board(target), 1, { name }, key), 404);
   });
