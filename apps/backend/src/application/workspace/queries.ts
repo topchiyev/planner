@@ -4,6 +4,7 @@ import { MongoServerError, type Document } from 'mongodb';
 import { encodeRank } from '../../storage/identity.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import type { BoardAccessContext, WorkspaceAuthorization } from './authorization.js';
+import { liveTaskMarker } from './checklist-state.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { cardLabelJoinFilter, scopedLabels } from './label-state.js';
 import { canonicalRow, equal, type WorkspaceRecords } from './records.js';
@@ -83,8 +84,8 @@ export async function cardFilters(records: WorkspaceRecords, access: WorkspaceAu
         $expr: { $and: [canonical, equal('cardId', '$$cardId')] },
       }, [
         records.lookup('tasks', 'matchingTasks', { checklistId: '$id' }, {
-          assigneeId: { $in: users }, linkedUnavailable: { $ne: true },
-          $expr: { $and: [canonical, equal('checklistId', '$$checklistId'), { $in: ['$assigneeId', users] }] },
+          assigneeId: { $in: users },
+          $expr: { $and: [canonical, liveTaskMarker, equal('checklistId', '$$checklistId'), { $in: ['$assigneeId', users] }] },
         }, [
           access.readableCardLookup('readableTarget', '$linkedCardId'),
           { $match: { $or: [

@@ -142,6 +142,16 @@ test('linked tasks keep live ACL state, track historical target completion and r
     const byAssignee = board(ids.privateBoard) + '/cards?members=' + ids.viewer;
     assert.deepEqual(await data(f.call(byAssignee, viewer)), []);
     assert.deepEqual((await data(f.call(byAssignee, editor))).map(({ id }) => id), [ownerCard]);
+    const malformed = fixtureId(19003);
+    await f.insert('tasks', malformed, {
+      checklistId: ids.checklist, linkedCardId: null, linkedUnavailable: 'legacy', completed: true,
+      name: 'Restricted legacy row', assigneeId: ids.commentingViewer, rank: '1',
+    });
+    unavailable(await findTask(editor, malformed));
+    const malformedAssignee = board(ids.privateBoard) + '/cards?members=' + ids.commentingViewer;
+    assert.deepEqual(await data(f.call(malformedAssignee, editor)), []);
+    const malformedFront = (await data(f.call(board(ids.privateBoard) + '/cards', editor))).find(({ id }) => id === ownerCard).frontChecklists;
+    unavailable(malformedFront[0].tasks.find((task) => task.id === malformed));
     const linked = { linkedCardId: target };
     await expectResponse(change(f, owner, 'POST', group(ids.checklist) + '/tasks', 1, linked), 404);
     await expectResponse(change(f, editor, 'POST', group(ids.checklist) + '/tasks', 1, { ...linked, assigneeId: null }), 422, 'INVALID_REQUEST');
