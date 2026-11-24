@@ -70,6 +70,7 @@ export function BoardPasteControls({ workspace, trigger }: { workspace: Placemen
   const mounted = useRef(false);
   const selected = clipboard?.selected?.scope === workspace.recipeScope ? clipboard.selected : undefined;
   const attempt = clipboard?.attempt?.selected === selected ? clipboard?.attempt : undefined;
+  const canPaste = workspace.board.permissions.canEdit;
 
   useEffect(() => {
     mounted.current = true;
@@ -79,6 +80,8 @@ export function BoardPasteControls({ workspace, trigger }: { workspace: Placemen
     setChecking(false);
     return () => preflight.current?.abort();
   }, [selected]);
+
+  useEffect(() => { if (!canPaste) setPicker(undefined); }, [canPaste]);
 
   function signIn(error: unknown) {
     if (!(error instanceof WorkspaceRequestError) || error.status !== 401) return false;
@@ -91,7 +94,7 @@ export function BoardPasteControls({ workspace, trigger }: { workspace: Placemen
   }
 
   async function openPaste() {
-    if (!selected || !workspace.board.permissions.canEdit || checking || attempt || clipboard?.busy) return;
+    if (!selected || !canPaste || checking || attempt || clipboard?.busy) return;
     const controller = new AbortController();
     preflight.current?.abort();
     preflight.current = controller;
@@ -159,7 +162,7 @@ export function BoardPasteControls({ workspace, trigger }: { workspace: Placemen
   return <section className="board-clipboard" aria-label="Board clipboard">
     {selected && <div className="project-actions">
       <span role="status">{selected.action === 'cut' ? 'Card cut. Choose where to move it.' : 'Card copied. Choose where to duplicate it.'}</span>
-      {(workspace.board.permissions.canEdit || attempt) && <button ref={trigger} className="workspace-button" type="button"
+      {(canPaste || attempt) && <button ref={trigger} className="workspace-button" type="button"
         disabled={clipboard.busy || checking} onClick={() => attempt ? void sendPaste(attempt) : void openPaste()}>
         {attempt && !clipboard.busy ? 'Retry paste' : 'Paste card'}
       </button>}
@@ -168,7 +171,7 @@ export function BoardPasteControls({ workspace, trigger }: { workspace: Placemen
     {(checking || clipboard.busy) && <p role="status">{checking ? 'Checking card placement…' : 'Pasting card…'}</p>}
     {attempt && !clipboard.busy && <p className="workspace-problem" role="alert">The paste response was interrupted. Retry to confirm the same paste.</p>}
     {problem && <p className="workspace-problem" role="alert">{problem}</p>}
-    {picker && picker.selected === selected && <CardPlacementDialog state={picker.state}
+    {canPaste && picker && picker.selected === selected && <CardPlacementDialog state={picker.state}
       mode={picker.selected.action === 'cut' ? 'move' : 'duplicate'} destination={workspace.board.id} title="Paste card"
       onClose={() => setPicker(undefined)} onPlace={(list, before, version, board) => {
         const body = cardMoveBody(picker.state, list, before, version, board);

@@ -2173,6 +2173,7 @@ test('board clipboard retries the exact committed copy and a deliberate second p
     await signIn(manager, origin, 'private-owner');
     await manager.goto(origin + board(ids.privateBoard) + '/cards/' + ids.activeCard);
     const actions = manager.getByRole('region', { name: 'Card clipboard' });
+    await expect(actions).toBeVisible();
     await expect(actions.getByRole('button', { name: 'Cut card' })).toHaveCount(0);
     await actions.getByRole('button', { name: 'Copy card' }).click();
     await openClipboardBoard(manager, 'Shared fixture project', 'Transfer destination');
@@ -2409,6 +2410,13 @@ test('description drafts recover exact Markdown, preserve newer tab writes and r
     await expect(editor.getByRole('form', { name: 'Edit card' })).toBeVisible();
     await expect.poll(() => browserDescriptionDrafts(editor)).toEqual([]);
     await expect(offer(editor)).toHaveCount(0);
+    await editor.addInitScript(() => Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: undefined }));
+    await editor.reload();
+    await editor.getByRole('button', { name: 'Markdown', exact: true }).click();
+    await markdown(editor).fill('Save works with local storage disabled.');
+    await save.click();
+    await expect.poll(async () => (await fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard })).description)
+      .toBe('Save works with local storage disabled.');
     assert.ok(await editor.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
   });
 });
