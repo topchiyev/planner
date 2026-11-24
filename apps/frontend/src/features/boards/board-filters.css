@@ -1,4 +1,5 @@
 .board-filter-form { display: grid; gap: .625rem; margin-block: .75rem; }
+.board-filter-inputs { display: grid; gap: .625rem; }
 .board-filter-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem; }
 .board-filter-actions label { display: grid; gap: .25rem; flex: 1 1 14rem; min-inline-size: 0; }
 .board-filter-actions input[type="search"] { inline-size: 100%; }

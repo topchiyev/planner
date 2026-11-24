@@ -1737,8 +1737,17 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await expect(cards.getByRole('link')).toHaveCount(2);
     await expect(editor.getByRole('list', { name: 'Board lists' }).getByText('5 cards', { exact: true })).toBeVisible();
     assert.equal(new URL(editor.url()).searchParams.get('labelsAny'), label);
-    await filters.getByRole('button', { name: 'Save filters' }).click();
-    await expect(filters.getByText('Filters saved for this tab.')).toBeVisible();
+    async function saveRecipe(name) {
+      await filters.getByRole('button', { name: 'Save filters' }).click();
+      await filters.getByRole('textbox', { name: 'Recipe name' }).fill(name);
+      await filters.getByRole('button', { name: 'Save recipe' }).click();
+      await expect(filters.getByText('Filters saved for this tab.')).toBeVisible();
+    }
+    await saveRecipe('Release quartz');
+    await filters.getByRole('searchbox').fill('A different filter');
+    await saveRecipe('Alternate recipe');
+    await expect(filters.getByRole('combobox', { name: 'Saved recipe' }).getByRole('option')).toHaveCount(2);
+    assert.equal(new URL(editor.url()).searchParams.get('q'), 'Quartz; SIGNAL');
     await editor.getByRole('navigation', { name: 'Board view' }).getByRole('link', { name: 'Grid' }).click();
     await expect(editor.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
     assert.equal(new URL(editor.url()).searchParams.get('q'), 'Quartz; SIGNAL');
@@ -1765,6 +1774,7 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await expect(filters.getByRole('searchbox')).toHaveValue('');
     await expect.poll(() => new URL(editor.url()).searchParams.has('q')).toBe(false);
     await expect(filters.getByRole('button', { name: 'Recall last cleared filters' })).toBeVisible();
+    await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Release quartz');
     await filters.getByRole('button', { name: 'Recall saved filters' }).click();
     await expect(filters.getByRole('searchbox')).toHaveValue('Quartz; SIGNAL');
     await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
