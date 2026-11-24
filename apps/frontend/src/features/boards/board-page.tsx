@@ -48,7 +48,7 @@ export function BoardPage() {
     presentBoard(initial && (concealed || board !== initial)
       ? { source: initial, board: concealed ? null : board ?? null } : undefined);
     return () => presentBoard(undefined);
-  }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, suspendBoard]);
+  }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, presentBoard]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
