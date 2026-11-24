@@ -3,7 +3,7 @@ import type { MigrationCapture } from '@planner/contracts';
 import type { Client } from 'pg';
 import type { VerifiedSourceAsset } from './assets.js';
 import { MigrationError } from './manifest.js';
-import { sourceCatalogProof } from './source-catalog.js';
+import { sourceCatalogMetadata } from './source-catalog.js';
 import {
   excludedSourceTables, maximumSourceBatch, projectedSourceTables, readSourceBatch,
   SourceJsonNumber, sourceProjection, sourceProjectionVersion, type SourceBatch, type SourceTable,
@@ -100,13 +100,21 @@ export function startAssetFingerprint() {
   };
 }
 
+function fingerprintComponent(name: string, value: unknown) {
+  const hash = stream(name);
+  canonical(hash, value);
+  return hash.digest('hex');
+}
+
 export function finishSourceFingerprint(capture: MigrationCapture, rows: string, assets: string) {
-  const manifest = stream('manifest');
-  canonical(manifest, capture);
-  const components = { manifest: manifest.digest('hex'), ...sourceCatalogProof, rows, assets };
-  const full = stream('snapshot');
-  canonical(full, { projection: sourceProjectionVersion, ...components });
-  return { version, sha256: full.digest('hex'), components } as const;
+  const components = {
+    manifest: fingerprintComponent('manifest', capture),
+    catalog: fingerprintComponent('catalog', sourceCatalogMetadata.catalog),
+    ledger: fingerprintComponent('ledger', sourceCatalogMetadata.ledger),
+    rows,
+    assets,
+  };
+  return { version, sha256: fingerprintComponent('snapshot', { projection: sourceProjectionVersion, ...components }), components } as const;
 }
 
 export type SourceFingerprint = ReturnType<typeof finishSourceFingerprint>;

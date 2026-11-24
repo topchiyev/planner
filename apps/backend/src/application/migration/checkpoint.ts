@@ -17,13 +17,13 @@ export type MigrationPass = typeof passes[number];
 export type ImportIdentity = { installationId: string; runId: string; generationId: string; fingerprint: SourceFingerprint };
 type CursorScope = { runId: string; generationId: string; fingerprint: string; pass: MigrationPass; table: SourceTable };
 
-type Position = { pass: MigrationPass; table: SourceTable; lastSourceId: string | null };
-type Checkpoint = Position & { token: string };
+export type MigrationPosition = { pass: MigrationPass; table: SourceTable; lastSourceId: string | null };
+export type MigrationCheckpoint = MigrationPosition & { token: string };
 
 export type ImportRun = {
   _id: string; id: string; installationId: string; generationId: string;
   state: 'preflighted' | 'staging'; fingerprint: SourceFingerprint;
-  manifestSha256: string; createdAt: Date; updatedAt: Date; checkpoint: Checkpoint | null;
+  manifestSha256: string; createdAt: Date; updatedAt: Date; checkpoint: MigrationCheckpoint | null;
   source: Pick<MigrationCapture['source'], 'instanceId' | 'release' | 'edition'>;
 };
 
@@ -69,7 +69,7 @@ export function importRunKey(identity: Pick<ImportIdentity, 'runId' | 'generatio
     installationId: identity.installationId, generationId: identity.generationId };
 }
 
-function comparePosition(a: Position, b: Position) {
+function comparePosition(a: MigrationPosition, b: MigrationPosition) {
   const section = passes.indexOf(a.pass) - passes.indexOf(b.pass)
     || projectedSourceTables.indexOf(a.table) - projectedSourceTables.indexOf(b.table);
   if (section) return section;
@@ -79,12 +79,12 @@ function comparePosition(a: Position, b: Position) {
 
 /** Apply deterministic, acknowledged effects using a verified source snapshot before advancing its exclusive source key. */
 export async function writeMigrationBatch(lease: WriterLease, db: Db, identity: ImportIdentity,
-  snapshot: VerifiedSourceSnapshot, cursors: ReturnType<typeof migrationCursors>, before: Checkpoint | null, after: Position, apply: () => Promise<void>) {
+  snapshot: VerifiedSourceSnapshot, cursors: ReturnType<typeof migrationCursors>, before: MigrationCheckpoint | null, after: MigrationPosition, apply: () => Promise<void>) {
   lease.assertHeld();
   assertVerifiedSourceSnapshot(snapshot);
   if (!isDeepStrictEqual(snapshot.fingerprint, identity.fingerprint))
     throw new MigrationError('source-changed', 'The source snapshot changed. Start a new import run.');
-  const checkpoint = (position: Position): Checkpoint => ({
+  const checkpoint = (position: MigrationPosition): MigrationCheckpoint => ({
     pass: position.pass, table: position.table, lastSourceId: position.lastSourceId,
     token: cursors.seal({ runId: identity.runId, generationId: identity.generationId, fingerprint: identity.fingerprint.sha256,
       pass: position.pass, table: position.table }, position.lastSourceId),

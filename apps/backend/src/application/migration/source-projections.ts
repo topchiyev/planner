@@ -87,7 +87,7 @@ export class SourceJsonNumber {
 }
 export type SourceJson = null | boolean | string | SourceJsonNumber | SourceJson[] | { [key: string]: SourceJson };
 export function sourceProjection(table: SourceTable) {
-  return { version: 1, order: table === 'uploaded_file' ? 'text-C' : 'signed-int64', columns: columns[table] } as const;
+  return { version: sourceProjectionVersion, order: table === 'uploaded_file' ? 'text-C' : 'signed-int64', columns: columns[table] } as const;
 }
 
 export type SourceJsonColumn = { readonly value: SourceJson };

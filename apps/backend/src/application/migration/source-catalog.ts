@@ -22,8 +22,12 @@ export const sourceColumns: Readonly<Record<string, readonly string[]>> = Object
       .filter((name) => table !== 'user_account' || !excludedAccountColumns.has(name)))]),
 ));
 const migrationDigest = '32a3fa9b45c357f523a5f02189ccb63376e9bd35b9844d00296ecf6b4f0b71ef';
-export const sourceCatalogProof = Object.freeze({ catalog: sha256(Buffer.from(JSON.stringify(baseline))), ledger: migrationDigest });
 const finalMigration = '20260918000000_add_show_card_counter_to_boards.js';
+const migrationCount = 23;
+export const sourceCatalogMetadata = Object.freeze({
+  catalog: baseline,
+  ledger: { count: migrationCount, finalMigration, sha256: migrationDigest },
+});
 
 const catalogSql = `WITH source_tables AS (
   SELECT rel.oid, rel.relname
@@ -94,7 +98,7 @@ export async function assertSourceCatalog(client: Client) {
     'SELECT name FROM public.migration ORDER BY name COLLATE "C"');
   const lock = await client.query<{ is_locked: number }>('SELECT is_locked FROM public.migration_lock');
   const names = ledger.rows.map((row) => row.name);
-  if (names.length !== 23 || names.at(-1) !== finalMigration || new Set(names).size !== names.length
+  if (names.length !== migrationCount || names.at(-1) !== finalMigration || new Set(names).size !== names.length
       || sha256(Buffer.from(names.join('\n') + '\n')) !== migrationDigest
       || lock.rows.length !== 1 || lock.rows[0].is_locked !== 0) {
     throw new MigrationError('source-ledger', 'The restored source migration ledger is incomplete or unsupported.');
