@@ -6,7 +6,7 @@ const valueOptions = new Set(['--public-url', '--app-port', '--db-port']);
 
 function canonicalNativeOrigin(value: string) {
   const authority = /^https:\/\/([^/?#\\]+)\/?$/iu.exec(value)?.[1];
-  if (!authority || authority.includes('@') || /\s/u.test(authority)) return undefined;
+  if (!authority || authority.includes('@') || /\s/u.test(value)) return undefined;
   return URL.parse(value)?.origin;
 }
 

@@ -1,4 +1,4 @@
-import type { NativeInstallationConfig } from '@planner/contracts';
+import type { NativeInstallationConfig } from '@planner/contracts/native';
 import { checkDirectory } from './mongo-host.js';
 import { databaseName, uuidPattern } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
@@ -52,15 +52,17 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
       }
       if (config.mode === 'import') return { kind: 'unavailable', reason: 'migration' };
 
-      const { pendingAction, enrollmentGenerationId } = installation.setup;
+      const { pendingAction, enrollmentGenerationId, firstAdminGrantIssuedAt } = installation.setup;
       if (pendingAction !== 'first-admin-enrollment'
-          || typeof enrollmentGenerationId !== 'string' || !uuidPattern.test(enrollmentGenerationId)) {
+          || typeof enrollmentGenerationId !== 'string' || !uuidPattern.test(enrollmentGenerationId)
+          || !(firstAdminGrantIssuedAt instanceof Date) || !Number.isFinite(firstAdminGrantIssuedAt.getTime())) {
         return { kind: 'unavailable', reason: 'setup' };
       }
       const grant = await database.collection('recoveryGrants').findOne({
         installationId: config.installationId,
         generationId: enrollmentGenerationId,
         kind: 'first-admin',
+        issuedAt: firstAdminGrantIssuedAt,
         consumedAt: { $type: 'null' },
         expiresAt: { $gt: new Date() },
       }, { projection: { _id: 1 } });

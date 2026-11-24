@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   nativeInstallationConfig, nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
-} from '@planner/contracts';
+} from '@planner/contracts/native';
 import type { MongoClient } from 'mongodb';
 import { checkDirectory, fileJson, readProtectedFile, writeProtectedFile } from './mongo-host.js';
 import { databaseName, NativeMongoError, uuidPattern } from './mongo-identity.js';
@@ -16,12 +16,12 @@ interface FirstAdminGrant {
   id: string;
   generationId: string;
   token: string;
-  expiresAt: number;
 }
 
 interface SetupIntent {
   receipt: string;
   options: NativeSetupOptions;
+  createdAt: number;
   grant?: FirstAdminGrant;
 }
 
@@ -39,16 +39,16 @@ export function readSetupIntent(receipt: string): SetupIntent | undefined {
   if (contents === undefined) return undefined;
   const saved = JSON.parse(contents) as SetupIntent | null;
   const options = nativeSetupOptions.safeParse(saved?.options);
-  if (saved?.receipt !== receipt || !options.success
+  if (saved?.receipt !== receipt || !options.success || !Number.isSafeInteger(saved.createdAt) || saved.createdAt <= 0
       || (options.data.mode === 'fresh' ? !validGrant(saved.grant) : saved.grant !== undefined)) {
     throw new NativeMongoError('The Planner setup intent does not belong to this installation or is invalid.');
   }
-  return { receipt, options: options.data, grant: saved.grant };
+  return { receipt, options: options.data, createdAt: saved.createdAt, grant: saved.grant };
 }
 
 function validGrant(grant: FirstAdminGrant | undefined) {
   return !!grant && uuidPattern.test(grant.id) && uuidPattern.test(grant.generationId)
-    && /^[A-Za-z0-9_-]{43}$/u.test(grant.token) && Number.isSafeInteger(grant.expiresAt);
+    && /^[A-Za-z0-9_-]{43}$/u.test(grant.token);
 }
 
 export function sameSetup(first: NativeSetupOptions, second: NativeSetupOptions) {
@@ -57,25 +57,33 @@ export function sameSetup(first: NativeSetupOptions, second: NativeSetupOptions)
 }
 
 export function createSetupIntent(receipt: string, options: NativeSetupOptions): SetupIntent {
-  const intent: SetupIntent = { receipt, options };
+  const intent: SetupIntent = { receipt, options, createdAt: Date.now() };
   if (options.mode === 'fresh') {
     intent.grant = {
       id: randomUUID(), generationId: randomUUID(),
-      token: randomBytes(32).toString('base64url'), expiresAt: Date.now() + grantLifetimeMs,
+      token: randomBytes(32).toString('base64url'),
     };
   }
   writeProtectedFile(intentPath, fileJson(intent), 0, 0o600);
   return intent;
 }
 
-export function publishInstallationConfig(config: NativeInstallationConfig, appGroup: number) {
-  const existing = readInstallationConfig(appGroup);
-  const ports = `${config.appPort} ${config.dbPort}\n`;
-  const savedPorts = readProtectedFile(portsPath, 0, 0o600);
-  if (savedPorts !== ports && (existing || savedPorts !== undefined)) {
+function packagePorts(options: NativeSetupOptions) {
+  return `${options.appPort} ${options.dbPort}\n`;
+}
+
+export function checkPackagePorts(options: NativeSetupOptions | undefined, configured: boolean) {
+  const saved = readProtectedFile(portsPath, 0, 0o600);
+  if (saved === undefined && !configured) return false;
+  if (!options || saved !== packagePorts(options)) {
     throw new NativeMongoError('The Planner package ports do not match the setup intent.');
   }
-  if (savedPorts === undefined) writeProtectedFile(portsPath, ports, 0, 0o600);
+  return true;
+}
+
+export function publishInstallationConfig(config: NativeInstallationConfig, appGroup: number) {
+  const existing = readInstallationConfig(appGroup);
+  if (!checkPackagePorts(config, !!existing)) writeProtectedFile(portsPath, packagePorts(config), 0, 0o600);
   if (!existing) {
     writeProtectedFile(configPath, fileJson(config), appGroup, 0o640);
   } else if (existing.installationId !== config.installationId || !sameSetup(existing, config)) {
@@ -90,7 +98,12 @@ export interface InstallationRecord {
   installationId: string;
   activeGenerationId?: string | null;
   schemaVersion?: number;
-  setup?: { mode: NativeSetupOptions['mode']; pendingAction: PendingAction; enrollmentGenerationId: string | null };
+  setup?: {
+    mode: NativeSetupOptions['mode'];
+    pendingAction: PendingAction;
+    enrollmentGenerationId: string | null;
+    firstAdminGrantIssuedAt?: Date;
+  };
 }
 
 interface GrantRecord {
@@ -99,6 +112,7 @@ interface GrantRecord {
   generationId: string;
   kind: 'first-admin';
   tokenDigest: string;
+  issuedAt: Date;
   expiresAt: Date;
   consumedAt: Date | null;
 }
@@ -130,15 +144,33 @@ export async function persistSetup(client: MongoClient, installationId: string, 
   const grant = intent.grant;
   const recoveryGrants = database.collection<GrantRecord>('recoveryGrants');
   const digest = createHash('sha256').update(grant.token).digest('hex');
-  await recoveryGrants.updateOne({ _id: grant.id }, { $setOnInsert: {
-    installationId, generationId: grant.generationId, kind: 'first-admin',
-    tokenDigest: digest, expiresAt: new Date(grant.expiresAt), consumedAt: null,
-  } }, { upsert: true, writeConcern });
+  const firstIssuedAt = stored.setup.firstAdminGrantIssuedAt;
+  if (firstIssuedAt === undefined) {
+    const issuedAt = new Date();
+    await recoveryGrants.updateOne({ _id: grant.id }, { $setOnInsert: {
+      installationId, generationId: grant.generationId, kind: 'first-admin',
+      tokenDigest: digest, issuedAt, expiresAt: new Date(issuedAt.getTime() + grantLifetimeMs), consumedAt: null,
+    } }, { upsert: true, writeConcern });
+  } else if (!(firstIssuedAt instanceof Date) || !Number.isFinite(firstIssuedAt.getTime())) {
+    throw new NativeMongoError('The first-administrator grant issuance record is invalid.');
+  }
   const saved = await recoveryGrants.findOne({ _id: grant.id });
+  // The installation retains the issuance marker even after an expired or consumed grant is removed.
+  if (!saved && firstIssuedAt !== undefined) return undefined;
   if (saved?.installationId !== installationId || saved.generationId !== grant.generationId
-      || saved.kind !== 'first-admin' || saved.tokenDigest !== digest || saved.expiresAt?.getTime() !== grant.expiresAt) {
+      || saved.kind !== 'first-admin' || saved.tokenDigest !== digest
+      || !(saved.issuedAt instanceof Date) || !(saved.expiresAt instanceof Date)
+      || saved.expiresAt.getTime() - saved.issuedAt.getTime() !== grantLifetimeMs
+      || (firstIssuedAt !== undefined && saved.issuedAt.getTime() !== firstIssuedAt.getTime())) {
     throw new NativeMongoError('The first-administrator grant does not match the durable setup intent.');
   }
-  if (saved.consumedAt !== null || Date.now() >= grant.expiresAt) return undefined;
+  if (firstIssuedAt === undefined) {
+    const marker = await installation.updateOne(
+      { ...key, 'setup.firstAdminGrantIssuedAt': { $exists: false } },
+      { $set: { 'setup.firstAdminGrantIssuedAt': saved.issuedAt } }, { writeConcern },
+    );
+    if (marker.matchedCount !== 1) throw new NativeMongoError('Could not retain the first-administrator grant issuance.');
+  }
+  if (saved.consumedAt !== null || Date.now() >= saved.expiresAt.getTime()) return undefined;
   return { token: grant.token, expiresAt: saved.expiresAt.toISOString() };
 }

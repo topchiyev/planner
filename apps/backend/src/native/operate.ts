@@ -2,9 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { PLANNER_VERSION } from '@planner/contracts';
 import {
-  nativeSetupOptions, PLANNER_VERSION, type NativeInstallationConfig, type NativeSetupOptions,
-} from '@planner/contracts';
+  nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
+} from '@planner/contracts/native';
 import {
   checkDirectory, checkReceipt, ensureNativeMongo, inspectNativeMongo, packageAccount, readProtectedFile,
   stopNativeMongoBootstrap,
@@ -12,7 +13,7 @@ import {
 import { NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
 import {
-  createSetupIntent, pendingAction, persistSetup, publishInstallationConfig, readInstallationConfig,
+  checkPackagePorts, createSetupIntent, pendingAction, persistSetup, publishInstallationConfig, readInstallationConfig,
   readSetupIntent, sameSetup,
 } from './setup-state.js';
 
@@ -33,7 +34,7 @@ function systemctl(...args: string[]) {
 
 function verifyOwnership() {
   if (process.getuid?.() !== 0) throw new NativeMongoError('Planner operator commands require root.');
-  command(preflight, ['database'], 'Planner native ownership checks failed.');
+  command(preflight, ['ownership'], 'Planner native ownership checks failed.');
   checkDirectory(statePath, 0, 0, 0o711);
   return { receipt: checkReceipt(), appGroup: packageAccount('-g', 'planner') };
 }
@@ -66,6 +67,13 @@ function listeners(port: number) {
   return entries ? entries.split('\n').map((entry) => entry.trim().split(/\s+/u)) : [];
 }
 
+function validateNativePorts({ appPort, dbPort }: NativeSetupOptions) {
+  const result = spawnSync(preflight, ['ports', String(appPort), String(dbPort)], { encoding: 'utf8', timeout: 15_000 });
+  if (result.status !== 0) {
+    throw new NativeMongoError(result.stderr?.trim() || 'The selected Planner ports could not be verified.');
+  }
+}
+
 function appListening(port: number, configured: boolean) {
   const entries = listeners(port);
   if (entries.length === 0) return false;
@@ -95,18 +103,19 @@ function stopServices() {
   stopNativeMongoBootstrap();
 }
 
-function ensureConfigMatches(
+function verifySetupFiles(
   config: NativeInstallationConfig | undefined, intent: ReturnType<typeof readSetupIntent>,
 ) {
   if (config && (!intent || !sameSetup(config, intent.options))) {
     throw new NativeMongoError('The Planner configuration has no matching setup intent.');
   }
+  checkPackagePorts(intent?.options, !!config);
 }
 
 function status(owner: ReturnType<typeof verifyOwnership>) {
   const config = readInstallationConfig(owner.appGroup);
   const intent = readSetupIntent(owner.receipt);
-  ensureConfigMatches(config, intent);
+  verifySetupFiles(config, intent);
   const serviceState = (unit: string) => {
     const state = systemctl('show', '--property=ActiveState', '--value', unit);
     return ['active', 'inactive', 'activating', 'deactivating', 'failed'].includes(state) ? state : 'unknown';
@@ -122,10 +131,11 @@ function status(owner: ReturnType<typeof verifyOwnership>) {
 }
 
 async function setup(options: NativeSetupOptions) {
+  validateNativePorts(options);
   return withInstallationLock(async (owner) => {
     const existing = readInstallationConfig(owner.appGroup);
     let intent = readSetupIntent(owner.receipt);
-    ensureConfigMatches(existing, intent);
+    verifySetupFiles(existing, intent);
     if (intent && !sameSetup(intent.options, options)) {
       throw new NativeMongoError('Repeat setup with the originally selected mode, origin and ports.');
     }
@@ -166,8 +176,9 @@ async function control(action: 'start' | 'stop' | 'restart') {
       return status(owner);
     }
     const config = readInstallationConfig(owner.appGroup);
-    ensureConfigMatches(config, readSetupIntent(owner.receipt));
+    verifySetupFiles(config, readSetupIntent(owner.receipt));
     if (!config) throw new NativeMongoError('Complete Planner setup before starting its services.');
+    validateNativePorts(config);
     appListening(config.appPort, true);
     if (action === 'restart') stopServices();
     const active = await ensureNativeMongo(config.dbPort);
@@ -203,9 +214,10 @@ try {
     } else {
       console.log(`Planner ${result.version} is ${result.configuration}.`);
       console.log(`Application ${result.services.application}, database ${result.services.database}, readiness ${result.readiness}.`);
-      console.log(`Pending operator action: ${result.pendingAction}.`);
+      console.log(`Setup mode is ${result.mode ?? 'undecided'}. Pending action is ${result.pendingAction}.`);
       if (result.firstAdminGrant) {
-        console.log(`First-administrator enrollment grant (expires ${result.firstAdminGrant.expiresAt}): ${result.firstAdminGrant.token}`);
+        console.log(`First-administrator enrollment grant expires at ${result.firstAdminGrant.expiresAt}.`);
+        console.log(result.firstAdminGrant.token);
       }
     }
   }

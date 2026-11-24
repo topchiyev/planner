@@ -1,6 +1,6 @@
 import { lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { defaultAppPort } from '@planner/contracts';
+import { defaultAppPort } from '@planner/contracts/native';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
 import { proxyTokenPattern } from './native/http-boundary.js';

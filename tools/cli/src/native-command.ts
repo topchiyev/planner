@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parsePreflightOptions } from '@planner/contracts';
+import { parsePreflightOptions } from '@planner/contracts/native';
 
 type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
