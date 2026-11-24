@@ -12,6 +12,7 @@ const orderReceipt = workspaceData(z.strictObject({
 const settingsReceipt = workspaceData(z.strictObject({ board: boardSummarySchema, preferences: boardPreferencesSchema }));
 
 export const boardDeleteReceipt = workspaceData(z.strictObject({
+  id: publicIdSchema,
   projectId: publicIdSchema,
   parentRevision: revisionSchema,
 }));

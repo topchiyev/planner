@@ -369,3 +369,27 @@ test('session expiry during awaited Mongo reads closes the stream before any res
     } finally { await f.close(); }
   });
 });
+
+test('board deletion closes all of its streams and emits only neutral invalidation for a surviving linked board', { timeout: 90_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await makeWorkspaceAccessFixture(mongo);
+    let target;
+    let surviving;
+    try {
+      const sharedAdmin = await login(f, ids.admin);
+      const projectManager = await login(f, ids.projectManager);
+      const viewer = await login(f, ids.viewer);
+      target = await open(f, ids.sharedBoard, sharedAdmin);
+      surviving = await open(f, ids.privateBoard, viewer);
+      assert.equal((await target.next()).event, 'ready');
+      assert.equal((await surviving.next()).event, 'ready');
+      const deleted = await mutate(f, projectManager, boardPath(ids.sharedBoard), 'DELETE', 1, { name: 'Transfer destination' });
+      assert.equal(deleted.status, 204);
+      assert.equal(await target.next(), null);
+      await new CommandJournal(f.gate, f.db, f.installationId).deliverPending(f.streams.accept);
+      assert.deepEqual(await surviving.next(), { event: 'board.access-changed', data: { boardId: ids.privateBoard },
+        id: cursor(f, ids.viewer, ids.privateBoard, 1n) });
+      assert.equal((await f.call(eventPath(ids.sharedBoard), projectManager)).status, 404);
+    } finally { target?.close(); surviving?.close(); await f.close(); }
+  });
+});

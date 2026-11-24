@@ -52,6 +52,8 @@ interface Records {
   fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean };
   fieldValues: { cardId: string; fieldGroupId: string; fieldDefinitionId: string; value: string };
   comments: { boardId: string; cardId: string; authorId?: string | null; text: string };
+  activities: { boardId: string; cardId?: string | null };
+  notifications: { boardId?: string | null; cardId?: string | null };
   attachments: { cardId: string; name: string; kind: 'file' | 'link'; byteLength?: number | null; blobDigest?: string | null; url?: string | null; availability?: string | null; deletedAt?: Date | null };
   blobs: { digest: string; lifecycleState: string; byteLength: number };
   events: { boardId: string; sequence: Long };
@@ -107,7 +109,7 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
         { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) });
     },
     find<K extends WorkspaceRecordName>(name: K, filter: Document, sort?: Sort) {
-      return collection(name).find(scoped<K>(filter),
+      return collection(name).find<WorkspaceRow<K>>(scoped<K>(filter),
         { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) }).toArray();
     },
     count<K extends WorkspaceRecordName>(name: K, filter: Document) {

@@ -1,5 +1,5 @@
 import {
-  relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
+  boardDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
   type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
@@ -144,7 +144,9 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             const result = await relationships.execute(token, actor.id, operation.id, key.data,
               input.data as RelationshipCommandInput<RelationshipCommand>);
             if (operation.status === 204) {
-              if (operation.target === 'edge') {
+              if (operation.id === 'boards.delete') {
+                reply.header(relationshipParentRevisionHeader, boardDeleteReceipt.parse(result).data.parentRevision);
+              } else if (operation.target === 'edge') {
                 const { parentRevision } = removedRelationship.parse(result).data;
                 if (parentRevision !== null) reply.header(relationshipParentRevisionHeader, parentRevision);
               }

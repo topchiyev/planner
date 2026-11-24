@@ -464,3 +464,28 @@ test('catalog reuse replaces missing orphan variants but rejects missing referen
       assert.equal(await f.db.collection('attachments').countDocuments({ generationId: f.generationId }), 1);
     });
   });
+
+test('deleting a board removes only its attachment references and preserves shared file bytes', { timeout: 100_000 }, async () => {
+  await withMedia(async (f, { blobPath }) => {
+    const editor = await login(f, ids.firstEditor);
+    const owner = await login(f, ids.privateOwner);
+    const bytes = Buffer.from([0x41, 0x80, 0x65, 0x02, 0xff]);
+    const lost = await upload(f, cardPath(ids.activeCard) + '/attachment-files', editor, 1, bytes, 'Private board file');
+    const retained = await upload(f, cardPath(ids.sharedTarget) + '/attachment-files', editor, 1, bytes, 'Surviving board file');
+    assert.equal(lost.status, 201);
+    assert.equal(retained.status, 201);
+    const lostPath = filePath(lost.data.data.reference.id) + '/download';
+    const retainedPath = filePath(retained.data.data.reference.id) + '/download';
+    assert.deepEqual((await socket(f, lostPath, editor)).bytes, bytes);
+    const deleted = await f.call('/api/v1/boards/' + ids.privateBoard, owner, {
+      method: 'DELETE', headers: expected(owner, 1), body: { name: 'Transfer source' },
+    });
+    assert.equal(deleted.status, 204, JSON.stringify(deleted.data));
+    assert.equal((await socket(f, lostPath, editor)).status, 404);
+    assert.equal((await socket(f, lostPath, owner, { method: 'HEAD' })).status, 404);
+    assert.deepEqual((await socket(f, retainedPath, editor)).bytes, bytes);
+    assert.deepEqual(await readdir(blobPath), [checksum(bytes)]);
+    assert.equal(await f.db.collection('attachments').countDocuments({ ...f.scope, blobDigest: checksum(bytes) }), 1);
+    assert.equal(await f.db.collection('blobs').countDocuments({ digest: checksum(bytes) }), 1);
+  });
+});
