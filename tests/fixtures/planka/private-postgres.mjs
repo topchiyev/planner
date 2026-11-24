@@ -3,8 +3,8 @@ import { lstatSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-export async function startFixturePostgres(context) {
-  const socketRoot = mkdtempSync('/tmp/planner-planka-');
+export async function startFixturePostgres(context, directory = '/tmp') {
+  const socketRoot = mkdtempSync(join(directory, 'planner-planka-'));
   const data = join(socketRoot, 'db');
   const port = '5432';
   const ownedDatabases = new Set(['postgres']);
@@ -107,5 +107,5 @@ export async function startFixturePostgres(context) {
     throw new Error(`The fixture catalog requires PostgreSQL 17 tools. Server version number: ${version}`);
   }
   write('postgres', 'CREATE ROLE fixture_reader LOGIN;');
-  return { createDatabase, query, write };
+  return { createDatabase, query, write, socketRoot, port };
 }

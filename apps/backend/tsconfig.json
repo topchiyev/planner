@@ -8,6 +8,7 @@
       "node"
     ],
     "rootDir": "src",
+    "resolveJsonModule": true,
     "outDir": "dist"
   },
   "include": [

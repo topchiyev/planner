@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { get, request as localRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,9 @@ import type { MongoClient } from 'mongodb';
 import { BackupError, digestPattern } from '../application/backup/archive.js';
 import { activateRestore, inspectBackup, readActivatedRestore, stageRestore } from '../application/backup/restore.js';
 import { openRestoreMedia } from '../application/backup/restore-media.js';
+import { MigrationError } from '../application/migration/manifest.js';
+import { inspectMigration, migrationPath, parseMigrationInput, type MigrationInput } from '../application/migration/preflight.js';
+import { prepareMigration } from '../application/migration/prepare.js';
 import { firstAdminBinding } from '../application/auth/first-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
@@ -25,6 +29,7 @@ import {
 import { adminRuntimeDirectory } from './admin-socket.js';
 import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
+import { assertMigrationTarget, checkMigrationCapacity, publishMigrationPreflight } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
@@ -507,6 +512,67 @@ async function handleAccountApproval(operation: 'inspect' | 'confirm', id: strin
   }
 }
 
+const migrationOwner = { uid: 0, gid: 0 };
+
+async function migrationConfig(name: 'postgres' | 'objects') {
+  const path = name === 'postgres' ? '/etc/planner/migration-pg.services' : '/etc/planner/migration-assets.json';
+  try {
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.uid !== 0 || info.gid !== 0 || info.nlink !== 1 || (info.mode & 0o7777) !== 0o600
+          || info.size === 0 || info.size > 64 * 1024) throw new Error();
+      const bytes = Buffer.alloc(info.size);
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+      if (bytesRead !== bytes.length || (await file.stat()).ctimeMs !== info.ctimeMs) throw new Error();
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } finally { await file.close(); }
+  } catch {
+    throw new MigrationError(name === 'postgres' ? 'source-service' : 'asset-manifest', 'The selected protected migration service configuration is unavailable.');
+  }
+}
+
+async function prepareCapture(input: unknown) {
+  verifyOwnership();
+  if (!input || typeof input !== 'object' || Object.keys(input).length !== 2 || !('archive' in input)
+      || !migrationPath(input.archive) || !('workDir' in input) || !migrationPath(input.workDir)) {
+    throw new MigrationError('capture-format', 'Specify an absolute private archive and work directory.');
+  }
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.once('SIGINT', cancel);
+  process.once('SIGTERM', cancel);
+  try { return await prepareMigration(input.archive, input.workDir, migrationOwner, controller.signal); }
+  catch (error) {
+    if (error instanceof MigrationError) throw error;
+    if (controller.signal.aborted) throw new MigrationError('archive-layout', 'Migration preparation was interrupted.');
+    throw new MigrationError('archive-layout', 'The protected archive or preparation directory could not be verified.');
+  } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel); }
+}
+
+async function migrationPreflight(input: MigrationInput) {
+  return withInstallationLock(async (owner) => {
+    const config = readInstallationConfig(owner.appGroup);
+    const restore = readRestoreIntent(owner.receipt);
+    verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
+    if (!config || config.mode !== 'import' || restore)
+      throw new MigrationError('target-setup', 'Complete import-mode setup on an inactive installation before migration preflight.');
+    const client = await connectOwnedDatabase(config, owner.appGroup);
+    try {
+      const db = client.db(databaseName);
+      await assertMigrationTarget(db, config.installationId);
+      const receipt = await inspectMigration(input, migrationOwner, await migrationConfig('postgres'),
+        input.assetService !== undefined ? await migrationConfig('objects') : undefined);
+      await checkMigrationCapacity(receipt.estimates);
+      const wasRunning = appListening(config.appPort, true);
+      if (wasRunning) systemctl('stop', app);
+      try {
+        return await withStoppedWriter((writer) => publishMigrationPreflight(writer, db, config.installationId, input, receipt));
+      } finally { if (wasRunning) await startApplication(config.appPort); }
+    } finally { await client.close(); }
+  });
+}
+
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === 'package-remove' && args.length === 0) {
@@ -519,6 +585,15 @@ try {
     });
   } else if ((action === 'account-inspect' || action === 'account-confirm') && args.length === 2) {
     await handleAccountApproval(action === 'account-inspect' ? 'inspect' : 'confirm', publicIdSchema.parse(args[0]), args[1]);
+  } else if ((action === 'migration-prepare' || action === 'migration-preflight')
+      && args.length === 2 && (args[1] === 'text' || args[1] === 'json')) {
+    if (action === 'migration-prepare') {
+      const result = await prepareCapture(JSON.parse(args[0]));
+      console.log(args[1] === 'json' ? JSON.stringify(result) : `Verified capture ${result.manifestSha256}. Restore ${result.dump} in the isolated PostgreSQL instance. Manifest ${result.manifest}.`);
+    } else {
+      const result = await migrationPreflight(parseMigrationInput(JSON.parse(args[0])));
+      console.log(args[1] === 'json' ? JSON.stringify(result) : `Run ${result.runId} preflighted for manifest ${result.manifestSha256}. Missing originals ${result.assets.missingOriginals}, missing derivatives ${result.assets.missingDerivatives}.`);
+    }
   } else if (action === 'backup-create' && args.length === 1) {
     const result = await withInstallationLock(localBackupRequest);
     console.log(args[0] === 'json' ? JSON.stringify(result) : `Backup ${result.directory} verified with manifest ${result.manifestSha256}.`);
@@ -556,7 +631,9 @@ try {
     }
   }
 } catch (error) {
-  console.error(error instanceof NativeMongoError || error instanceof BackupError || error instanceof StorageSchemaError || error instanceof WriterOwnershipError
+  if (error instanceof MigrationError) {
+    console.error(process.argv.at(-1) === 'json' ? JSON.stringify({ fault: error.fault, message: error.message }) : error.message);
+  } else console.error(error instanceof NativeMongoError || error instanceof BackupError || error instanceof StorageSchemaError || error instanceof WriterOwnershipError
     ? error.message : 'The Planner operator command could not be completed.');
   process.exitCode = 1;
 }

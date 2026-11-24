@@ -5,8 +5,12 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import { parsePreflightOptions } from '@planner/contracts/native';
 
 type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart' | 'verify-storage' | 'account-inspect' | 'account-confirm'
-  | 'backup-create' | 'backup-restore' | 'backup-activate';
+  | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
+
+const serviceName = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/u;
+const privatePath = (value: string) => isAbsolute(value) && value !== '/' && normalize(value) === value
+  && Buffer.byteLength(value) < 4096 && !/[\p{Cc}]/u.test(value);
 
 const manifestHash = /^[a-f0-9]{64}$/u;
 
@@ -31,6 +35,27 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
         ...args.slice(0, modeIndex), ...args.slice(modeIndex + 2),
       ]);
       helperArgs = [command, JSON.stringify({ ...options, mode }), json ? 'json' : 'text'];
+    } else if (command === 'migration-prepare' || command === 'migration-preflight') {
+      const json = args.includes('--json');
+      if (json) args.splice(args.indexOf('--json'), 1);
+      let input;
+      if (command === 'migration-prepare') {
+        const archive = flagValue(args, '--archive');
+        const workDir = flagValue(args, '--work-dir');
+        if (!privatePath(archive) || !privatePath(workDir)) throw new Error('Specify absolute private archive and work paths.');
+        input = { archive, workDir };
+      } else {
+        const manifest = flagValue(args, '--manifest');
+        const sourceService = flagValue(args, '--source-service');
+        const local = args.includes('--assets-root');
+        if (local === args.includes('--asset-service') || !privatePath(manifest) || !serviceName.test(sourceService))
+          throw new Error('Specify an absolute manifest, a source service, and exactly one asset source.');
+        const assetSource = flagValue(args, local ? '--assets-root' : '--asset-service');
+        if (!(local ? privatePath(assetSource) : serviceName.test(assetSource))) throw new Error('Specify a private asset directory or protected service.');
+        input = { manifest, sourceService, ...(local ? { assetsRoot: assetSource } : { assetService: assetSource }) };
+      }
+      if (args.length) throw new Error('Unexpected migration command options.');
+      helperArgs = [command, JSON.stringify(input), json ? 'json' : 'text'];
     } else if (command === 'backup-restore') {
       const archive = flagValue(args, '--archive');
       const fingerprint = flagValue(args, '--expect-manifest');
@@ -67,7 +92,9 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
     console.error(error instanceof Error ? error.message : 'Invalid native command options.');
     return 2;
   }
-  const result = spawnSync(process.execPath, [operator, ...helperArgs], { stdio: 'inherit' });
+  const env = command.startsWith('migration-')
+    ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('PG'))) : undefined;
+  const result = spawnSync(process.execPath, [operator, ...helperArgs], { stdio: 'inherit', env });
   if (result.status === null) console.error('The installed Planner operator command could not complete.');
   return result.status ?? 1;
 }
