@@ -950,7 +950,7 @@ test('list maintenance sorts, archives closed cards and requires fresh confirmat
     await editor.goto(base + '?view=grid');
     await viewer.goto(base + '?context=trash&view=grid');
     await expect(viewer.getByRole('link', { name: 'Card in trash' })).toBeVisible();
-    await expect(viewer.getByRole('button', { name: 'Clear trash' })).toHaveCount(0);
+    await expect(viewer.getByRole('button', { name: 'Clear trash', exact: true })).toHaveCount(0);
     await expect(editor.getByRole('button', { name: 'Archive cards in To do' })).toHaveCount(0);
     await editor.getByRole('button', { name: 'Sort cards in To do' }).click();
     const sort = editor.getByRole('dialog', { name: 'Sort cards' });
@@ -970,7 +970,7 @@ test('list maintenance sorts, archives closed cards and requires fresh confirmat
     await expect(editor.getByRole('list', { name: 'Cards in Archive' }).getByRole('link').nth(1)).toHaveText('Closed second');
 
     await manager.goto(base + '?context=trash&view=grid');
-    await manager.getByRole('button', { name: 'Clear trash' }).click();
+    await manager.getByRole('button', { name: 'Clear trash', exact: true }).click();
     const clear = manager.getByRole('dialog', { name: 'Clear trash' });
     const confirmation = clear.getByLabel('I confirm permanent deletion of these cards');
     const apply = clear.getByRole('button', { name: 'Permanently clear trash' });
@@ -996,7 +996,8 @@ test('list maintenance sorts, archives closed cards and requires fresh confirmat
     await expect(apply).toBeDisabled();
     await confirmation.check();
     await apply.click();
-    await expect(manager.getByRole('button', { name: 'Clear trash' })).toBeDisabled();
+    await expect(clear).toHaveCount(0);
+    await expect(manager.getByRole('button', { name: 'Clear trash', exact: true })).toBeDisabled();
     await expect(manager.getByRole('link', { name: 'Card in trash' })).toHaveCount(0);
     await expect(manager).toHaveURL(base + '?context=trash&view=grid');
     assert.equal((await editor.request.get(origin + '/api/v1/cards/' + alpha)).status(), 404);
