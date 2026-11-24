@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, type KeyboardEvent } from 'react';
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useParams, useRouteLoaderData, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
@@ -14,7 +14,7 @@ import { BoardCards, cardOpenerId, getCardOpener, type BoardView } from '../card
 import { BoardPasteControls, clipboardShortcut, selectClipboardCard } from '../cards/card-clipboard.js';
 import { useBoardClipboard } from '../cards/card-clipboard-state.js';
 import { BoardRefreshContext } from './board-refresh.js';
-import { readBoardView, saveBoardView } from './board-filter-store.js';
+import { readBoardEntryView, readBoardView, saveBoardEntryView, saveBoardView } from './board-filter-store.js';
 import { useLiveBoard, type LiveBoard, type LiveCard } from './use-live-board.js';
 
 export type BoardInspectorContext = { board: LiveBoard | null | undefined; liveCard: LiveCard | undefined };
@@ -78,12 +78,17 @@ export function BoardPage() {
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
   const viewKey = board && [board.recipeScope, board.board.id, context.id].join('/');
   const explicitView = availableViews.find(({ id }) => id === params.get('view'))?.id;
+  const entryView = useMemo(() => viewKey && readBoardEntryView(viewKey, key), [viewKey, key]);
   const storedView = viewKey && readBoardView(viewKey);
-  const view = explicitView ?? availableViews.find(({ id }) => id === storedView)?.id ?? defaultView;
+  const view = explicitView ?? availableViews.find(({ id }) => id === (entryView ?? storedView))?.id ?? defaultView;
 
   useEffect(() => {
     if (viewKey && explicitView) saveBoardView(viewKey, explicitView);
   }, [viewKey, explicitView]);
+
+  useLayoutEffect(() => {
+    if (viewKey && !explicitView) saveBoardEntryView(viewKey, key, view);
+  }, [viewKey, key, explicitView, view]);
 
   useEffect(() => {
     if (inspectorOpen || concealed || !board) return;
