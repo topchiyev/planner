@@ -16,7 +16,8 @@ Phase 1 establishes the build and fixture interfaces. Phase 2 can proceed once t
   The Reviewer approved the deep-link boundary fix at `e12d66f` and the backend/frontend rename at `5361766`. The integrated checkout passed clean install, health checks, and desktop/narrow Chromium, deep-link and same-origin proxy tests.
 - [x] 1.5 Establish isolated test commands and independently generated fixture identities for all roles, private/shared/hidden projects, three list contexts, two editors and absent relationships. Verify tests fail fast if pointed at an unrelated MongoDB endpoint. Document the root test and verification commands.
   The Reviewer approved `ebbcbb1`. Integrated tests passed five unit, seven integration, and six Chromium checks. Authenticated MongoDB 8.0.38 fixtures stayed isolated, and public and direct test entries rejected unrelated endpoints before starting tools.
-- [ ] 1.6 Freeze the source schema fixture and synthetic database/file evidence for Community 2.3.0 and 2.3.1. Compare 34 table projections and 23 migration names and document the expected unsupported branch fixtures from the real reference. Verify there are no production data, credentials or filenames in fixtures.
+- [x] 1.6 Freeze the source schema fixture and synthetic database/file evidence for Community 2.3.0 and 2.3.1. Compare 34 table projections and 23 migration names and document the expected unsupported branch fixtures from the real reference. Verify there are no production data, credentials or filenames in fixtures.
+  The Reviewer approved `a74a34e`. Both synthetic release snapshots matched 34 table projections and 23 migration names in isolated PostgreSQL 17.12. All 14 integrated checks passed, including asset hashes, schema drift and connection-target refusal.
 
 ## 2. Native installer and service interfaces
 
