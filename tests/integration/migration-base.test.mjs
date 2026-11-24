@@ -14,7 +14,7 @@ import { stageBaseWorkspace } from '../../apps/backend/dist/application/migratio
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { legacyPublicId, workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
-import { openActiveWorkspace } from '../../apps/backend/dist/storage/scoped.js';
+import { openActiveWorkspace, openTrustedStagedWorkspace } from '../../apps/backend/dist/storage/scoped.js';
 import { assembleSnapshot } from '../fixtures/planka/snapshot.mjs';
 import { startFixturePostgres } from '../fixtures/planka/private-postgres.mjs';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
@@ -247,6 +247,10 @@ test('both verified Community captures stage the exact inactive core graph with 
     assert.equal(complete.table, 'project_manager');
     assert.deepEqual(await runStage(first, firstRun, db, lease, cursors, 1), complete);
     const firstId = await assertGraph({ ...target, receipt: firstReceipt, generationId: firstRun.generationId });
+    const staged = await openTrustedStagedWorkspace(db, installationId, firstRun.generationId);
+    const genericMapping = await staged.read('importIds', firstId);
+    assert.equal(genericMapping.sourceId, '9007199254740993');
+    for (const field of ['provenance', 'order', 'reference']) assert.equal(Object.hasOwn(genericMapping, field), false);
     const repeat = await createRun(db, installationId, firstReceipt);
     await runStage(first, repeat, db, lease, cursors, 1);
     assert.equal(await assertGraph({ ...target, receipt: firstReceipt, generationId: repeat.generationId }), firstId);
@@ -275,7 +279,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
     update(`
       UPDATE public.project SET background_type='gradient', background_gradient='ocean-dive' WHERE id=201;
       UPDATE public.project SET background_type='gradient', background_gradient='unrecognized-fixture-shade' WHERE id=202;
-      UPDATE public.user_account SET default_editor_mode='unrecognized-fixture-editor' WHERE id=102;
+      UPDATE public.user_account SET default_editor_mode='unrecognized-fixture-editor', is_deactivated=true WHERE id=102;
       UPDATE public.card SET list_id=403, list_changed_at='2026-02-14 08:09:10.000001' WHERE id=9007199254740997;
       UPDATE public.card SET stopwatch='{"startedAt":"2026-02-13T08:09:10.123456Z","total":42}' WHERE id=9007199254740993;
     `);
@@ -296,6 +300,9 @@ test('staging preserves exact gradient and history provenance and blocks malform
     assert.equal((await provenance('project', '202')).unrecognizedGradient, true);
     const user = await db.collection('users').findOne({ generationId, id: id('user_account', '102') });
     assert.equal(user.preferences.editorMode, 'wysiwyg');
+    assert.notEqual(user.disabledAt, null);
+    const retainedOwner = await db.collection('projectManagers').findOne({ generationId, id: id('project_manager', '222') });
+    assert.equal(retainedOwner.userId, user.id);
     assert.deepEqual((await provenance('user_account', '102')).unsupportedPreferences, ['editorMode']);
     const card = await db.collection('cards').findOne({ generationId, id: id('card', '9007199254740993') });
     assert.deepEqual(card.stopwatch, { startedAt: '2026-02-13T08:09:10.123Z', total: 42 });
@@ -326,6 +333,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
 
     const badRows = [
       ["UPDATE public.project SET owner_project_manager_id=221 WHERE id=202", 'source-read', 'different workspace scope'],
+      ["UPDATE public.project SET owner_project_manager_id=229 WHERE id=202", 'source-read', 'reference is missing'],
       ["DELETE FROM public.project_manager WHERE id=221", 'source-read', 'no project manager'],
       ["UPDATE public.board_membership SET project_id=202 WHERE id=313", 'source-read', 'different workspace scope'],
       ["UPDATE public.board_membership SET user_id=999 WHERE id=313", 'source-read', 'typed source reference'],
@@ -337,6 +345,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
       ["DELETE FROM public.list WHERE id=406", 'source-read', 'one archive list'],
     ];
     const undo = [
+      'UPDATE public.project SET owner_project_manager_id=222 WHERE id=202',
       'UPDATE public.project SET owner_project_manager_id=222 WHERE id=202',
       'INSERT INTO public.project_manager (id, project_id, user_id) VALUES (221,201,102)',
       'UPDATE public.board_membership SET project_id=201 WHERE id=313',

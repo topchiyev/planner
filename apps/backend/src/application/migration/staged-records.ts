@@ -95,7 +95,8 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
       const parent = sourceKey('project', projectSourceId);
       const row = await ids.findOne({ generationId, sourceInstanceId, entity: 'project_manager', 'reference.parent': parent });
       if (!row) return false;
-      if (row.reference?.parent !== parent || !await mapping('project_manager', row.sourceId)) {
+      const canonical = await mapping('project_manager', row.sourceId);
+      if (!canonical || canonical._id !== row._id || canonical.reference?.parent !== parent) {
         throw new MigrationError('target-write', 'The protected project manager mapping has an invalid identity.');
       }
       return true;
