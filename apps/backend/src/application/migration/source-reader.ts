@@ -104,21 +104,24 @@ export async function withSourceSnapshot<T>(service: ReturnType<typeof parseSour
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     began = true;
     await client.query("SET LOCAL statement_timeout = '30s'; SET LOCAL lock_timeout = '4s'; " +
-      "SET LOCAL idle_in_transaction_session_timeout = '45s'; SET LOCAL TIME ZONE 'UTC'; SET LOCAL search_path = pg_catalog, public");
+      "SET LOCAL idle_in_transaction_session_timeout = '45s'; SET LOCAL TIME ZONE 'UTC'; SET LOCAL client_encoding = 'UTF8'; SET LOCAL search_path = pg_catalog, public");
     const result = await client.query<{
       server_version: string; server_version_num: string; transaction_read_only: string; transaction_isolation: string;
-      zone: string; database: string; username: string; inet_server_addr: string | null;
+      zone: string; server_encoding: string; client_encoding: string; database: string; username: string; inet_server_addr: string | null;
     }>(`
       SELECT current_setting('server_version') AS server_version,
         current_setting('server_version_num') AS server_version_num,
         current_setting('transaction_read_only') AS transaction_read_only,
         current_setting('transaction_isolation') AS transaction_isolation,
-        current_setting('TimeZone') AS zone, current_database() AS database, session_user AS username, inet_server_addr()::text
+        current_setting('TimeZone') AS zone, current_setting('server_encoding') AS server_encoding,
+        current_setting('client_encoding') AS client_encoding, current_database() AS database,
+        session_user AS username, inet_server_addr()::text
     `);
     const scope = result.rows[0];
     const restoredPostgresVersion = scope?.server_version.match(/^(17\.[0-9]+)(?:$| )/u)?.[1];
     if (!scope || !restoredPostgresVersion || scope.database !== service.database || scope.username !== service.user || scope.inet_server_addr !== null
       || scope.transaction_read_only !== 'on' || scope.transaction_isolation !== 'repeatable read' || scope.zone !== 'UTC'
+      || scope.server_encoding === 'SQL_ASCII' || scope.client_encoding !== 'UTF8'
       || !/^17[0-9]{4}$/u.test(scope.server_version_num)
       || Number(restoredPostgresVersion.split('.')[1]) !== Number(scope.server_version_num) - 170000) {
       throw new MigrationError('source-service', 'Use a private PostgreSQL 17 restore with a verified read-only snapshot.');
@@ -153,10 +156,11 @@ export async function withSourceSnapshot<T>(service: ReturnType<typeof parseSour
   } finally { await client.end().catch(() => undefined); }
 }
 
+export async function sourcePreflightInSnapshot(client: Client) {
+  return { ...await sourceInventory(client), assets: await sourceAssets(client) };
+}
+
 export async function readSourcePreflight(service: ReturnType<typeof parseSourceService>) {
-  const { value, restoredPostgresVersion } = await withSourceSnapshot(service, async (client) => ({
-    ...await sourceInventory(client),
-    assets: await sourceAssets(client),
-  }));
+  const { value, restoredPostgresVersion } = await withSourceSnapshot(service, sourcePreflightInSnapshot);
   return { ...value, restoredPostgresVersion };
 }

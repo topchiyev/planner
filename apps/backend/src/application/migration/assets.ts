@@ -142,7 +142,11 @@ export function inspectObjects(service: ObjectService, request = fetch): Reader 
   };
 }
 
-export async function reconcileAssets(reader: Reader, manifest: ReadonlyMap<string, MigrationAsset>, source: ReadonlyMap<string, SourceAsset>) {
+export type VerifiedSourceAsset = { key: string; kind: SourceAsset['kind']; sourceLength: string | null;
+  byteLength: number | null; sha256: string | null };
+
+export async function reconcileAssets(reader: Reader, manifest: ReadonlyMap<string, MigrationAsset>,
+  source: ReadonlyMap<string, SourceAsset>, observe?: (entry: VerifiedSourceAsset) => void) {
   try {
     const results = { present: 0, missingOriginals: 0, missingDerivatives: 0, bytes: 0n };
     for (const key of manifest.keys()) {
@@ -153,13 +157,16 @@ export async function reconcileAssets(reader: Reader, manifest: ReadonlyMap<stri
       if (assetKeyKind(key) !== expected.kind) throw invalid();
       const declared = manifest.get(key);
       const observed = declared && await reader.inspect(declared);
+      const sourceLength = expected.sourceLength?.toString() ?? null;
       if (!declared || !observed) {
+        observe?.({ key, kind: expected.kind, sourceLength, byteLength: null, sha256: null });
         if (expected.kind === 'original') results.missingOriginals += 1;
         else results.missingDerivatives += 1;
         continue;
       }
       if (observed.length !== declared.size || observed.digest !== declared.sha256
         || expected.sourceLength !== null && expected.sourceLength !== BigInt(observed.length)) throw invalid();
+      observe?.({ key, kind: expected.kind, sourceLength, byteLength: observed.length, sha256: observed.digest });
       results.present += 1;
       results.bytes += BigInt(observed.length);
     }

@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { migrationAssetsSchema, migrationCaptureSchema, type MigrationAsset, type MigrationCapture } from '@planner/contracts';
+import { sourceAssetIdSchema } from '@planner/contracts/storage';
 
 export type MigrationFault = 'capture-format' | 'source-release' | 'source-edition' | 'capture-integrity'
   | 'archive-layout' | 'archive-limit' | 'asset-manifest' | 'asset-key' | 'asset-integrity'
   | 'source-service' | 'source-role' | 'source-catalog' | 'source-ledger' | 'source-read'
-  | 'target-setup' | 'target-capacity' | 'target-write';
+  | 'source-changed' | 'target-setup' | 'target-capacity' | 'target-write';
 
 export class MigrationError extends Error {
   constructor(readonly fault: MigrationFault, message: string) { super(message); }
@@ -14,7 +15,6 @@ export const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).
 export const captureManifestLimit = 64 * 1024;
 export const assetManifestLimit = 32 * 1024 * 1024;
 const decoder = new TextDecoder('utf-8', { fatal: true });
-const upload = /^(?:[1-9][0-9]*|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/u;
 const unsafeComponent = /[<>:"\\|?*\p{Cc}]/u;
 
 function json(bytes: Buffer, limit: number, label: MigrationFault) {
@@ -54,7 +54,7 @@ export function keyComponents(path: string) {
 
 export function assetKeyKind(key: string) {
   const [scope, type, id, leaf, derived, ...extra] = keyComponents(key);
-  if (upload.test(id ?? '') && leaf && extra.length === 0) {
+  if (sourceAssetIdSchema.safeParse(id).success && leaf && extra.length === 0) {
     if (scope === 'private' && type === 'attachments') {
       if (!derived) return 'original' as const;
       if (leaf === 'thumbnails' && /^outside-(360|720)\.[a-z0-9]+$/u.test(derived)) return 'derivative' as const;
