@@ -740,9 +740,26 @@ test('desktop editors create a closed card and use rich text, ID-backed mentions
     await expect(inspector.getByRole('textbox', { name: 'Description' })).toHaveValue(
       new RegExp('Spectral log 🌱 .*\\[Fixture second-editor\\]\\(' + ids.secondEditor + '\\)'));
     await inspector.getByLabel('Due date and time (UTC)').fill('2026-03-19T13:13');
+    await modes.getByRole('button', { name: 'Rich text' }).click();
+    await expect(description).toHaveAttribute('contenteditable', 'true');
+    const submitted = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    await editor.route('**/api/v1/cards/' + cardId, async (intercepted) => {
+      if (intercepted.request().method() === 'PATCH') {
+        submitted.resolve();
+        await release.promise;
+      }
+      await intercepted.continue().catch(() => {});
+    });
     const saved = editor.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + cardId));
-    await inspector.getByRole('button', { name: 'Save card', exact: true }).click();
+    try {
+      await inspector.getByRole('button', { name: 'Save card', exact: true }).click();
+      await submitted.promise;
+      await expect(description).toHaveAttribute('contenteditable', 'false');
+      await expect(inspector.getByRole('button', { name: 'Save card', exact: true })).toBeDisabled();
+    } finally { release.resolve(); }
     const receipt = await saved;
+    await expect(description).toHaveAttribute('contenteditable', 'true');
     assert.equal(receipt.status(), 200);
     assert.equal(receipt.request().postDataJSON().dueDate, '2026-03-19T13:13:00.000Z');
     await expect(inspector.getByRole('button', { name: 'Save card', exact: true })).toBeDisabled();
@@ -1987,6 +2004,8 @@ test('native browser applies verified live updates passively and preserves a dir
     const peer = await page({ width: 1440, height: 900 });
     const path = board(ids.privateBoard) + '/cards/' + ids.activeCard + '?view=list';
     const eventsPath = '/api/v1' + board(ids.privateBoard) + '/events';
+    await f.insert('cards', fixtureId(29920), { boardId: ids.privateBoard, listId: ids.privateActiveList,
+      name: 'Earlier card on page one', description: null, kind: 'board', type: 'project', rank: '1' });
     await signIn(editor, origin, 'first-editor');
     await f.db.collection('users').updateOne({ ...f.scope, id: ids.privateOwner },
       { $set: { 'preferences.autoLogout': '2m' } });
@@ -2005,7 +2024,9 @@ test('native browser applies verified live updates passively and preserves a dir
     await expect(draft).toHaveValue('Moving an assigned card');
     await expect.poll(() => liveConnections).toEqual([200]);
     await expect.poll(() => sessionReads.includes('1')).toBe(true);
-    await draft.fill('Unsubmitted local title');
+    await draft.fill('Undone local title');
+    await draft.fill('Moving an assigned card');
+    await expect(editor.getByRole('button', { name: 'Save card' })).toBeDisabled();
     const session = () => f.db.collection('sessions').findOne({ ...f.scope, userId: ids.firstEditor });
     const lastActivity = (await session()).lastActivityAt.getTime();
     time += 25_000;
@@ -2016,8 +2037,14 @@ test('native browser applies verified live updates passively and preserves a dir
     await expect(peer.getByRole('heading', { name: 'Peer live title', level: 2 })).toBeVisible();
     await publish();
     await expect(editor.getByRole('heading', { name: 'Peer live title', level: 2 })).toBeVisible();
-    await expect(draft).toHaveValue('Unsubmitted local title');
-    await expect(editor.getByText('The card changed while you were editing. Your edits are still here.')).toHaveCount(1);
+    await expect(draft).toHaveValue('Peer live title');
+    const conflict = editor.getByText('The card changed while you were editing. Your edits are still here.');
+    await expect(conflict).toHaveCount(0);
+    await draft.fill('Other undone local title');
+    await draft.fill('Peer live title');
+    await editor.getByRole('button', { name: 'Markdown', exact: true }).click();
+    const description = editor.getByRole('textbox', { name: 'Description', exact: true });
+    await description.fill('Unsubmitted local description');
     assert.equal((await session()).lastActivityAt.getTime(), lastActivity);
 
     const peerSession = await (await peer.request.get(origin + '/api/v1/session')).json();
@@ -2033,7 +2060,7 @@ test('native browser applies verified live updates passively and preserves a dir
     await expect(editor.getByRole('heading', { name: 'Board from the live peer', level: 1 })).toBeVisible();
     await expect(editor.getByRole('navigation', { name: 'Project navigation' })
       .getByRole('link', { name: 'Board from the live peer' })).toBeVisible();
-    await expect(draft).toHaveValue('Unsubmitted local title');
+    await expect(description).toHaveValue('Unsubmitted local description');
 
     const heldCard = Promise.withResolvers();
     const releaseCard = Promise.withResolvers();
@@ -2064,7 +2091,8 @@ test('native browser applies verified live updates passively and preserves a dir
     } finally { releaseCard.resolve(); }
     await expect(editor.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
     await expect(peer.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
-    await expect(draft).toHaveValue('Unsubmitted local title');
+    await expect(draft).toHaveValue('Newest update in a burst');
+    await expect(description).toHaveValue('Unsubmitted local description');
 
     let invalidatedResume = false;
     await editor.route('**' + eventsPath + '?after=*', async (intercepted) => {
@@ -2080,20 +2108,44 @@ test('native browser applies verified live updates passively and preserves a dir
     assert.ok(token);
     f.streams.disconnectToken(token);
     await expect.poll(() => liveConnections).toEqual([200, 200, 200]);
-    await expect(draft).toHaveValue('Unsubmitted local title');
+    await expect(description).toHaveValue('Unsubmitted local description');
     await publish();
-    await expect(editor.getByText('The card changed while you were editing. Your edits are still here.')).toHaveCount(1);
+    await expect(conflict).toHaveCount(1);
     assert.equal((await session()).lastActivityAt.getTime(), lastActivity);
 
-    const removed = await peer.request.delete(boardPath + '/members/' + ids.firstEditor, {
+    const pageOne = await editor.request.get(boardPath + '/cards?context=board&limit=1');
+    assert.equal(pageOne.status(), 200, await pageOne.text());
+    const cursor = (await pageOne.json()).page.nextCursor;
+    assert.ok(cursor);
+    await editor.goto(origin + path + '&limit=1&cursor=' + encodeURIComponent(cursor));
+    await expect(editor.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
+    assert.equal(new URL(editor.url()).searchParams.get('cursor'), cursor);
+    const visitActivity = (await session()).lastActivityAt.getTime();
+    time += 5_000;
+
+    const memberPath = boardPath + '/members/' + ids.firstEditor;
+    const downgraded = await peer.request.patch(memberPath, {
       headers: { ...peerHeaders, 'If-Match': '"1"', 'Idempotency-Key': randomUUID() },
+      data: { role: 'viewer', canComment: false },
+    });
+    assert.equal(downgraded.status(), 200, await downgraded.text());
+    await publish();
+    await expect.poll(() => new URL(editor.url()).searchParams.has('cursor')).toBe(false);
+    assert.equal(new URL(editor.url()).pathname, new URL(origin + path).pathname);
+    await expect(editor.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
+    await expect(editor.getByRole('link', { name: 'Earlier card on page one' })).toBeVisible();
+    await expect(draft).toHaveCount(0);
+    assert.equal((await session()).lastActivityAt.getTime(), visitActivity);
+
+    const removed = await peer.request.delete(memberPath, {
+      headers: { ...peerHeaders, 'If-Match': '"2"', 'Idempotency-Key': randomUUID() },
     });
     assert.equal(removed.status(), 204, await removed.text());
     await publish();
     await expect(editor.getByRole('heading', { name: 'Page not found', level: 1 })).toBeVisible();
     await expect(draft).toHaveCount(0);
     await expect(editor.getByRole('link', { name: 'Board from the live peer', exact: true })).toHaveCount(0);
-    assert.equal((await session()).lastActivityAt.getTime(), lastActivity);
+    assert.equal((await session()).lastActivityAt.getTime(), visitActivity);
     await expect(peer.getByRole('heading', { name: 'Newest update in a burst', level: 2 })).toBeVisible();
     const peerActivity = (await f.db.collection('sessions').findOne({ ...f.scope, userId: ids.privateOwner })).lastActivityAt.getTime();
     assert.equal(peerActivity, time);

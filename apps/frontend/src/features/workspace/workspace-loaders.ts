@@ -78,8 +78,11 @@ export async function readNativeBoard(boardId: string, url: URL, signal: AbortSi
     return { ...base, cardsPage };
   } catch (error) {
     if (!(error instanceof WorkspaceRequestError)) throw error;
-    if (error.code === 'INVALID_CURSOR' && cursor && !live)
-      throw redirect(url.pathname + boardFilterLocation(url.search, recipe));
+    if (error.code === 'INVALID_CURSOR' && cursor) {
+      if (!live) throw redirect(url.pathname + boardFilterLocation(url.search, recipe));
+      const cardsPage = await readWorkspace('boardCards', boardId, boardFilterApiQuery(context, recipe), signal);
+      return { ...base, cardsPage, recipeCursor: null };
+    }
     if (error.status === 403 || error.status === 404) return null;
     if (error.status === 401 || live) throw error;
     return { ...base, cardsPage: null };

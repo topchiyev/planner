@@ -12,7 +12,15 @@ const CardMarkdownInput = lazy(async () => ({ default: (await import('./card-mar
 
 type Card = WorkspaceReadOutput<'cardGet'>['data'];
 type Update = Omit<RelationshipCommandInput<'cards.update'>, 'id' | 'expectedRevision'>;
-type Draft = { revision: number; values: Update };
+type CardFields = Required<Pick<Update, 'name' | 'type' | 'description' | 'dueDate' | 'dueDateCompleted' | 'closed'>>;
+type Draft = { revision: number; baseline: CardFields; values: Partial<CardFields> };
+
+function cardDraft(revision: number, baseline: CardFields, values: Partial<CardFields>): Draft | null {
+  const changed = Object.fromEntries(Object.entries(values)
+    .filter(([key, value]) => value !== baseline[key as keyof CardFields])) as Partial<CardFields>;
+  if ((changed.dueDate === undefined ? baseline.dueDate : changed.dueDate) === null) delete changed.dueDateCompleted;
+  return Object.keys(changed).length ? { revision, baseline, values: changed } : null;
+}
 const options = { project: 'Project', story: 'Story' } as const;
 const errors = new Map([
   ['CARD_TYPE_RESTRICTED', 'This board does not allow the selected card type.'],
@@ -77,7 +85,7 @@ function EditableCard({ card, restriction }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const dirty = draft?.values;
   const { id, revision } = card;
-  const current = {
+  const current: CardFields = {
     name: card.name, type: card.type, description: card.description, dueDate: card.dueDate, dueDateCompleted: card.dueDateCompleted ?? false, closed: card.closed,
   };
   const effective = { ...current, ...dirty };
@@ -91,8 +99,8 @@ function EditableCard({ card, restriction }: Props) {
   if (effective.dueDate == null) delete dirtyValues.dueDateCompleted;
   const valid = dirtyValues.name !== '' && (dirtyValues.name?.length ?? 0) <= 128
     && (dirtyValues.description?.length ?? 0) <= maximumCardDescriptionLength;
-  const edit = <K extends keyof Update>(key: K, value: Update[K]) => {
-    setDraft((old) => ({ revision: old?.revision ?? revision, values: { ...old?.values, [key]: value } }));
+  const edit = <K extends keyof CardFields>(key: K, value: CardFields[K]) => {
+    setDraft((old) => cardDraft(old?.revision ?? revision, old?.baseline ?? current, { ...old?.values, [key]: value }));
   };
 
   function update(body: Update, expected: number, done: (revision: number) => void) {
@@ -115,7 +123,7 @@ function EditableCard({ card, restriction }: Props) {
       <p>The card changed while you were editing. Your edits are still here.</p>
       {card.description && <details><summary>Current saved description</summary><Suspense fallback={<p role="status">Loading description…</p>}><CardDescription description={card.description} /></Suspense></details>}
       <div className="project-actions">
-        <button type="button" className="workspace-button" onClick={() => { setDraft({ ...draft, revision }); action.clearProblem(); }}>Keep edits and use current revision</button>
+        <button type="button" className="workspace-button" onClick={() => { setDraft(cardDraft(revision, current, draft.values)); action.clearProblem(); }}>Keep edits and use current revision</button>
         <button type="button" className="workspace-button" onClick={() => { setDraft(null); action.clearProblem(); }}>Discard edits</button>
       </div>
     </div>}
@@ -139,7 +147,7 @@ function EditableCard({ card, restriction }: Props) {
             onChange={(event) => edit('dueDateCompleted', event.target.checked)} />Due date complete</label>}
         </fieldset>}
         <Suspense fallback={<p role="status">Loading description editor…</p>}>
-          <CardMarkdownInput value={effective.description ?? ''} original={current.description ?? ''} mode={editor} boardId={card.boardId}
+          <CardMarkdownInput value={effective.description ?? ''} original={current.description ?? ''} mode={editor} boardId={card.boardId} disabled={action.busy}
             onMode={setEditorMode} onChange={(value) => edit('description', value || null)} />
         </Suspense>
       </fieldset>
