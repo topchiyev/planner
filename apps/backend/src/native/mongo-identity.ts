@@ -162,6 +162,8 @@ export async function provisionMongoIdentity(
       });
     }
 
+    // The first-run credential probe can close the application's client topology.
+    await app.connect();
     await assertAuthenticatedRole(app, appUsername, appRole);
     const installation = installationCollection(app);
     const record = await installation.findOne({ _id: installationKey });
