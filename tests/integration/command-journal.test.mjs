@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir } from 'node:fs/promises';
+import { chmod, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
@@ -32,6 +32,7 @@ async function seed(fixture, enrollment = false) {
   const { db, directory } = fixture;
   const ownerDirectory = join(directory, 'writer');
   await mkdir(ownerDirectory, { mode: 0o750 });
+  await chmod(ownerDirectory, 0o750);
   await db.collection('installation').insertOne({
     _id: 'installation', installationId, schemaVersion: 0, activeGenerationId: enrollment ? null : generationId,
     setup: { mode: 'fresh', pendingAction: 'first-admin-enrollment',
