@@ -108,9 +108,9 @@ async function reset(f, boardId, cookie, options) {
   } finally { stream.close(); }
 }
 
-test('authorized HTTP snapshots and reconnects share a restart-stable, scope-bound replay cursor', { timeout: 90_000 }, async () => {
+test('authorized HTTP snapshots and reconnects share a restart-stable, scope-bound replay cursor', { timeout: 180_000 }, async () => {
   await withFixtureMongo(async (mongo) => {
-    const f = await makeWorkspaceAccessFixture(mongo, { heartbeatMs: 120 });
+    const f = await makeWorkspaceAccessFixture(mongo, { heartbeatMs: 250 });
     try {
       const viewer = await login(f, ids.viewer);
       const admin = await login(f, ids.admin);

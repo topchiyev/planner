@@ -97,12 +97,15 @@ export function createBoardEventStreams(
       const database = await getDatabase();
       const { scope } = subscriber;
       const store = createBoardEventStore(database, scope.generationId, scope.boardId);
+      let sentHeartbeat = false;
       while (!subscriber.closed && (subscriber.heartbeat || subscriber.last < subscriber.target)) {
         await gate.readSnapshot(async () => {
           if (subscriber.closed) return;
+          const heartbeat = subscriber.heartbeat && (!sentHeartbeat || subscriber.last === subscriber.target);
+          if (heartbeat) subscriber.heartbeat = false;
           const access = await authorize(database, subscriber.token, scope.boardId, scope);
-          if (subscriber.heartbeat) {
-            subscriber.heartbeat = false;
+          sentHeartbeat = heartbeat;
+          if (heartbeat) {
             send(subscriber, () => subscriber.transport.heartbeat());
             return;
           }
