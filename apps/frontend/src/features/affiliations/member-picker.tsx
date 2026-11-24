@@ -1,5 +1,6 @@
+import { useBoardRefresh } from '../boards/board-refresh.js';
 import { useEffect, useState } from 'react';
-import { useLocation, useRevalidator } from 'react-router';
+import { useLocation } from 'react-router';
 import { workspaceSignInPath, type RelationshipReadOutput } from '@planner/contracts';
 import { readAffiliation } from '../projects/project-api.js';
 import { WorkspaceRequestError } from '../workspace/workspace-api.js';
@@ -10,7 +11,7 @@ export function MemberPicker({ boardId, select, label = 'Mention a board member'
   boardId: string; select: (person: Mention) => void; label?: string;
 }) {
   const { pathname, search } = useLocation();
-  const revalidator = useRevalidator();
+  const refresh = useBoardRefresh();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
@@ -32,7 +33,7 @@ export function MemberPicker({ boardId, select, label = 'Mention a board member'
           window.location.replace(workspaceSignInPath(pathname + search));
         } else if (error instanceof WorkspaceRequestError && [403, 404].includes(error.status)) {
           setOpen(false);
-          void revalidator.revalidate();
+          refresh();
         } else setSelected({ binding });
       });
     return () => controller.abort();

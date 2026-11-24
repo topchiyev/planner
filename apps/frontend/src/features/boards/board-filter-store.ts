@@ -39,3 +39,42 @@ export function clearBoardRecipes() {
     }
   } catch { /* The browser may disable tab storage. */ }
 }
+
+export function readBoardView(key: string) {
+  try { return sessionStorage.getItem(boardRecipeStoragePrefix + 'view/' + key); }
+  catch { return null; }
+}
+
+export function saveBoardView(key: string, view: string) {
+  try { sessionStorage.setItem(boardRecipeStoragePrefix + 'view/' + key, view); }
+  catch { /* The browser may disable tab storage. */ }
+}
+
+const historySession = boardRecipeStoragePrefix + 'history-session';
+
+function boardHistorySession() {
+  const saved = sessionStorage.getItem(historySession);
+  if (saved) return saved;
+  const created = crypto.randomUUID();
+  sessionStorage.setItem(historySession, created);
+  return created;
+}
+
+export function readBoardEntryView(scope: string, entryKey: string) {
+  try {
+    const state = window.history.state;
+    const saved = state?.plannerBoardView;
+    if ((state?.key ?? 'default') === entryKey && saved?.scope === scope && saved.session === boardHistorySession()
+        && typeof saved.view === 'string') return saved.view as string;
+  } catch { /* Nothing from an earlier browser session is required for navigation. */ }
+}
+
+export function saveBoardEntryView(scope: string, entryKey: string, view: string) {
+  try {
+    const state = window.history.state;
+    if ((state?.key ?? 'default') !== entryKey) return;
+    const session = boardHistorySession();
+    if (state?.plannerBoardView?.view === view && state.plannerBoardView.scope === scope && state.plannerBoardView.session === session) return;
+    window.history.replaceState({ ...state, plannerBoardView: { scope, view, session } }, '');
+  } catch { /* The browser may disable tab history or storage access. */ }
+}

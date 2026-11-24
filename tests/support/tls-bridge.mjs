@@ -17,9 +17,12 @@ export async function tlsBridge(directory, startProxy) {
     const forwarded = request({ socketPath: proxy.path, path: incoming.url, method: incoming.method,
       headers: { ...incoming.headers, ...proxyHeaders(origin) } }, (response) => {
       reply.writeHead(response.statusCode, response.headers);
+      reply.flushHeaders();
+      response.once('close', () => { if (!response.complete) reply.destroy(); });
       response.pipe(reply);
     });
     forwarded.once('error', () => reply.destroy());
+    reply.once('close', () => forwarded.destroy());
     incoming.pipe(forwarded);
   });
   server.listen(0, '127.0.0.1');

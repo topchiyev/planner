@@ -1,6 +1,6 @@
 import type { KeyObject } from 'node:crypto';
 import {
-  accountRecoveryInputSchema, accountRecoveryOutputSchema, boardEventsPath, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, sessionSchema,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, boardEventsPath, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, passiveSessionHeader, sessionSchema,
   workspaceSignInPath, type BrowserSession, type FirstAdminInput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
@@ -24,6 +24,9 @@ import { connectConfiguredNativeMongo } from './mongo-readiness.js';
 import { browserMfaVerifyPath, mfaEnrollmentPath, mfaEnrollmentVerifyPath, type NativeMfa } from './mfa-routes.js';
 
 declare module 'fastify' {
+  interface FastifyContextConfig {
+    plannerPassiveRead?: true;
+  }
   interface FastifyRequest {
     plannerSession: BrowserSession | null;
   }
@@ -81,7 +84,7 @@ export function createNativeBrowserAuth(
     },
     confirm: (input) => withDatabase((database) => createFirstAdminEnrollment(database, config.installationId, gate, hasher)(input)),
     login: (...args) => withDatabase((database) => sessions(database).login(...args)),
-    read: (token) => withDatabase((database) => sessions(database).read(token)),
+    read: (token, activity) => withDatabase((database) => sessions(database).read(token, activity)),
     async revoke(token) {
       const revoked = await withDatabase((database) => sessions(database).revoke(token));
       if (revoked) streams?.disconnectToken(token);
@@ -122,6 +125,10 @@ function isShellPage(pathname: string) {
   return /^\/(?:(?:workspace|inbox)\/?|settings(?:\/security)?\/?|admin\/accounts\/?|projects\/[^/]+\/?|boards\/[^/]+(?:\/cards\/[^/]+)?\/?)$/u.test(pathname);
 }
 
+function passiveRead(request: FastifyRequest) {
+  return request.routeOptions.config.plannerPassiveRead === true || request.headers[passiveSessionHeader] === '1';
+}
+
 function isPublicBrowserRoute(method: string, pathname: string, mfa: boolean) {
   if (method === 'POST') return pathname === recoverPath || pathname === loginPath
     || (mfa && (pathname === browserMfaVerifyPath || pathname === mfaEnrollmentPath || pathname === mfaEnrollmentVerifyPath));
@@ -150,7 +157,7 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
     try {
       if (request.plannerConnection?.clientAddress && token) {
         if (!read && !hasValidCsrf(token, request.headers['x-csrf-token'])) return authError(reply, request, 'origin');
-        request.plannerSession = await auth.read(token);
+        request.plannerSession = await auth.read(token, read && passiveRead(request) ? 'passive' : 'active');
         if (request.plannerSession) return;
       }
     } catch { return authError(reply, request, 'unavailable'); }
@@ -214,7 +221,7 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
     routes.get(sessionPath, { exposeHeadRoute: false }, async (request, reply) => {
       const token = readSessionCookie(request.headers.cookie);
       if (!request.plannerConnection?.clientAddress || !token) return authError(reply, request, 'session');
-      const session = await auth.read(token);
+      const session = await auth.read(token, passiveRead(request) ? 'passive' : 'active');
       if (!session) return authError(reply, request, 'session');
       return sessionSchema.parse(session);
     });

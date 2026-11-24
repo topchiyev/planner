@@ -95,6 +95,14 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
   </Placement.Provider>;
 }
 
+export function MoveCardButton({ card }: { card: PlacementCard }) {
+  const controls = useContext(Placement);
+  if (!controls || !card.permissions.canMove) return null;
+  return <button className="workspace-button" type="button" aria-label={'Move card ' + card.name}
+    disabled={controls.busy || !!controls.sourceId} ref={(element) => element ? controls.bindMoveButton(card.id, element) : undefined}
+    onClick={() => controls.open(card)}>Move</button>;
+}
+
 export function DraggableBoardCard({ card, children }: { card: PlacementCard; children: ReactNode }) {
   const controls = useContext(Placement);
   const drag = useDraggable({ id: 'card-' + card.id, type: cardDrag, disabled: !controls || controls.busy || !card.permissions.canMove });
@@ -107,8 +115,7 @@ export function DraggableBoardCard({ card, children }: { card: PlacementCard; ch
   return <li ref={register} data-card-drag-source={drag.isDragging || undefined} data-card-drop-target={drop.isDropTarget || undefined}>
     {children}
     {controls && card.permissions.canMove && <div className="board-card-placement">
-      <button className="workspace-button" type="button" aria-label={'Move card ' + card.name} disabled={controls.busy || !!controls.sourceId}
-        ref={(element) => element ? controls.bindMoveButton(card.id, element) : undefined} onClick={() => controls.open(card)}>Move</button>
+      <MoveCardButton card={card} />
       <span className="board-card-handle" ref={drag.handleRef} data-card-drag-handle aria-hidden="true" tabIndex={-1} title={'Drag ' + card.name}>⠿</span>
     </div>}
   </li>;

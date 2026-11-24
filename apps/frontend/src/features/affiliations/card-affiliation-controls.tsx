@@ -1,3 +1,4 @@
+import { useBoardRefresh } from '../boards/board-refresh.js';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRevalidator } from 'react-router';
 import { type WorkspaceReadOutput } from '@planner/contracts';
@@ -71,14 +72,14 @@ function AssignPeople({ card, busy, problem, close, assign }: {
   card: Card; busy: boolean; problem: string; close: () => void; assign: (id: string) => void;
 }) {
   const members = useEligibleMemberPage(card.boardId, card.revision);
-  const revalidator = useRevalidator();
+  const refresh = useBoardRefresh();
   const { accessLost, result: visible, cursor, setCursor } = members;
   useEffect(() => {
     if (accessLost) {
       close();
-      void revalidator.revalidate();
+      refresh();
     }
-  }, [accessLost, close, revalidator]);
+  }, [accessLost, close, refresh]);
 
   function searchMembers(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
