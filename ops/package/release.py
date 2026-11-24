@@ -16,7 +16,8 @@ PACKAGE = "planner-workspace"
 ARCH = "amd64"
 MANIFEST = "manifest.json"
 SIGNATURE = "manifest.json.sig"
-DEPENDENCIES = "libc6 (>= 2.38), libgcc-s1, libstdc++6, libcurl4t64, libssl3t64"
+PRE_DEPENDENCIES = "iproute2, mawk | gawk"
+DEPENDENCIES = "passwd, libc6 (>= 2.38), libgcc-s1, libstdc++6, libcurl4t64, libssl3t64"
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 NOTICE = re.compile(r"(?:licen[cs]es?|notice[s]?|copying|copyright|third[-_ ]party(?:[-_ ]notices?)?)(?:[._ -].*)?", re.I)
@@ -221,6 +222,7 @@ def stage_package(root, source, node_dir, mongo_dir, version, runtimes, provenan
     inventory = stage_npm_inventory(release, workspaces, lock, source / "ops/package/notices")
     write_json(doc / "dependencies.json", {
         "debianDepends": DEPENDENCIES,
+        "debianPreDepends": PRE_DEPENDENCIES,
         "npmProduction": inventory,
         "frontendBundleLicenses": "frontend-bundle-licenses.md",
         "runtimeNotices": {"node": "node/LICENSE", "mongodb": "mongodb/"},
@@ -236,10 +238,26 @@ def stage_package(root, source, node_dir, mongo_dir, version, runtimes, provenan
 
     control = root / "DEBIAN"
     control.mkdir()
+    native = source / "ops/package/native-preflight"
+    (release / "lib").mkdir()
+    for destination in (control / "preinst", release / "lib/native-preflight"):
+        shutil.copyfile(native, destination)
+        destination.chmod(0o755)
+    shutil.copyfile(source / "ops/package/postinst", control / "postinst")
+    (control / "postinst").chmod(0o755)
+    for path in ("usr/lib/systemd/system", "usr/lib/tmpfiles.d"):
+        (root / path).mkdir(parents=True, exist_ok=True)
+    for unit in ("planner.service", "planner-mongodb.service"):
+        destination = root / "usr/lib/systemd/system" / unit
+        shutil.copyfile(source / "ops/systemd" / unit, destination)
+        destination.chmod(0o644)
+    tmpfiles = root / "usr/lib/tmpfiles.d/planner-workspace.conf"
+    shutil.copyfile(source / "ops/systemd/planner-workspace.conf", tmpfiles)
+    tmpfiles.chmod(0o644)
     (control / "control").write_text(
         f"Package: {PACKAGE}\nVersion: {version}\nArchitecture: {ARCH}\n"
         "Maintainer: Planner <topchiyev@gmail.com>\n"
-        f"Section: web\nPriority: optional\nDepends: {DEPENDENCIES}\n"
+        f"Section: web\nPriority: optional\nPre-Depends: {PRE_DEPENDENCIES}\nDepends: {DEPENDENCIES}\n"
         "Description: Planner workspace application with private runtimes\n",
         encoding="utf-8",
     )

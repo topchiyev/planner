@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = configure ]; then
+    exec /opt/planner/current/lib/native-preflight provision
+fi
