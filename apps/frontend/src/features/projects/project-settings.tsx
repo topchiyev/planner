@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate, useRevalidator } from 'react-router';
 import { projectGradientSchema, type ProjectBackground } from '@planner/contracts';
+import { ConfirmResourceName, resourceNameConfirmation } from '../workspace/confirm-resource-name.js';
 import type { loadNativeProject } from '../workspace/workspace-loaders.js';
 import { ProjectDialog, useProjectAction } from './project-controls.js';
 import { ProjectManagersDialog } from './project-managers.js';
@@ -151,21 +152,21 @@ function SettingsDialog({ project, close }: { project: Project; close: () => voi
 }
 
 function DeleteDialog({ project, close }: { project: Project; close: () => void }) {
-  const [name, setName] = useState('');
+  const [confirmation, setConfirmation] = useState('');
   const action = useProjectAction();
   const navigate = useNavigate();
-  const { id, revision } = project;
+  const { id, revision, name } = project;
+  const confirmed = confirmation === resourceNameConfirmation(name);
   return <ProjectDialog title="Delete project" onClose={close} busy={action.busy}>
     <form className="project-form" method="post" onSubmit={(event) => {
       event.preventDefault();
-      if (name !== project.name) return;
+      if (!confirmed) return;
       void action.run(['delete', id, revision, name], (csrf, key) => projectCommand('projects.delete', csrf, key, { id, revision, body: { name } }),
         () => { close(); void navigate('/workspace', { replace: true }); }, false);
     }}>
-      <p>Enter <strong>{project.name}</strong> to permanently delete this empty project.</p>
-      <label>Confirm project name<input name="confirm-project-name" value={name} onChange={(event) => setName(event.target.value)} required autoFocus /></label>
+      <ConfirmResourceName resource="project" name={name} value={confirmation} onChange={setConfirmation} />
       {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
-      <button className="workspace-button workspace-button-danger" type="submit" disabled={action.busy || name !== project.name}>Delete permanently</button>
+      <button className="workspace-button workspace-button-danger" type="submit" disabled={action.busy || !confirmed}>Delete permanently</button>
     </form>
   </ProjectDialog>;
 }
