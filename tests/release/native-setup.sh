@@ -321,6 +321,7 @@ database_setup verify
 
 low_storage() {
     local scratch=$work/low-storage dir
+    normal_state_identity=$(stat -c '%d:%i' /var/lib/planner)
     install -d -m 0700 "$scratch"
     mount -t tmpfs -o size=256m,mode=0711,nodev,nosuid tmpfs "$scratch"
     cp --preserve=mode,ownership /var/lib/planner/.native-installation "$scratch/"
@@ -328,7 +329,9 @@ low_storage() {
         mkdir "$scratch/$dir"
         mount --bind "/var/lib/planner/$dir" "$scratch/$dir"
     done
+    mount --make-rprivate "$scratch"
     mount --rbind "$scratch" /var/lib/planner
+    mount --make-rprivate /var/lib/planner
     [ "$(df -Pk /var/lib/planner | awk 'END {print $4}')" -lt 524288 ]
 }
 
@@ -340,6 +343,8 @@ normal_storage() {
     done
     umount /var/lib/planner
     umount "$scratch"
+    [ "$(stat -c '%d:%i' /var/lib/planner)" = "$normal_state_identity" ]
+    sha256sum --check "$work/protected-files.sha256"
 }
 
 runuser -u planner -- sh -c 'printf "%s\n" retained > /var/lib/planner/blobs/setup-test'

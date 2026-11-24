@@ -11,7 +11,9 @@ if (command === '--version') {
 } else if (command === 'setup' || command === 'status' || command === 'start'
     || command === 'stop' || command === 'restart') {
   process.exitCode = runNativeCommand(command, args);
+} else if (command === 'storage' && args[0] === 'verify') {
+  process.exitCode = runNativeCommand('verify-storage', args.slice(1));
 } else {
-  console.error('Usage: plannerctl preflight|setup|status|start|stop|restart|--version');
+  console.error('Usage: plannerctl preflight|setup|status|start|stop|restart|storage verify|--version');
   process.exitCode = 2;
 }

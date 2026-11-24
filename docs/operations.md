@@ -63,6 +63,12 @@ Setup and `plannerctl start` verify the dedicated MongoDB instance, start the ap
 
 Stop Planner before a package upgrade or reinstall. Once configured, the installer checks the recorded ports automatically. Package removal stops and disables the services and preserves the configuration, database and files. After reinstalling, run `sudo plannerctl start` to resume the existing installation. The setup intent and package ports are root-only files under `/etc/planner`; the application configuration is readable by the Planner service group.
 
+## Workspace storage schema
+
+Setup and the guarded service start verify the installation identity in the dedicated MongoDB instance. A supported schema upgrade runs with the application stopped. Planner copies and verifies any legacy first-administrator grant under its generation-scoped key, creates and checks its collection indexes, and then publishes the new schema version. An interrupted upgrade resumes from the stored phase on the next operator start. The version check preserves the active generation and the setup state.
+
+Verify the live database's owned catalog locally with `sudo plannerctl storage verify --json`. This command and the public readiness probe read the schema and indexes. An unknown version, an incomplete migration or an incompatible index keeps workspace readiness unavailable.
+
 ## HTTPS reverse proxy
 
 The installed application reads the canonical HTTPS origin and selected port from `/etc/planner/planner.json`. It listens on the IPv4 loopback interface. The origin has the scheme, authority and optional root slash. Use the same authority, including any non-default HTTPS port, in the proxy configuration and in `plannerctl setup`.
@@ -112,3 +118,5 @@ Run the [private database acceptance test](../tests/release/native-mongodb.sh) i
 Run the [operator acceptance test](../tests/release/native-setup.sh) for each setup mode in a clean offline guest. It takes the signed candidate ISO mount point and the mode. After the first phase succeeds, reboot the same guest and run it with the additional `reboot-check` argument.
 
 Run the [HTTP and proxy acceptance test](../tests/release/native-http.sh) in a separate clean offline guest. Place the signed candidate, test public key, sample nginx configuration and `native-http-fixture.mjs` at the ISO root. Put the two nginx packages pinned by the test in `nginx/`. The test uses a guest-only event source to measure streaming through TLS.
+
+Run the [storage upgrade acceptance test](../tests/release/native-storage.sh) in a clean offline guest. Pair the signed current candidate at the root of the read-only ISO with the signed schema-0 operator build under `previous/`. The test uses the installed operator commands and the guest's authenticated Planner database.
