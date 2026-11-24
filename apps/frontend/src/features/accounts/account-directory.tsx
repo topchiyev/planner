@@ -122,7 +122,7 @@ export function AccountDirectoryPage() {
       {directory.accounts.length === 0 && <p>No matching accounts.</p>}
       {directory.next && <button type="button" onClick={() => {
         const params = new URLSearchParams(search);
-        params.set('after', directory.next!);
+        params.set('cursor', directory.next!);
         setSearch(params);
       }}>Next page</button>}
     </section>

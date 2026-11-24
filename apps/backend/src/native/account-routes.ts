@@ -9,6 +9,7 @@ import { accountErrors, AccountActionError } from '../application/auth/account-p
 import { clearSessionCookie, createLoginRateLimit, readSessionCookie } from '../application/auth/credentials.js';
 import { HashCapacityError } from '../application/auth/password.js';
 import { CommandConflict } from '../application/command-journal/operation.js';
+import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import type { NativeAccountManagement } from './browser-auth.js';
 
 const bodyLimit = 4096;
@@ -41,6 +42,7 @@ export function registerAccountRoutes(app: FastifyInstance, accounts: NativeAcco
         return fail(reply, request, status, code, message);
       }
       if (error instanceof HashCapacityError) return fail(reply, request, 429, 'RATE_LIMITED', 'Too many attempts. Try again later.');
+      if (error instanceof InvalidPageCursor) return fail(reply, request, 400, 'INVALID_CURSOR', error.message);
       if (error instanceof CommandConflict) return fail(reply, request, error.statusCode, error.code, error.message);
       if (error instanceof InvalidAccountRequest || (error.statusCode && error.statusCode >= 400 && error.statusCode < 500)) {
         return fail(reply, request, 400, 'INVALID_REQUEST', 'Check the information you entered.');
