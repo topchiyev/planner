@@ -1,44 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
-import { request } from 'node:http';
-import { createServer } from 'node:https';
-import { join } from 'node:path';
 import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
-import { accountFixture, callSocket, changedPassword, password, proxyHeaders } from './support/account-fixture.mjs';
+import { accountFixture, callSocket, changedPassword, password } from './support/account-fixture.mjs';
+import { tlsBridge } from './support/tls-bridge.mjs';
 import { withFixtureMongo } from './support/fixture-mongo.ts';
 import { assertOwnedMongoEnvironment } from './support/mongo-environment.ts';
 
 assertOwnedMongoEnvironment(process.env);
-
-async function tlsBridge(directory, startProxy) {
-  const key = join(directory, 'tls-key');
-  const cert = join(directory, 'tls-cert');
-  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-    '-subj', '/CN=127.0.0.1', '-keyout', key, '-out', cert], { stdio: 'ignore' });
-  let proxy;
-  let origin;
-  const server = createServer({ key: await readFile(key), cert: await readFile(cert) }, (incoming, reply) => {
-    const forwarded = request({ socketPath: proxy.path, path: incoming.url, method: incoming.method,
-      headers: { ...incoming.headers, ...proxyHeaders(origin) } }, (response) => {
-      reply.writeHead(response.statusCode, response.headers);
-      response.pipe(reply);
-    });
-    forwarded.once('error', () => reply.destroy());
-    incoming.pipe(forwarded);
-  });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  origin = 'https://127.0.0.1:' + server.address().port;
-  try { proxy = await startProxy(origin); }
-  catch (error) { server.close(); throw error; }
-  return { origin, close: async () => {
-    await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
-    await proxy.close();
-  } };
-}
 
 async function signIn(page, host, email, pass) {
   await page.goto(host + '/sign-in');

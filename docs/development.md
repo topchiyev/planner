@@ -180,6 +180,12 @@ The stream replays at most 1,000 contiguous events. A cursor that cannot be repl
 
 The shared `boardEventFrameSchema` defines the delivered payload. Emit `card.removed` with the source board and source-local card ID on a transfer away. A separate destination event can identify the card only while it belongs to that authorized destination board. Unknown effects invalidate the affected board through `board.invalidated`.
 
+### Projects in the browser
+
+The native workspace uses separate actor-scoped project and favorite queries. Search, visibility, favorites filtering, paging and the expanded group use the workspace URL. Group expansion fetches the authorized boards for that project. Display, sort and sidebar favorites settings save individual fields against the current account preference revision.
+
+Project favorites use the relationship registry at `PUT /api/v1/projects/:id/favorite` and `DELETE /api/v1/projects/:id/favorite`. Send the current quoted project revision, an idempotency key and the browser CSRF token. A favorite changes the actor's edge and keeps the shared project revision. Board, project and nested card links reload their own authorized data. Only workspace destinations and supported query fields survive password sign-in and MFA.
+
 ### Native backup and staged restore
 
 Run `plannerctl backup create --json` as root on a running, ready Planner installation. It returns the private backup directory and the manifest SHA-256. Keep a trusted record of the hash separate from the copy. The archive contains ordered BSON for every Planner generation, matched private media, and a restricted source configuration and MFA key bundle. Keep the directory and its copies under operator control. The archive permissions are `0700` for directories and `0600` for files.

@@ -1,7 +1,7 @@
 import type { KeyObject } from 'node:crypto';
 import {
   accountRecoveryInputSchema, accountRecoveryOutputSchema, boardEventsPath, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, sessionSchema,
-  type BrowserSession, type FirstAdminInput,
+  workspaceSignInPath, type BrowserSession, type FirstAdminInput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -155,7 +155,7 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
       }
     } catch { return authError(reply, request, 'unavailable'); }
     if (request.method === 'GET' && request.plannerConnection?.clientAddress && isShellPage(pathname)) {
-      return reply.redirect('/sign-in');
+      return reply.redirect(workspaceSignInPath(request.raw.url));
     }
     return authError(reply, request, 'session');
   });

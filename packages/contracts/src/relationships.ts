@@ -9,6 +9,9 @@ const requiredRevision = target.extend({ expectedRevision: edgeRevision });
 const parentRevision = target.extend({ expectedRevision: revisionSchema });
 const role = z.enum(['editor', 'viewer']);
 
+const projectRevision = id.extend({ expectedRevision: revisionSchema });
+const changedFavorite = workspaceData(projectRevision.omit({ expectedRevision: true }).extend({ revision: revisionSchema, favorite: z.boolean() }));
+
 const projectUpdate = id.extend({
   expectedRevision: revisionSchema,
   name: z.string().trim().min(1).max(128).optional(),
@@ -47,7 +50,7 @@ const member = manager.extend({ role, canComment: z.boolean().nullable() });
 const rosterInput = id.extend(workspacePageQuery);
 const candidatesInput = rosterInput.extend({ q: z.string().trim().max(120).default('') });
 
-function command<const ID extends string, const Route extends string, const Method extends 'POST' | 'PATCH' | 'DELETE',
+function command<const ID extends string, const Route extends string, const Method extends 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   const Status extends 200 | 201 | 204, I extends z.ZodType, O extends z.ZodType>(
   id: ID, method: Method, path: Route, status: Status, target: 'parent' | 'edge', input: I, output: O,
 ) {
@@ -61,6 +64,8 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 }
 
 export const relationshipCommands = {
+  'projects.favorite': command('projects.favorite', 'PUT', '/api/v1/projects/:id/favorite', 200, 'parent', projectRevision, changedFavorite),
+  'projects.unfavorite': command('projects.unfavorite', 'DELETE', '/api/v1/projects/:id/favorite', 204, 'parent', projectRevision, changedFavorite),
   'projects.update': command('projects.update', 'PATCH', '/api/v1/projects/:id', 200, 'parent', projectUpdate, changedProject),
   'projects.addManager': command('projects.addManager', 'POST', '/api/v1/projects/:id/managers', 201, 'parent', parentRevision, addedManager),
   'projects.removeManager': command('projects.removeManager', 'DELETE', '/api/v1/projects/:id/managers/:userId', 204, 'edge',

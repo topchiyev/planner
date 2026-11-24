@@ -54,7 +54,7 @@ function problemOf(error: unknown) {
   return error instanceof Error ? error.message : 'Planner could not complete this request.';
 }
 
-export function MfaSignIn({ challengeId }: { challengeId: string }) {
+export function MfaSignIn({ challengeId, onVerified }: { challengeId: string; onVerified: () => void }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
 
@@ -68,7 +68,7 @@ export function MfaSignIn({ challengeId }: { challengeId: string }) {
     setProblem('');
     try {
       await factorRequest('/session/verify-mfa', 'POST', sessionSchema, input.data);
-      window.location.replace('/workspace');
+      onVerified();
     } catch (error) { setProblem(problemOf(error)); }
     finally { setBusy(false); }
   }

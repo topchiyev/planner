@@ -1,7 +1,8 @@
 import {
-  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginWithMfaOutputSchema,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginWithMfaOutputSchema, workspaceReturnPath, workspaceSignInPath,
 } from '@planner/contracts';
 import { useState, type FormEvent, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router';
 import { PageHeading } from '../../app/page-state.js';
 import { MfaEnrollmentForm, MfaSignIn } from './mfa-forms.js';
 import { sessionPath } from './browser-session.js';
@@ -165,6 +166,9 @@ export function StagedMfaPage() {
 }
 
 export function SignInPage() {
+  const [query] = useSearchParams();
+  const destination = workspaceReturnPath(query.get('returnTo')) ?? '/workspace';
+  const completeSignIn = () => window.location.replace(destination);
   const [challengeId, setChallengeId] = useState<string>();
   const [enrollmentId, setEnrollmentId] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -188,7 +192,7 @@ export function SignInPage() {
         const session = loginWithMfaOutputSchema.parse(await response.json());
         if (session.status === 'enrollment-required') setEnrollmentId(session.enrollmentId);
         else if (session.status === 'challenge-required') setChallengeId(session.challengeId);
-        else window.location.replace('/workspace');
+        else completeSignIn();
       } else {
         setError('Planner could not sign you in. Try again.');
       }
@@ -199,12 +203,12 @@ export function SignInPage() {
 
   if (challengeId) return (
     <AuthPage key="challenge" title="Verify your sign-in">
-      <MfaSignIn challengeId={challengeId} />
+      <MfaSignIn challengeId={challengeId} onVerified={completeSignIn} />
     </AuthPage>
   );
   if (enrollmentId) return (
     <AuthPage key="enrollment" title="Set up your authenticator">
-      <MfaEnrollmentForm enrollmentId={enrollmentId} onSaved={() => window.location.replace('/sign-in')} />
+      <MfaEnrollmentForm enrollmentId={enrollmentId} onSaved={() => window.location.replace(workspaceSignInPath(destination))} />
     </AuthPage>
   );
   return (

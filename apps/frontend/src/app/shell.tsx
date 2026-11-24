@@ -2,6 +2,7 @@ import { PLANNER_VERSION } from '@planner/contracts';
 import { useRef, useState } from 'react';
 import { NavLink, Outlet, useLoaderData, useLocation, useNavigation } from 'react-router';
 
+import { WorkspaceSidebar } from '../features/workspace/workspace-navigation.js';
 import { sessionPath, type loadBrowserSession } from '../features/auth/browser-session.js';
 
 export function AppShell() {
@@ -12,6 +13,8 @@ export function AppShell() {
   const sidebarToggle = useRef<HTMLButtonElement>(null);
   const { pathname } = useLocation();
   const navigation = useNavigation();
+  const actorScope = session && session.account.id + '/' + session.account.role;
+  const changingNativePage = !!session && !!navigation.location && navigation.location.pathname !== pathname;
 
   function closeSidebar() {
     setSidebarOpen(false);
@@ -33,7 +36,7 @@ export function AppShell() {
   }
 
   return (
-    <div className="app-shell" data-version={PLANNER_VERSION}>
+    <div className="app-shell" data-version={PLANNER_VERSION} data-native-workspace={!!session}>
       <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="mobile-header">
         <button
@@ -72,6 +75,7 @@ export function AppShell() {
             <span className="projects-icon" aria-hidden="true" />
             Projects
           </NavLink>
+          {session && !changingNativePage && <WorkspaceSidebar key={actorScope} onFollow={() => setSidebarOpen(false)} />}
         </nav>
         {session && (
           <div className="sidebar-account">
@@ -88,7 +92,7 @@ export function AppShell() {
       </aside>
       <main className="main-content" id="main-content" tabIndex={-1}>
         {navigation.state !== 'idle' && <p className="navigation-status" role="status">Loading…</p>}
-        <Outlet />
+        {!changingNativePage && <Outlet key={actorScope} />}
       </main>
     </div>
   );

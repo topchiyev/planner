@@ -15,3 +15,4 @@ export * from './workspace.js';
 export * from './media.js';
 export * from './relationships.js';
 export * from './board-events.js';
+export * from './workspace-destination.js';

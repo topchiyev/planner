@@ -1,7 +1,11 @@
 import { createSecretKey, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createAccountCredentials } from '../../apps/backend/dist/application/auth/account-credentials.js';
+import { createAccountDirectory } from '../../apps/backend/dist/application/auth/account-directory.js';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
+import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
 import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
@@ -23,7 +27,8 @@ export const origin = 'https://planner.example.test';
 export const ids = workspaceIds;
 export const fixtureId = (sequence) => `65160d3b-4e42-4023-880e-${sequence.toString(16).padStart(12, '0')}`;
 
-export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia, clock, heartbeatMs } = {}) {
+export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia, clock, heartbeatMs, browserOrigin } = {}) {
+  const publicOrigin = browserOrigin ?? origin;
   const installationId = randomUUID();
   const generationId = ids.generation;
   const stagedGenerationId = randomUUID();
@@ -93,17 +98,26 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   const owner = { uid: process.getuid(), gid: process.getgid() };
   const gate = new CommandGate(acquireWriterDirectory(writer, owner, owner));
   await new CommandJournal(gate, db, installationId).recover();
-  const sessions = createBrowserSessions(db, installationId, gate, hasher, now);
+  const mfaKey = browserOrigin ? createSecretKey(randomBytes(32)) : undefined;
+  const sessions = createBrowserSessions(db, installationId, gate, hasher, now, mfaKey);
   const cursorKey = createSecretKey(randomBytes(32));
   const cursors = createBoardEventCursors(cursorKey);
   const reader = createWorkspaceReader(db, installationId, gate, cursors, now);
   const streams = createBoardEventStreams(async () => db, installationId, gate, cursors, { now, heartbeatMs });
   const media = await configureMedia?.({ db, directory, installationId, generationId, gate, now });
   const app = buildApp({
-    native: { origin, proxyToken, readAccess: async () => gate.ready ? ({ kind: 'ready' }) : ({ kind: 'unavailable' }), workspace: reader,
+    ...(browserOrigin && { frontendRoot: fileURLToPath(new URL('../../apps/frontend/dist/', import.meta.url)) }),
+    native: { origin: publicOrigin, proxyToken, readAccess: async () => gate.ready ? ({ kind: 'ready' }) : ({ kind: 'unavailable' }), workspace: reader,
       media, boardEvents: streams,
       relationships: createWorkspaceRelationships(db, installationId, gate, now, undefined, streams.revalidateBoards), auth: {
       confirm: async () => false, login: sessions.login,
+      ...(mfaKey && {
+        mfa: { verify: (input) => sessions.verifyMfa(input), manage: createMfaManagement(db, installationId, gate, mfaKey, hasher, now) },
+        accountManagement: {
+          ...createAccountDirectory(db, installationId, gate, hasher, now),
+          ...createAccountCredentials(db, installationId, gate, hasher, now),
+        },
+      }),
       async revoke(token) {
         const revoked = await sessions.revoke(token);
         if (revoked) streams.disconnectToken(token);
@@ -123,14 +137,14 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
 
   function call(path, cookie, options = {}) {
     return callSocket(join(dir, 'http.sock'), path, { ...options, headers: {
-      ...proxyHeaders(origin), ...(cookie && { Cookie: cookie }), ...options.headers,
+      ...proxyHeaders(publicOrigin), ...(cookie && { Cookie: cookie }), ...options.headers,
     } });
   }
   return {
-    db, installationId, generationId, stagedGenerationId, scope, gate, reader, now, call, insert, streams, cursors, cursorKey, socketPath: join(dir, 'http.sock'),
+    db, installationId, generationId, stagedGenerationId, scope, gate, reader, now, call, insert, streams, cursors, cursorKey, mfaKey, socketPath: join(dir, 'http.sock'),
     async login(id) {
       const account = source.users.find((row) => row.id === id);
-      return call('/api/v1/session/login', null, { method: 'POST', headers: { Origin: origin },
+      return call('/api/v1/session/login', null, { method: 'POST', headers: { Origin: publicOrigin },
         body: { identifier: account.email, password } });
     },
     close: async () => { streams.stop(); await closeProxy(); await app.close(); await gate.closeAndDrain(); },

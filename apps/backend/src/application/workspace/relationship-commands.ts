@@ -5,7 +5,7 @@ import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
-  availableAccount, managerEdges, memberPermissions, RelationshipError, requireBoardManagement, requireRevision, soleEligibleManager, touchRevision,
+  availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
 } from './relationship-policy.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecords } from './records.js';
 
@@ -41,6 +41,27 @@ async function projectEdit(scope: WorkspaceAuthorization, input: RelationshipCom
       && (input.type === 'private' ? authorized.sharedAdmin : !!authorized.manager || authorized.sharedAdmin));
   }
   return authorized;
+}
+
+async function favoriteAccess(scope: WorkspaceAuthorization, input: RelationshipCommandInput<'projects.favorite'>) {
+  const project = await scope.requireProject(input.id);
+  requireCapability(project.permissions.canFavorite);
+  return project;
+}
+
+async function changeFavorite(
+  favorite: boolean, records: WorkspaceRecords, access: ProjectAccessContext,
+  input: RelationshipCommandInput<'projects.favorite'>, context: CommandPlanningContext,
+): Promise<CommandPlan> {
+  const { actorId: userId, generationId, timestamp } = context;
+  const revision = requireRevision(access.project, input.expectedRevision)!;
+  const edge = await records.first('projectFavorites', projectFavoriteFilter(generationId, input.id, userId));
+  const effects: PlannedEffect[] = [];
+  if (favorite && !edge) effects.push({ kind: 'insert', collection: 'projectFavorites', id: randomUUID(),
+    fields: { projectId: input.id, userId, createdAt: timestamp } });
+  if (!favorite && edge) effects.push({ kind: 'delete', collection: 'projectFavorites', id: edge.id, revision: rowRevision(edge) });
+  return { effects, result: { data: { id: input.id, revision, favorite } },
+    audit: { resourceId: userId, resourceType: 'account', action: favorite ? 'projects.favorite' : 'projects.unfavorite' } };
 }
 
 async function managerAccess(scope: WorkspaceAuthorization, id: string) {
@@ -89,6 +110,10 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'projects.favorite': define('projects.favorite', favoriteAccess,
+      (records, access, input, context) => changeFavorite(true, records, access, input, context)),
+    'projects.unfavorite': define('projects.unfavorite', favoriteAccess,
+      (records, access, input, context) => changeFavorite(false, records, access, input, context)),
     'projects.update': define('projects.update', projectEdit, async (records, access, input, context, actor): Promise<CommandPlan> => {
       const project = access.project;
       const revision = requireRevision(project, input.expectedRevision, true)!;
