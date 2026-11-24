@@ -6,6 +6,8 @@ import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type 
 import { canonicalRow, equal, publicIdField, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 const failures = {
+  restoreTarget: [422, 'RESTORE_TARGET_REQUIRED', 'Choose an active or closed list to restore this card.'],
+  cardTransition: [422, 'INVALID_CARD_TRANSITION', 'This card cannot make that transition from its current list.'],
   cardOrder: [409, 'CARD_ORDER_CONFLICT', 'The card order changed. Review the current list and try again.'],
   cardType: [422, 'CARD_TYPE_RESTRICTED', 'This board does not allow the selected card type.'],
   cardDue: [422, 'CARD_DUE_DATE_REQUIRED', 'Set a due date before changing its completion.'],

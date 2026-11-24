@@ -26,7 +26,7 @@ interface Records {
   projectManagers: { projectId: string; userId: string };
   projectFavorites: { projectId: string; userId: string };
   projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null; availability?: string | null; deletedAt?: Date | null };
-  boards: Ordered & { projectId: string; defaultView?: BoardView; orderVersion?: number };
+  boards: Ordered & { projectId: string; defaultView?: BoardView; orderVersion?: number; historySequence?: Long };
   boardMembers: { boardId: string; userId: string; role: 'editor' | 'viewer'; canComment: boolean | null };
   boardPreferences: {
     boardId: string; defaultView?: BoardView; defaultCardType?: CardType | null; restrictedCardType?: CardType | null;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { cardTransitionCommands } from './card-transitions.js';
 import { cardLifecycleCommands } from './card-lifecycle.js';
 import { boardLifecycleCommands } from './board-lifecycle.js';
 import { listLifecycleCommands } from './list-lifecycle.js';
@@ -73,6 +74,7 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 
 export const relationshipCommands = {
   ...cardLifecycleCommands,
+  ...cardTransitionCommands,
   ...boardLifecycleCommands,
   ...listLifecycleCommands,
   'projects.create': command('projects.create', 'POST', '/api/v1/projects', 201, 'create', projectCreate, workspaceData(id)),
