@@ -33,7 +33,7 @@ try {
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password + 'x');
   await page.getByRole('button', { name: 'Create administrator' }).click();
-  await page.getByRole('alert').getByText('The passwords must match.').waitFor();
+  await page.getByRole('alert').filter({ hasText: 'The passwords must match.' }).waitFor();
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create administrator' }).click();
   await head('Administrator account created');
@@ -45,7 +45,7 @@ try {
   await page.getByLabel('Email or username').fill(identity.toUpperCase());
   await page.getByLabel('Password').fill('wrong synthetic password');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('alert').getByText('Incorrect identifier or password.').waitFor();
+  await page.getByRole('alert').filter({ hasText: 'Incorrect identifier or password.' }).waitFor();
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await url('/workspace');

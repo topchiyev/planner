@@ -50,11 +50,11 @@ async function setup({ db, directory }, { checkpoint, hasher = createPasswordHas
   await migrateStorageSchema(db, installationId);
   const writer = join(directory, 'writer');
   await mkdir(writer, { mode: 0o750 });
-  const owner = process.getuid();
-  const group = process.getgid();
+  await chmod(writer, 0o750);
+  const owner = { uid: process.getuid(), gid: process.getgid() };
   let time = new Date(issuedAt.getTime() + 1_000);
   let gate;
-  const makeGate = () => new CommandGate(acquireWriterDirectory(writer, owner, group));
+  const makeGate = () => new CommandGate(acquireWriterDirectory(writer, owner, owner));
   async function reboot() {
     await gate?.closeAndDrain();
     gate = makeGate();
