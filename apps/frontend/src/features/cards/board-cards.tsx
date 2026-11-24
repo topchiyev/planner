@@ -74,7 +74,7 @@ export function BoardCards({ workspace, lists, context, view, removed }: {
     {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} counts={counts} kanban={kanban} renderContents={contents}
       wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={cards}>{children}{display}</BoardCardPlacement>} />
       : <>
-        {(kanban || workspace.preferences.showCardCount) && <ReadonlyBoardLists lists={lists} counts={counts}
+        {(context === 'board' || workspace.preferences.showCardCount) && <ReadonlyBoardLists lists={lists} counts={counts}
           showCount={workspace.preferences.showCardCount} kanban={kanban} renderContents={kanban ? contents : undefined} />}
         {display}
       </>}

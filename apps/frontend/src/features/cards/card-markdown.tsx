@@ -73,11 +73,11 @@ const extensions = [
 
 export function CardDescription({ description }: { description: string }) {
   const editor = useEditor({
-    extensions, content: description, contentType: 'markdown', editable: false,
+    immediatelyRender: false, extensions, content: description, contentType: 'markdown', editable: false,
     editorProps: { attributes: { class: 'card-rendered-description' } },
   });
   useEffect(() => {
-    editor?.commands.setContent(description, { contentType: 'markdown', emitUpdate: false });
+    if (editor && !editor.isDestroyed) editor.commands.setContent(description, { contentType: 'markdown', emitUpdate: false });
   }, [editor, description]);
   return <EditorContent editor={editor} />;
 }
@@ -112,7 +112,7 @@ export function CardMarkdownInput({ value, original, mode, boardId, onMode, onCh
 function RichInput({ value, boardId, onChange }: { value: string; boardId: string; onChange: (value: string) => void }) {
   const emitted = useRef<string | null>(null);
   const editor = useEditor({
-    extensions, content: value, contentType: 'markdown',
+    immediatelyRender: false, extensions, content: value, contentType: 'markdown',
     editorProps: { attributes: { role: 'textbox', 'aria-label': 'Description', 'aria-multiline': 'true', class: 'card-rich-input' } },
     onUpdate: ({ editor }) => {
       const source = editor.getMarkdown();
@@ -122,7 +122,7 @@ function RichInput({ value, boardId, onChange }: { value: string; boardId: strin
   });
 
   useEffect(() => {
-    if (!editor || value === emitted.current) return;
+    if (!editor || editor.isDestroyed || value === emitted.current) return;
     editor.commands.setContent(value, { contentType: 'markdown', emitUpdate: false });
     emitted.current = value;
   }, [editor, value]);

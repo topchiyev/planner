@@ -1944,6 +1944,7 @@ test('native board layouts share card placement, preference display, and paged i
     await expect(cardLink).toBeFocused();
     assert.equal(new URL(editor.url()).search, paged);
     await cardLink.click();
+    await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
     await editor.goBack();
     await expect(cardLink).toBeFocused();
     await cardGrid.getByRole('button', { name: 'Move card Layout second card' }).press('Enter');

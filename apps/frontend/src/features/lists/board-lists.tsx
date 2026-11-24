@@ -55,9 +55,9 @@ function EditableList({ list, count, showCount, busy, allowDrag, dragging, edit,
   const drag = useDraggable({ id: list.id, type: listDrag, disabled: busy || !allowDrag });
   const drop = useDroppable({ id: 'before-' + list.id, accept: listDrag, disabled: !dragging || dragging === list.id });
   const register = useCallback((node: HTMLLIElement | null) => {
-    drag.ref(node);
+    if (allowDrag) drag.ref(node);
     drop.ref(node);
-  }, [drag.ref, drop.ref]);
+  }, [allowDrag, drag.ref, drop.ref]);
   return <li ref={register}
     data-list-drag-source={drag.isDragging || undefined} data-list-drop-target={drop.isDropTarget || undefined}>
     <ListSummary list={list} count={count} showCount={showCount} />
