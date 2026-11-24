@@ -52,14 +52,20 @@ cleanup() {
 trap cleanup EXIT
 install -d -m 0711 "$pgroot"
 install -d -m 0755 "$pgroot/runtime"
-tar -xf "$media/postgresql-runtime.tar.gz" -C "$pgroot/runtime"
+(umask 022; tar -xf "$media/postgresql-runtime.tar.gz" -C "$pgroot/runtime")
 useradd --system --no-create-home --shell /usr/sbin/nologin planka-fixture
 install -d -m 0700 -o planka-fixture -g planka-fixture "$socket" "$pgroot/db"
 as_postgres() { runuser -u planka-fixture -- env LD_LIBRARY_PATH="$pglib" "$@"; }
-as_postgres "$pgbin/initdb" -D "$pgroot/db" -U fixture_owner --auth-local=trust --auth-host=reject \
-    --no-instructions --encoding=UTF8 --locale=C >"$work/initdb.log" 2>&1
-as_postgres "$pgbin/pg_ctl" -D "$pgroot/db" -l "$pgroot/db/server.log" -w \
-    -o "-c listen_addresses= -c unix_socket_directories=$socket -c unix_socket_permissions=0700 -p $port" start >"$work/pg-start.log" 2>&1
+if ! as_postgres "$pgbin/initdb" -D "$pgroot/db" -U fixture_owner --auth-local=trust --auth-host=reject \
+    --no-instructions --encoding=UTF8 --locale=C >"$work/initdb.log" 2>&1; then
+    cat "$work/initdb.log" >&2
+    exit 1
+fi
+if ! as_postgres "$pgbin/pg_ctl" -D "$pgroot/db" -l "$pgroot/db/server.log" -w \
+    -o "-c listen_addresses= -c unix_socket_directories=$socket -c unix_socket_permissions=0700 -p $port" start >"$work/pg-start.log" 2>&1; then
+    cat "$work/pg-start.log" "$pgroot/db/server.log" >&2
+    exit 1
+fi
 sql() {
     local db=$1
     shift

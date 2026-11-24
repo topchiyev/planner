@@ -66,7 +66,8 @@ export async function inspectDirectory(root: string, owner: Owner, manifest: Rea
   let total = 0;
 
   async function walk(parent: FileHandle, prefix: string) {
-    const entries = await opendir(fdPath(parent), { encoding: 'buffer' });
+    // Node's directory iterator supports raw names even though its declarations omit this encoding.
+    const entries = await opendir(fdPath(parent), { encoding: 'buffer' as BufferEncoding });
     const observed = new Set<string>();
     for await (const entry of entries) {
       total += 1;
