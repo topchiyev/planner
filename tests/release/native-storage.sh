@@ -87,6 +87,8 @@ try {
   } else if (action === 'verify-foreign-version') {
     assert.equal((await installation.findOne(key)).schemaVersion, 99);
     await installation.updateOne(key, { $set: { schemaVersion: 1 } }, { writeConcern });
+  } else if (action === 'enrollment-state') {
+    await installation.updateOne(key, { $set: { activeGenerationId: null } }, { writeConcern });
   }
 } finally { await client.close(); }
 JS
@@ -122,4 +124,18 @@ PY
 database_fixture verify-foreign-version
 /usr/bin/plannerctl storage verify
 database_fixture verify
+
+database_fixture enrollment-state
+/usr/bin/plannerctl setup --mode fresh --public-url https://planner.example.test --app-port 27530 --db-port 27531 \
+    --json > "$work/replay.json"
+curl -fsS --noproxy '*' --unix-socket /run/planner/admin.sock http://localhost/status > "$work/access.json"
+python3 - "$work" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+initial = json.loads((path / 'setup.json').read_text())
+replay = json.loads((path / 'replay.json').read_text())
+assert initial['firstAdminGrant'] == replay['firstAdminGrant']
+assert json.loads((path / 'access.json').read_text())['access'] == {'kind': 'enrollment', 'step': 'recovery'}
+PY
 echo 'NATIVE STORAGE UPGRADE ACCEPTANCE PASSED'
