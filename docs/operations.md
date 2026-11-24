@@ -76,6 +76,46 @@ Setup and lifecycle commands serialize through the installation lock. Stopped se
 
 Stop Planner before a package upgrade or reinstall. Once configured, the installer checks the recorded ports automatically. Package removal stops and disables the services and preserves the configuration, database and files. After reinstalling, run `sudo plannerctl start` to resume the existing installation. The setup intent and package ports are root-only files under `/etc/planner`; the application configuration is readable by the Planner service group.
 
+
+## Preparing and preflighting a PLANKA capture
+
+Use an operator-managed, quiescent PLANKA Community 2.3.0 or 2.3.1 capture. Pair a standalone database dump and its matching asset snapshot before restoring either. Keep the original backup and source deployment together for rollback.
+
+Assemble a tar or gzip-compressed tar containing `manifest.json`, `asset-manifest.json` and exactly one of `source.dump` (PostgreSQL custom) or `source.sql` (standalone plain SQL). For materialized assets, put the exact keys under `assets/`. For a versioned object snapshot, include only the manifests and the database dump. The [migration contract](../openspec/changes/launch-planner-v0-1/migration.md#source-baseline-and-inputs) defines the capture fields, file patterns and independent checksums. The asset manifest has `formatVersion: 1` and `files` entries with `key`, `size` and `sha256`. Object entries additionally carry the exact `versionId` to read.
+
+Use an archive file in a root-owned mode-0700 directory and an existing root-owned mode-0700 work directory. Keep both under trusted parents. Prepare validates the complete archive before extracting any entries and publishes a new private capture directory. It leaves the original named archive intact.
+
+```sh
+sudo plannerctl migration prepare --archive /root/planka-capture/incoming.tar.gz \
+  --work-dir /root/planka-capture/work --json
+```
+
+Restore the reported dump into a dedicated database in a disposable PostgreSQL 17 instance through a private Unix socket. Use `pg_restore` for the custom format and `psql -X -v ON_ERROR_STOP=1 -f` for the standalone SQL format. If the upstream deployment backup contains a full-cluster `postgres.sql`, restore that backup only in a separate disposable PostgreSQL environment and export the individual PLANKA database before preparing the Planner capture. Planner never executes a dump or imports the deployment's PostgreSQL globals.
+
+Create a dedicated login that can connect and select the required source columns from the restored database. The installed migration module exports the supported `sourceColumns` projection. Credentials, trust tokens and consent fields stay outside that projection. Give it `NOINHERIT`, no role memberships, no object or database ownership, and no create, temporary-object, DML, trigger, reference, maintenance or sequence write privileges. Remove inherited PUBLIC write and temporary privileges on the restored database and its schemas. Give the PostgreSQL instance a mode-0700 socket directory and mode-0700 socket under protected, nonsymlink parents. Select the restored database rather than either a maintenance database or a template.
+
+Put the explicit service section in `/etc/planner/migration-pg.services` with root:root ownership and mode 0600. The optional `password` entry supplies a credential only when the isolated instance requires one.
+
+```ini
+[planka-frozen]
+isolated=true
+host=/run/planka-restore
+port=55432
+dbname=planka_frozen
+user=planner_reader
+```
+
+After `plannerctl setup --mode import`, run preflight against this service with the materialized asset directory from prepare.
+
+```sh
+sudo plannerctl migration preflight --manifest /root/planka-capture/work/capture-ID/manifest.json \
+  --source-service planka-frozen --assets-root /root/planka-capture/work/capture-ID/assets --json
+```
+
+For an object capture, replace `--assets-root` with `--asset-service NAME`. Define the service by name in `/etc/planner/migration-assets.json` with root:root ownership and mode 0600. Each service has a canonical HTTPS `base` ending in a slash, the manifest's `snapshotId`, and an optional bearer `token`. Serve the exact asset key under that prefix. Require the requested `versionId` query and return the same `X-Amz-Version-Id` on a successful response. Serve identity-encoded bytes with no redirects. A missing original blocks eligibility under the default policy, while a missing derivative is reported separately. An unexpected version, changed length, wrong checksum or ambiguous key fails preflight.
+
+The command compares the restored catalog and migration ledger inside one PostgreSQL read-only snapshot, verifies the files or objects, and checks the combined capacity of any shared target volumes. It writes a root-only aggregate receipt in `/var/lib/planner/migration` under the native writer lease. The application briefly releases its lease for publication and resumes its previous service state. The installation still has no active imported generation. Record the run ID and manifest hash separately from the private capture and credentials.
+
 ## Workspace storage schema
 
 Setup and the guarded service start verify the installation identity in the dedicated MongoDB instance. A supported schema upgrade runs with the application stopped. Planner copies and verifies any legacy first-administrator grant under its generation-scoped key, creates and checks its collection indexes, and then publishes the new schema version. An interrupted upgrade resumes from the stored phase on the next operator start. The version check preserves the active generation and the setup state.

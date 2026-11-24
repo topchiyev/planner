@@ -12,7 +12,7 @@ import { assembleSnapshot } from '../fixtures/planka/snapshot.mjs';
 const fixture = (...parts) => fileURLToPath(new URL(parts.join('/'), new URL('../fixtures/planka/', import.meta.url)));
 const read = (path) => readFileSync(fixture(path), 'utf8');
 const readJson = (path) => JSON.parse(read(path));
-const baseline = readJson('catalog.json');
+const baseline = JSON.parse(readFileSync(new URL('../../apps/backend/src/application/migration/planka-community-catalog.json', import.meta.url), 'utf8'));
 const catalog = read('catalog.sql');
 const migrationNames = read('migrations.txt');
 const { releases, migrationNamesSha256 } = readJson('source-pins.json');
