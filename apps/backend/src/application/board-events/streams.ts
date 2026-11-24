@@ -64,8 +64,10 @@ export function createBoardEventStreams(
     try { subscriber.transport.close(abort); } catch { /* Already closed. */ }
   }
 
-  function send(subscriber: Subscriber, write: () => boolean) {
-    if (subscriber.closed || subscriber.abort.aborted || !gate.ready) {
+  const hasTime = (deadline: number) => now().getTime() < deadline;
+
+  function send(subscriber: Subscriber, deadline: number, write: () => boolean) {
+    if (subscriber.closed || subscriber.abort.aborted || !gate.ready || !hasTime(deadline)) {
       close(subscriber);
       return false;
     }
@@ -76,8 +78,8 @@ export function createBoardEventStreams(
     return false;
   }
 
-  function reset(subscriber: Subscriber) {
-    if (send(subscriber, () => subscriber.transport.frame({ event: 'reset', data: { boardId: subscriber.scope.boardId } }))) {
+  function reset(subscriber: Subscriber, deadline: number) {
+    if (send(subscriber, deadline, () => subscriber.transport.frame({ event: 'reset', data: { boardId: subscriber.scope.boardId } }))) {
       close(subscriber, false);
     }
   }
@@ -106,20 +108,21 @@ export function createBoardEventStreams(
           const access = await authorize(database, subscriber.token, scope.boardId, scope);
           sentHeartbeat = heartbeat;
           if (heartbeat) {
-            send(subscriber, () => subscriber.transport.heartbeat());
+            send(subscriber, access.sessionDeadline, () => subscriber.transport.heartbeat());
             return;
           }
           if (subscriber.last === subscriber.target) return;
           if (subscriber.last >= subscriber.validated) {
             const target = subscriber.target;
-            if (!(await store.contiguous(subscriber.last, target))) return reset(subscriber);
+            if (!(await store.contiguous(subscriber.last, target))) return reset(subscriber, access.sessionDeadline);
             subscriber.validated = target;
           }
           const next = subscriber.last + 1n;
           const event = await store.get(next);
-          if (!event) return reset(subscriber);
+          if (!event) return reset(subscriber, access.sessionDeadline);
           const frame = await projectBoardEvent(access, scope.boardId, event);
-          if (send(subscriber, () => subscriber.transport.frame(frame, cursors.encode(scope, next)))) subscriber.last = next;
+          const cursor = cursors.encode(scope, next);
+          if (send(subscriber, access.sessionDeadline, () => subscriber.transport.frame(frame, cursor))) subscriber.last = next;
         });
       }
     } catch {
@@ -130,8 +133,10 @@ export function createBoardEventStreams(
   // The caller holds the writer through reauthorization so a queued regrant cannot hide a revocation.
   async function revalidate(database: Db, applies: (scope: BoardEventScope) => boolean) {
     await Promise.all([...subscribers].filter(({ scope }) => applies(scope)).map(async (subscriber) => {
-      try { await authorize(database, subscriber.token, subscriber.scope.boardId, subscriber.scope); }
-      catch { close(subscriber); }
+      try {
+        const access = await authorize(database, subscriber.token, subscriber.scope.boardId, subscriber.scope);
+        if (!hasTime(access.sessionDeadline)) close(subscriber);
+      } catch { close(subscriber); }
     }));
   }
 
@@ -155,13 +160,16 @@ export function createBoardEventStreams(
           scope, token, transport, abort, disconnect: () => close(subscriber), running: false, closed: false,
           heartbeat: false, last: start ?? high, target: high, validated: high,
         };
+        if (!hasTime(access.sessionDeadline)) throw new WorkspaceAccessError('session');
+        try { transport.begin(); } catch { close(subscriber); return; }
         // Register synchronously before leaving the same snapshot used for the high water and initial replay.
         subscribers.add(subscriber);
         abort.addEventListener('abort', subscriber.disconnect, { once: true });
-        if (!send(subscriber, () => { transport.begin(); return true; })) return;
-        if (!valid) return reset(subscriber);
-        if (after === undefined && !send(subscriber, () =>
-          transport.frame({ event: 'ready', data: { boardId } }, cursors.encode(scope, high)))) return;
+        if (!valid) return reset(subscriber, access.sessionDeadline);
+        if (after === undefined) {
+          const cursor = cursors.encode(scope, high);
+          if (!send(subscriber, access.sessionDeadline, () => transport.frame({ event: 'ready', data: { boardId } }, cursor))) return;
+        }
         subscriber.timer = setInterval(() => {
           subscriber.heartbeat = true;
           schedule(subscriber);
