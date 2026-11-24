@@ -22,6 +22,11 @@ import {
 import {
   authorizeTaskCreate, authorizeTaskEdit, authorizeTaskMove, planTaskCreate, planTaskDelete, planTaskMove, planTaskUpdate,
 } from './task-commands.js';
+import { authorizeFieldPromotion, planFieldDetach, planFieldPromotion } from './field-copies.js';
+import { authorizeFieldDefinitionDelete, authorizeFieldGroupDelete, planFieldDefinitionDelete, planFieldGroupDelete } from './field-deletion.js';
+import { authorizeDefinitionEdit, authorizeFieldOwner, authorizeGroupEdit } from './field-planning.js';
+import { planFieldDefinitionCreate, planFieldDefinitionUpdate, planFieldGroupCreate, planFieldGroupUpdate } from './field-structures.js';
+import { authorizeFieldValue, planFieldValue } from './field-values.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -130,6 +135,17 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'fields.createTemplate': define('fields.createTemplate', (scope, input) => authorizeFieldOwner(scope, 'project', input.id), planFieldGroupCreate),
+    'fields.createGroup': define('fields.createGroup', (scope, input) => authorizeFieldOwner(scope, input.scopeType, input.id), planFieldGroupCreate),
+    'fields.updateGroup': define('fields.updateGroup', (scope, input) => authorizeGroupEdit(scope, input.id), planFieldGroupUpdate),
+    'fields.deleteGroup': define('fields.deleteGroup', (scope, input) => authorizeFieldGroupDelete(database, scope, input, idempotencyKey), planFieldGroupDelete),
+    'fields.detachGroup': define('fields.detachGroup', (scope, input) => authorizeGroupEdit(scope, input.id), planFieldDetach),
+    'fields.promoteGroup': define('fields.promoteGroup', (scope, input) => authorizeFieldPromotion(scope, input.id), planFieldPromotion),
+    'fields.create': define('fields.create', (scope, input) => authorizeGroupEdit(scope, input.id), planFieldDefinitionCreate),
+    'fields.update': define('fields.update', (scope, input) => authorizeDefinitionEdit(scope, input.id, input.groupId), planFieldDefinitionUpdate),
+    'fields.delete': define('fields.delete', (scope, input) => authorizeFieldDefinitionDelete(database, scope, input, idempotencyKey), planFieldDefinitionDelete),
+    'fields.setValue': define('fields.setValue', authorizeFieldValue, planFieldValue),
+    'fields.clearValue': define('fields.clearValue', authorizeFieldValue, planFieldValue),
     'checklists.create': define('checklists.create', (scope, input) => authorizeChecklistCreate(scope, input.id), planChecklistCreate),
     'checklists.update': define('checklists.update', (scope, input) => authorizeChecklistEdit(scope, input.id), planChecklistUpdate),
     'checklists.delete': define('checklists.delete', (scope, input) =>

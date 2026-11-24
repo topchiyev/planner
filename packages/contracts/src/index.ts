@@ -23,3 +23,4 @@ export * from './list-maintenance.js';
 export * from './checklists.js';
 export * from './card-transitions.js';
 export * from './affiliations.js';
+export * from './custom-fields.js';

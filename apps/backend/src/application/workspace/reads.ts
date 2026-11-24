@@ -11,6 +11,7 @@ import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
 import { cardDto, cardStopwatch } from './card-state.js';
 import { createChecklistReads } from './checklist-reads.js';
 import { checklistOrderVersion } from './checklist-state.js';
+import { fieldGroupOrder, fieldGroupRows, fieldValueRows, projectFieldGroup, type FieldGroup } from './field-state.js';
 import { personalFollow } from './affiliation-edges.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { cardLabelJoinFilter, labelDto, scopedLabels } from './label-state.js';
@@ -31,10 +32,6 @@ const entity = ({ id, revision, createdAt, updatedAt }: EntityProjection) =>
   ({ id, revision, createdAt: createdAt.toISOString(), updatedAt: iso(updatedAt) });
 const ordered = (row: EntityProjection & { rank?: Long | null }) => ({ ...entity(row), rank: rank(row.rank) });
 const person = ({ id, name, username }: WorkspaceRow<'users'>) => ({ id, name, username: username ?? null });
-
-const fieldDefinition = (row: WorkspaceRow<'fieldDefinitions'>) => ({
-  ...ordered(row), name: row.name, fieldGroupId: row.fieldGroupId, showOnFront: row.showOnFront ?? false,
-});
 
 export function createWorkspaceReads(database: Db, access: WorkspaceAuthorization, eventCursors: BoardEventCursors) {
   const { generationId, actor } = access;
@@ -87,23 +84,51 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     };
   }
 
-  async function fieldGroup(row: WorkspaceRow<'fieldGroups'>, groups = [row.id]) {
-    const definitions = (await records.find('fieldDefinitions', { fieldGroupId: { $in: groups } }, rankSort))
-      .map((definition) => ({ ...fieldDefinition(definition), fieldGroupId: row.id }));
-    return { ...ordered(row), name: row.name, scopeType: row.scopeType, scopeId: row.scopeId, definitions };
+  async function fieldGroups(groups: FieldGroup[], projectId: string) {
+    return (await together(groups.map((group) => projectFieldGroup(records, generationId, group, projectId))))
+      .filter((group) => group !== null);
   }
 
   async function cardFields(context: CardAccessContext) {
-    const groups = await records.find('fieldGroups', { $or: [
-      { scopeType: 'card', scopeId: context.card.id }, { scopeType: 'board', scopeId: context.board.board.id },
-    ] }, rankSort);
-    const fields = await together(groups.map(async (group) => fieldGroup(group, await access.effectiveDefinitionGroups(context, group))));
+    const { card, board } = context;
+    const groups = await together([
+      fieldGroupRows(records, generationId, 'board', board.board.id),
+      fieldGroupRows(records, generationId, 'card', card.id),
+    ]);
+    const fields = await fieldGroups(groups.flat(), board.project.project.id);
     const definitions = new Map(fields.map(({ id, definitions }) => [id, new Set(definitions.map((definition) => definition.id))]));
-    const allValues = await records.find('fieldValues', { cardId: context.card.id, fieldGroupId: { $in: [...definitions.keys()] } },
-      { fieldGroupId: 1, fieldDefinitionId: 1 });
+    const allValues = await fieldValueRows(records, generationId, [...definitions.keys()], [card.id]);
     const values = allValues.flatMap(({ fieldGroupId, fieldDefinitionId, value }) =>
-      definitions.get(fieldGroupId)?.has(fieldDefinitionId) ? [{ fieldGroupId, fieldDefinitionId, value }] : []);
-    return { fields, values };
+      definitions.get(fieldGroupId)?.has(fieldDefinitionId) && typeof value === 'string' ? [{ fieldGroupId, fieldDefinitionId, value }] : []);
+    return { fields, values, fieldGroupOrderVersion: fieldGroupOrder(card) };
+  }
+
+  async function frontFields(board: BoardAccessContext, cards: string[]) {
+    const result = new Map<string, { fieldGroupId: string; fieldDefinitionId: string; name: string; value: string }[]>();
+    if (!cards.length) return result;
+    const [boardGroups, cardGroups] = await together([
+      fieldGroupRows(records, generationId, 'board', board.board.id),
+      records.find('fieldGroups', { scopeType: 'card', scopeId: { $in: cards },
+        $expr: { $and: [canonical, equal('scopeType', 'card'), { $in: ['$scopeId', cards] }] } }, rankSort),
+    ]);
+    const fields = await fieldGroups([...boardGroups, ...cardGroups], board.project.project.id);
+    const values = await fieldValueRows(records, generationId, fields.map(({ id }) => id), cards);
+    const byCard = new Map<string, Map<string, string>>();
+    for (const { cardId, fieldGroupId, fieldDefinitionId, value } of values) {
+      if (typeof value !== 'string') continue;
+      const byTuple = byCard.get(cardId) ?? new Map<string, string>();
+      byTuple.set(fieldGroupId + '/' + fieldDefinitionId, value);
+      byCard.set(cardId, byTuple);
+    }
+    for (const [cardId, byTuple] of byCard) {
+      result.set(cardId, fields.flatMap((group) => group.scopeType === 'board' || group.scopeId === cardId
+        ? group.definitions.flatMap((definition) => {
+          const value = byTuple.get(group.id + '/' + definition.id);
+          return definition.showOnFront && value !== undefined
+            ? [{ fieldGroupId: group.id, fieldDefinitionId: definition.id, name: definition.name, value }] : [];
+        }) : []));
+    }
+    return result;
   }
 
   async function previousList(context: CardAccessContext) {
@@ -170,16 +195,16 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const summary = await projectSummary(context, boards.length);
       const description = context.project.description ?? null;
       const background = await effectiveProjectBackground(database, generationId, context.project);
-      if (!context.manager) return { data: { ...summary, description, boards, managers: null, background, backgrounds: null, fieldTemplates: null } };
+      if (!context.manager) return { data: { ...summary, description, boards, managers: null, background, backgrounds: null, fieldTemplates: null, fieldGroupOrderVersion: null } };
       const [managerRows, backgrounds, templates] = await together([
         records.find('projectManagers', projectManagerFilter(generationId, id)), records.find('projectBackgrounds', { projectId: id, kind: 'file', deletedAt: null,
           $expr: { $and: [canonical, equal('projectId', id)] } }, { createdAt: 1, id: 1 }),
-        records.find('fieldGroups', { scopeType: 'project', scopeId: id }, rankSort),
+        fieldGroupRows(records, generationId, 'project', id),
       ]);
       const allowedBackgrounds = await together(backgrounds.map(async (background) =>
         await availableProjectImage(database, generationId, id, background.id) ? { ...entity(background), name: background.name } : null));
       return { data: { ...summary, description, boards, managers: await visiblePeople(managerRows.map(({ userId }) => userId)),
-        background, backgrounds: allowedBackgrounds.filter((background) => background !== null), fieldTemplates: await together(templates.map((row) => fieldGroup(row))) } };
+        background, backgrounds: allowedBackgrounds.filter((background) => background !== null), fieldTemplates: await fieldGroups(templates, id), fieldGroupOrderVersion: fieldGroupOrder(context.project) } };
     },
 
     async boardsList({ id }: WorkspaceReadInput<'boardsList'>) {
@@ -192,7 +217,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
     async boardWorkspace({ id }: WorkspaceReadInput<'boardWorkspace'>) {
       const board = await access.requireBoard(id);
-      const [project, lists, labels, preferences, latestSequence, totals, follow] = await together([
+      const [project, lists, labels, preferences, latestSequence, totals, follow, groups] = await together([
         projectSummary(board.project),
         records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] } }, rankSort),
         scopedLabels(records, generationId, id),
@@ -203,12 +228,14 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
             ...cardPlacementStages(records, id, kind), { $group: { _id: '$listId', count: { $sum: 1 } } },
           ]))),
         board.permissions.canFollow ? personalFollow(records, generationId, 'board', id, actor.id) : null,
+        fieldGroupRows(records, generationId, 'board', id),
       ]);
       const counts = new Map(totals.flat().map(({ _id, count }) => [_id, count]));
       return { data: {
         board: boardDto(board), project,
         lists: lists.map((item) => ({ ...listDto(item), cardCount: counts.get(item.id) ?? 0 })),
-        labels: labels.map(labelDto), orderVersion: boardListOrderVersion(board.board),
+        labels: labels.map(labelDto), fields: await fieldGroups(groups, board.project.project.id),
+        fieldGroupOrderVersion: fieldGroupOrder(board.board), orderVersion: boardListOrderVersion(board.board),
         latestEventSequence: latestSequence.toString(),
         eventCursor: eventCursors.encode({ actorId: actor.id, generationId, boardId: id }, latestSequence),
         preferences: boardPreferences(board.board, preferences),
@@ -244,8 +271,10 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         if (input.context === 'board') return { rank: rank(row.rank), id: row.id };
         return { listChangedAt: iso(row.listChangedAt), historySequence: rank(row.historySequence), id: row.id };
       });
-      const front = await checklistReads.front(selected.map(({ id }) => id), board.board.id);
-      return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front.get(row.id) ?? [] })),
+      const ids = selected.map(({ id }) => id);
+      const [front, fields] = await together([checklistReads.front(ids, board.board.id), frontFields(board, ids)]);
+      return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front.get(row.id) ?? [],
+        frontFields: fields.get(row.id) ?? [] })),
         page, searchValidation: 'ok' as const };
     },
 

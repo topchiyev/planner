@@ -16,6 +16,10 @@ const failures = {
   cardStopwatch: [422, 'CARD_STOPWATCH_STATE', 'The stopwatch cannot make that change in its current state.'],
   archiveCardsSource: [422, 'ARCHIVE_CARDS_SOURCE', 'Choose a closed list to archive its cards.'],
   trashDeleteData: [422, 'TRASH_CLEAR_DATA_LIMIT', 'This trash contains imported data too large to preserve while clearing it.'],
+  fieldOrder: [409, 'FIELD_ORDER_CONFLICT', 'The field order changed. Review it and try again.'],
+  fieldName: [422, 'FIELD_GROUP_NAME_REQUIRED', 'Enter a name for this field group.'],
+  fieldTemplate: [422, 'FIELD_TEMPLATE_UNAVAILABLE', 'Choose an available field template from this project.'],
+  fieldDetach: [422, 'FIELD_GROUP_ALREADY_LOCAL', 'This field group is already local.'],
   checklistOrder: [409, 'CHECKLIST_ORDER_CONFLICT', 'The checklist order changed. Review it and try again.'],
   taskFields: [422, 'TASK_FIELDS_UNAVAILABLE', 'This task does not support editing those fields.'],
   duplicate: [409, 'RELATIONSHIP_EXISTS', 'This affiliation already exists.'],
@@ -113,7 +117,7 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
 }
 
 export function touchRevision(
-  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels' | 'tasks', row: Parameters<typeof rowRevision>[0] & { revision: number },
+  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels' | 'tasks' | 'fieldGroups' | 'fieldDefinitions', row: Parameters<typeof rowRevision>[0] & { revision: number },
   timestamp: string, expected = row.revision,
 ): Extract<PlannedEffect, { kind: 'update' }> & { revision: number } {
   const revision = requireRevision(row, expected, true)!;

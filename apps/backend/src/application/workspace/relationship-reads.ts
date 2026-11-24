@@ -1,5 +1,6 @@
 import type { RelationshipRead, RelationshipReadInput } from '@planner/contracts';
 import type { Db } from 'mongodb';
+import { validTemplateChoice } from './field-planning.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { requireCapability, type WorkspaceAuthorization } from './authorization.js';
 import { readPage, textQuery } from './queries.js';
@@ -92,6 +93,20 @@ export function createRelationshipReads(database: Db, scope: WorkspaceAuthorizat
 
   return {
     'boards.mentionMembers': mentionMembers,
+    async 'fields.templateOptions'(input: RelationshipReadInput<'fields.templateOptions'>) {
+      const board = await scope.requireBoard(input.id);
+      requireCapability(board.permissions.canEdit);
+      const projectId = board.project.project.id;
+      const paging = page('fields.templateOptions', input, [projectId]);
+      const rows = await records.aggregate<WorkspaceRow<'fieldGroups'>>('fieldGroups', {
+        scopeType: 'project', scopeId: projectId, templateGroupId: null,
+        $expr: { $and: [canonical, equal('scopeType', 'project'), equal('scopeId', projectId),
+          { $eq: [{ $type: '$name' }, 'string'] }, { $in: [{ $type: '$templateGroupId' }, ['null', 'missing']] }] },
+      }, paging.stages);
+      const result = paging.result(rows, ({ id }) => ({ id }));
+      return { data: result.selected.filter((row) => validTemplateChoice(row, projectId))
+        .map(({ id, name, revision }) => ({ id, name: name!, revision })), page: result.page };
+    },
     async 'projects.managers'(input: RelationshipReadInput<'projects.managers'>) {
       const project = await scope.requireProject(input.id);
       requireCapability(!!project.manager || project.sharedAdmin);

@@ -22,11 +22,11 @@ interface Entity {
 type Ordered = { name: string; rank?: Long | null };
 interface Records {
   users: { name: string; username?: string | null; role: SiteRole; disabledAt: Date | null };
-  projects: Ordered & { type: 'private' | 'shared'; boardOrderVersion?: number; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null; backgroundPreset?: typeof projectGradientSchema.options[number] | null };
+  projects: Ordered & { fieldGroupOrderVersion?: number; type: 'private' | 'shared'; boardOrderVersion?: number; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null; backgroundPreset?: typeof projectGradientSchema.options[number] | null };
   projectManagers: { projectId: string; userId: string };
   projectFavorites: { projectId: string; userId: string };
   projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null; availability?: string | null; deletedAt?: Date | null };
-  boards: Ordered & { projectId: string; defaultView?: BoardView; orderVersion?: number; historySequence?: Long };
+  boards: Ordered & { fieldGroupOrderVersion?: number; projectId: string; defaultView?: BoardView; orderVersion?: number; historySequence?: Long };
   boardMembers: { boardId: string; userId: string; role: 'editor' | 'viewer'; canComment: boolean | null };
   boardPreferences: {
     boardId: string; defaultView?: BoardView; defaultCardType?: CardType | null; restrictedCardType?: CardType | null;
@@ -34,7 +34,7 @@ interface Records {
   };
   lists: Ordered & { boardId: string; kind: ListKind; orderVersion?: number; color?: ListColor | null };
   cards: Ordered & {
-    boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
+    fieldGroupOrderVersion?: number; boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
     description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
     dueDateCompleted?: boolean | null; isDueCompleted?: boolean | null; stopwatch?: unknown; checklistOrderVersion?: number;
     listChangedAt?: Date | null; historySequence?: Long; coverAttachmentId?: string | null;
@@ -49,7 +49,8 @@ interface Records {
     checklistId: string; rank?: Long | null; name?: string | null; completed?: boolean | null; assigneeId?: string | null;
     linkedCardId?: string | null; linkedUnavailable?: boolean;
   };
-  fieldGroups: Ordered & { scopeType: FieldScope; scopeId: string; templateGroupId?: string | null };
+  fieldGroups: Omit<Ordered, 'name'> & { name?: string | null; scopeType: FieldScope; scopeId: string;
+    templateGroupId?: string | null; fieldOrderVersion?: number };
   fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean };
   fieldValues: { cardId: string; fieldGroupId: string; fieldDefinitionId: string; value: string };
   comments: { boardId: string; cardId: string; authorId?: string | null; text: string };

@@ -52,14 +52,18 @@ export const boardSummarySchema = ordered.extend({ projectId: publicIdSchema, pe
 export const projectSummarySchema = ordered.extend({
   type: workspaceProjectType, hidden: z.boolean(), favorite: z.boolean(), permissions: projectAccessSchema, boardCount: nonnegative, boardOrderVersion: revisionSchema,
 });
-export const fieldDefinitionSchema = ordered.extend({ fieldGroupId: publicIdSchema, showOnFront: z.boolean() });
+export const fieldDefinitionSchema = ordered.extend({
+  fieldGroupId: publicIdSchema, showOnFront: z.boolean(), inherited: z.boolean(),
+});
 export const fieldGroupSchema = ordered.extend({
-  scopeType: workspaceFieldScope, scopeId: publicIdSchema, definitions: z.array(fieldDefinitionSchema),
+  scopeType: workspaceFieldScope, scopeId: publicIdSchema, localName: maybeText, linked: z.boolean(),
+  orderVersion: revisionSchema, definitions: z.array(fieldDefinitionSchema),
 });
 export const projectDetailSchema = projectSummarySchema.extend({
   description: maybeText, boards: z.array(boardSummarySchema),
   managers: z.array(workspacePersonSchema).nullable(),
   fieldTemplates: z.array(fieldGroupSchema).nullable(),
+  fieldGroupOrderVersion: revisionSchema.nullable(),
   background: projectBackgroundSchema, backgrounds: z.array(named).nullable(),
 });
 export const finiteListKindSchema = z.enum(['active', 'closed']);
@@ -85,6 +89,8 @@ export const boardWorkspaceSchema = z.strictObject({
   project: projectSummarySchema,
   lists: z.array(boardListSchema),
   labels: z.array(boardLabelSchema),
+  fields: z.array(fieldGroupSchema),
+  fieldGroupOrderVersion: revisionSchema,
   preferences: boardPreferencesSchema,
   selfMembership: z.strictObject({ revision: revisionSchema.nullable() }).nullable(),
   following: z.boolean(),
@@ -105,6 +111,7 @@ export const cardDetailSchema = cardSummarySchema.extend({
   description: maybeText, stopwatch: cardStopwatchSchema, checklistOrderVersion: revisionSchema, previousListId: maybeId, labels: z.array(boardLabelSchema),
   assignees: z.array(workspacePersonSchema), following: z.boolean(), automaticFollow: z.boolean(), attachments: z.array(attachmentSchema), coverAttachmentId: maybeId,
   fields: z.array(fieldGroupSchema),
+  fieldGroupOrderVersion: revisionSchema,
   values: z.array(z.strictObject({ fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, value: z.string() })),
 });
 const task = entity.extend({ checklistId: publicIdSchema, rank: signedInt64TextSchema.nullable() });
@@ -146,7 +153,9 @@ export const workspaceOperations = {
     context: workspaceCardContext.default('board'), q: z.string().trim().max(256).default(''),
     labelsAny: idList.default([]), labelsNone: idList.default([]), members: idList.default([]),
     listIds: idList.default([]), unassigned: queryBoolean.default(false), ...pageQuery,
-  }), page(cardSummarySchema.extend({ frontChecklists: z.array(frontChecklistSchema).max(3) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
+  }), page(cardSummarySchema.extend({ frontChecklists: z.array(frontChecklistSchema).max(3), frontFields: z.array(z.strictObject({
+    fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, name: z.string(), value: z.string(),
+  })) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
   cardGet: read('cards.get', '/api/v1/cards/:id', identifier.extend({ boardId: publicIdSchema.optional() }), data(cardDetailSchema)),
   boardLabels: read('labels.list', '/api/v1/boards/:id/labels', identifier, data(z.array(boardLabelSchema))),
   cardChecklists: read('checklists.list', '/api/v1/cards/:id/checklists', identifier, data(z.array(checklistSchema))),

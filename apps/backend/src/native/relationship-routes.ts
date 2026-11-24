@@ -1,5 +1,5 @@
 import {
-  boardDeleteReceipt, checklistDeleteReceipt, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
+  boardDeleteReceipt, fieldDefinitionDeleteReceipt, fieldGroupDeleteReceipt, fieldCommands, checklistDeleteReceipt, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
   type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
@@ -109,18 +109,22 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
     routes.setErrorHandler((error: { statusCode?: number }, request, reply) =>
       error.statusCode && error.statusCode < 500 ? badInput(request, reply) : requestError(error, request, reply));
     const operations = [...Object.values(relationshipReads), ...Object.values(relationshipCommands)];
-    for (const operation of operations) {
+    const bindings = operations.flatMap((operation) => ('routes' in operation ? operation.routes : [{ path: operation.path, fixed: {} }])
+      .map(({ path, fixed }) => ({ operation, path, fixed })));
+    for (const { operation, path, fixed } of bindings) {
       routes.route({
-        method: operation.method, url: operation.path, exposeHeadRoute: false, bodyLimit: 64 * 1024,
+        method: operation.method, url: path, exposeHeadRoute: false, bodyLimit: 64 * 1024,
         async handler(request, reply) {
           const token = readSessionCookie(request.headers.cookie);
           const actor = request.plannerSession?.account;
           if (!request.plannerConnection?.clientAddress || !actor || !token) {
             return fail(request, reply, 401, 'UNAUTHENTICATED', 'Sign in to continue.');
           }
-          const params = request.params ?? {};
+          const routeParams = request.params ?? {};
+          if (!object(routeParams)) return badInput(request, reply);
+          const params = { ...routeParams, ...fixed };
           const values = operation.kind === 'read' ? request.query : request.body === undefined ? {} : request.body;
-          if (!object(params) || !object(values) || Object.keys(params).some((field) => Object.hasOwn(values, field))) {
+          if (!object(values) || Object.keys(params).some((field) => Object.hasOwn(values, field))) {
             return badInput(request, reply);
           }
           try {
@@ -134,7 +138,7 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             const header = request.headers['if-match'];
             const quoted = typeof header === 'string' ? /^"(0|[1-9]\d{0,15})"$/u.exec(header) : null;
             if (!key.success || Object.hasOwn(values, 'expectedRevision')) return badInput(request, reply);
-            const argumentsForCommand = { ...params, ...values };
+            const argumentsForCommand: Record<string, unknown> = { ...params, ...values };
             if (operation.target === 'create') {
               if (header !== undefined) return badInput(request, reply);
             } else {
@@ -157,6 +161,15 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
                 reply.header(relationshipParentRevisionHeader, labelDeleteReceipt.parse(result).data.parentRevision);
               } else if (operation.id === 'checklists.delete') {
                 reply.header(relationshipParentRevisionHeader, checklistDeleteReceipt.parse(result).data.parentRevision);
+              } else if (operation.id === 'fields.deleteGroup') {
+                const { data } = fieldGroupDeleteReceipt.parse(result);
+                reply.header(relationshipParentRevisionHeader, data.parentRevision);
+                reply.header('X-Planner-Removed-Groups', data.removedGroups);
+                reply.header('X-Planner-Removed-Values', data.removedValues);
+              } else if (operation.id === 'fields.delete') {
+                reply.header(relationshipParentRevisionHeader, fieldDefinitionDeleteReceipt.parse(result).data.parentRevision);
+              } else if (operation.id === 'fields.clearValue') {
+                reply.header(relationshipParentRevisionHeader, fieldCommands[operation.id].output.parse(result).data.revision);
               } else if (operation.id === 'tasks.delete') {
                 reply.header(relationshipParentRevisionHeader, taskDeleteReceipt.parse(result).data.checklist.revision);
               } else if (operation.target === 'edge') {

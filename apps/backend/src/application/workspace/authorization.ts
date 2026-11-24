@@ -3,6 +3,7 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document } from 'mongodb';
 import { loadCurrentBrowserSession } from '../auth/sessions.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
+import { resolveFieldTemplate } from './field-state.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
 
 const errors = {
@@ -264,9 +265,8 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
   async function effectiveDefinitionGroups(card: CardAccessContext, group: FieldGroup) {
     if ((group.scopeType !== 'board' || group.scopeId !== card.board.board.id)
         && (group.scopeType !== 'card' || group.scopeId !== card.card.id)) throw new WorkspaceAccessError('missing');
-    if (!group.templateGroupId) return [group.id];
-    const template = await records.get('fieldGroups', reference(group.templateGroupId));
-    return template?.scopeType === 'project' && template.scopeId === card.board.project.project.id ? [group.id, template.id] : [group.id];
+    const template = await resolveFieldTemplate(records, group, card.board.project.project.id);
+    return template ? [group.id, template.id] : [group.id];
   }
 
   async function requireCardField(cardId: string, groupId: string, definitionId: string) {
