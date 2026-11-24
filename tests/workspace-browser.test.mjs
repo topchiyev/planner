@@ -1324,6 +1324,25 @@ test('project, board and card fields share templates and preserve exact values t
       response.request().method() === 'PUT' && response.url().includes('/field-values/'));
     await boardFields.getByRole('button', { name: 'Save value' }).click();
     assert.equal((await reapplied).status(), 200);
+    await expect(boardFields.getByRole('button', { name: 'Save value' })).toBeDisabled();
+
+    await local.getByRole('button', { name: 'Edit field Deployment note' }).click();
+    const editorDefinition = editor.getByRole('dialog', { name: 'Edit field', exact: true });
+    await editorDefinition.getByLabel('Field name').fill('Revised deployment note');
+    await ownerLocal.getByRole('button', { name: 'Edit field Deployment note' }).click();
+    const ownerDefinition = owner.getByRole('dialog', { name: 'Edit field', exact: true });
+    await ownerDefinition.getByLabel('Show on card front').uncheck();
+    await ownerDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(ownerLocal.getByText('Inspector only')).toBeVisible();
+    await editorDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(editorDefinition.getByRole('alert')).toContainText('Inspector only');
+    await expect(editorDefinition.getByLabel('Field name')).toHaveValue('Revised deployment note');
+    await expect(editorDefinition.getByLabel('Show on card front')).not.toBeChecked();
+    await expect(editorDefinition.getByRole('button', { name: 'Save field' })).toBeDisabled();
+    await editorDefinition.getByRole('button', { name: 'Review current version' }).click();
+    await editorDefinition.getByRole('button', { name: 'Save field' }).click();
+    await expect(local.getByLabel('Revised deployment note value')).toHaveValue('0\n');
+    await expect(local.getByText('Inspector only')).toBeVisible();
 
     await signIn(viewer, origin, 'viewer');
     await viewer.goto(cardPath);
@@ -1331,6 +1350,7 @@ test('project, board and card fields share templates and preserve exact values t
     await expect(readOnly.getByRole('region', { name: 'Release window', exact: true }).locator('.field-value')).toHaveJSProperty('textContent', dirty);
     await expect(readOnly.getByRole('button', { name: 'Save value' })).toHaveCount(0);
     await viewer.getByRole('link', { name: 'Close card' }).click();
-    await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(2);
+    await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(1);
+    await expect(viewer.locator('.card-front-fields').getByText('Revised deployment note')).toHaveCount(0);
   });
 });

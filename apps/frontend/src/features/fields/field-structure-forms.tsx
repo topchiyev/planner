@@ -61,8 +61,10 @@ export function GroupForm({ owner, group, close }: { owner: FieldOwner; group?: 
 
 export function DefinitionForm({ group, field, close }: { group: FieldGroup; field?: Definition; close: Close }) {
   const action = useFieldMutation();
-  const [name, setName] = useState(field?.name ?? '');
-  const [front, setFront] = useState(field?.showOnFront ?? false);
+  const [draftName, setName] = useState<string>();
+  const [draftFront, setFront] = useState<boolean>();
+  const name = draftName ?? field?.name ?? '';
+  const front = draftFront ?? field?.showOnFront ?? false;
   const observed = useObservedRevision(field?.revision ?? group.revision);
   const valid = name === field?.name || (name.trim().length > 0 && name.trim().length <= 128);
   function submit(event: FormEvent) {
