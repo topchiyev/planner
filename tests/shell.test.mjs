@@ -7,8 +7,13 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { chromium, expect } from '@playwright/test';
-import { createServer } from 'vite';
+import { assertOwnedMongoEnvironment } from './support/mongo-environment.ts';
+
+assertOwnedMongoEnvironment(process.env);
+
+const { chromium, expect } = await import('@playwright/test');
+const { createServer } = await import('vite');
+const { workspaceIds } = await import('./fixtures/planner-workspace.ts');
 
 const main = fileURLToPath(new URL('../apps/backend/dist/main.js', import.meta.url));
 const frontendRoot = fileURLToPath(new URL('../apps/frontend/', import.meta.url));
@@ -97,13 +102,14 @@ test('Chromium opens and restores routes at desktop and narrow widths', { timeou
       const page = await browser.newPage({ viewport });
       t.after(() => page.close());
       const query = '?context=archive&view=grid&filter=kept';
-      const board = `${address}/boards/b${query}`;
-      const card = `${address}/boards/b/cards/c${query}`;
+      const boardPath = `/boards/${workspaceIds.privateBoard}`;
+      const board = `${address}${boardPath}${query}`;
+      const card = `${address}${boardPath}/cards/${workspaceIds.archivedStory}${query}`;
       await page.goto(address);
       await expect(page).toHaveURL(`${address}/workspace`);
       await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
       await expect(page.getByRole('heading', { name: 'No projects to show' })).toBeVisible();
-      await page.goto(`${address}/projects/p`);
+      await page.goto(`${address}/projects/${workspaceIds.privateProject}`);
       await expect(page.getByRole('heading', { name: 'Project', exact: true })).toBeFocused();
       await expect(page.getByRole('heading', { name: 'No boards to show' })).toBeVisible();
       await page.goto(card);
@@ -146,7 +152,7 @@ test('Chromium opens and restores routes at desktop and narrow widths', { timeou
       await expect(page).toHaveURL(board);
       await expect(page.getByRole('heading', { name: 'Board', exact: true })).toBeFocused();
       await page.getByRole('link', { name: 'Trash' }).click();
-      await expect(page).toHaveURL(`${address}/boards/b?context=trash&view=grid&filter=kept`);
+      await expect(page).toHaveURL(`${address}${boardPath}?context=trash&view=grid&filter=kept`);
       await expect(page.getByRole('heading', { name: 'No trashed cards to show' })).toBeVisible();
     });
   }
