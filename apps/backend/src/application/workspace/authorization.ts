@@ -297,6 +297,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     if ((group.scopeType !== 'board' || group.scopeId !== card.board.board.id)
         && (group.scopeType !== 'card' || group.scopeId !== card.card.id)) throw new WorkspaceAccessError('missing');
     const template = await resolveFieldTemplate(records, group, card.board.project.project.id);
+    if (!template && typeof group.name !== 'string') throw new WorkspaceAccessError('missing');
     return template ? [group.id, template.id] : [group.id];
   }
 
