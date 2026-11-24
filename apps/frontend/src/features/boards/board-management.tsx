@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { type WorkspaceReadOutput } from '@planner/contracts';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog } from '../projects/project-controls.js';
@@ -19,6 +19,9 @@ export function BoardManagement({ workspace }: { workspace: BoardWorkspace }) {
   const close = () => setDialog(null);
   const manage = workspace.board.permissions.canManage;
   const direct = workspace.selfMembership !== null;
+  useEffect(() => {
+    if (dialog === 'leave' ? !direct : dialog !== null && !manage) setDialog(null);
+  }, [dialog, direct, manage]);
   if (!manage && !direct) return null;
   return <div className="project-actions">
     {manage && <>

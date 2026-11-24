@@ -445,6 +445,8 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     const view = main.getByRole('navigation', { name: 'Board view' });
     await expect(view.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     await view.getByRole('link', { name: 'List' }).click();
+    await expect(owner).toHaveURL((url) => url.searchParams.get('view') === 'list');
+    await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.reload();
     await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.goBack();
