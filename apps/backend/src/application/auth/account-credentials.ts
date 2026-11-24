@@ -152,12 +152,14 @@ async function finishAccountChange(db: Db, installationId: string, account: Acco
     const grant = await recoveryGrants(db).findOne({
       ...scope, _id: workspaceKey(generationId, change.recoveryId), id: change.recoveryId, userId,
       kind: 'account-recovery', targetEpoch: change.epoch - 1, targetRevision: change.revision - 1,
+      revokedAt: { $type: 'null' },
     });
-    if (!grant) throw new CommandRecoveryError('The account recovery grant disappeared.');
+    if (!grant) throw new CommandRecoveryError('The claimed account recovery grant is missing or revoked.');
     checkGrant(grant, recoveryLifetimeMs);
     if (time < grant.issuedAt || time >= grant.expiresAt) throw new CommandRecoveryError('An account recovery claim is stale.');
     const consumed = await recoveryGrants(db).updateOne({
-      ...grantIdentity(grant), kind: grant.kind, userId, $or: [{ consumedAt: { $type: 'null' } }, { consumedAt: time }],
+      ...grantIdentity(grant), kind: grant.kind, userId, revokedAt: { $type: 'null' },
+      $or: [{ consumedAt: { $type: 'null' } }, { consumedAt: time }],
     }, { $set: { consumedAt: time } }, durable);
     assertChanged(consumed.matchedCount);
   }

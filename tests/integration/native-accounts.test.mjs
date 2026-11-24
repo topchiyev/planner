@@ -291,3 +291,32 @@ test('a later role change and expiration invalidate outstanding recovery deliver
     } finally { await f.close(); }
   });
 });
+
+test('reset replay fails closed before completing a revoked grant', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    const { db } = mongo;
+    try {
+      const admin = await f.seed('admin@example.test', { role: 'admin' });
+      const target = await f.seed('member@example.test');
+      const login = await f.sessions().login({ identifier: admin.email, password });
+      const svc = f.accountServices();
+      const approval = await svc.requestApproval(login.token, admin.id, target.id, 1, { action: 'recovery' });
+      const grant = (await svc.confirmApproval(approval.id)).recovery.grant;
+      await assert.rejects(f.accountServices(() => { throw new Error('test interruption'); }).consumeRecovery({
+        grant, password: changedPassword,
+      }), /test interruption/u);
+      const filter = { ...f.scope, kind: 'account-recovery', userId: target.id, tokenDigest: tokenDigest(grant) };
+      await db.collection('recoveryGrants').updateOne(filter, { $set: { revokedAt: new Date() } });
+      await assert.rejects(f.reboot(), /missing or revoked/u);
+      assert.equal((await db.collection('recoveryGrants').findOne(filter)).consumedAt, null);
+      assert.equal(await db.collection('auditEntries').countDocuments({ ...f.scope, action: 'account.reset-consumed' }), 0);
+      assert.equal(f.gate().ready, false);
+      await db.collection('recoveryGrants').updateOne(filter, { $set: { revokedAt: null } });
+      await f.reboot();
+      await f.reboot();
+      assert.equal((await f.sessions().login({ identifier: target.email, password: changedPassword })).status, 'authenticated');
+      assert.equal(await db.collection('auditEntries').countDocuments({ ...f.scope, action: 'account.reset-consumed' }), 1);
+    } finally { await f.close(); }
+  });
+});
