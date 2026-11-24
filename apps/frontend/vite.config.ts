@@ -3,7 +3,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig(({ command }) => {
   const plugins = [react()];
-  if (command === 'build') return { plugins };
+  if (command === 'build') return { plugins, build: { license: true } };
 
   const port = process.env.PLANNER_PROXY_PORT ?? '27430';
   if (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
