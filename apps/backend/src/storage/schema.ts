@@ -22,6 +22,7 @@ export interface InstallationDocument {
   installationId: string;
   activeGenerationId: string | null;
   schemaVersion: number;
+  mfaKeyDigest?: string;
   schemaMigration?: MigrationProgress;
   setup?: {
     mode: 'fresh' | 'import';
