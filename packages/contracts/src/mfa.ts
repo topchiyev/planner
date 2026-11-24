@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { opaqueTokenSchema, passwordSchema } from './auth.js';
+import { opaqueTokenSchema, passwordSchema, sessionSchema } from './auth.js';
 import { publicIdSchema, utcInstantSchema } from './storage.js';
 
 export const totpCodeSchema = z.string().regex(/^[0-9]{6}$/u);
@@ -17,6 +17,8 @@ export const mfaEnrollmentRequiredSchema = z.strictObject({
   enrollmentId: opaqueTokenSchema,
 });
 
+export const loginWithMfaOutputSchema = z.union([sessionSchema, mfaChallengeSchema, mfaEnrollmentRequiredSchema]);
+
 const challengeFields = { challengeId: opaqueTokenSchema, rememberDevice: z.boolean().optional() };
 export const verifyMfaInputSchema = z.union([
   z.strictObject({ ...challengeFields, ...factorFields[0] }),
@@ -31,7 +33,7 @@ export const mfaEnrollmentInputSchema = z.strictObject({ enrollmentId: opaqueTok
 export const mfaEnrollmentOutputSchema = z.strictObject({
   enrollmentId: opaqueTokenSchema,
   secret: z.string().regex(/^[A-Z2-7]{32}$/u),
-  uri: z.string().max(512).regex(/^otpauth:\/\/totp\//u),
+  uri: z.string().max(1024).regex(/^otpauth:\/\/totp\//u),
 });
 export const mfaEnrollmentVerifyInputSchema = z.strictObject({
   enrollmentId: opaqueTokenSchema,
@@ -47,7 +49,7 @@ export const trustedDeviceSchema = z.strictObject({
   expiresAt: utcInstantSchema,
   current: z.boolean(),
 });
-export const trustedDevicesOutputSchema = z.strictObject({ devices: z.array(trustedDeviceSchema) });
+export const trustedDevicesOutputSchema = z.strictObject({ mfaEnabled: z.boolean(), devices: z.array(trustedDeviceSchema) });
 
 export type VerifyMfaInput = z.infer<typeof verifyMfaInputSchema>;
 export type ReauthenticateMfaInput = z.infer<typeof reauthenticateMfaInputSchema>;

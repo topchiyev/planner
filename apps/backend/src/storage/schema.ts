@@ -29,6 +29,11 @@ export interface InstallationDocument {
     pendingAction: 'first-admin-enrollment' | 'migration-preflight' | 'complete';
     enrollmentGenerationId: string | null;
     firstAdminGrantIssuedAt?: Date;
+    stagedMfaEnrollment?: {
+      userId: string;
+      recoveryId: string;
+      credentialsVersion: number;
+    };
   };
 }
 

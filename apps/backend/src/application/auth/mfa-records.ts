@@ -89,6 +89,12 @@ function proofMatch(proof: MfaProof, time: Date) {
     _id: proof._id, installationId: proof.installationId, generationId: proof.generationId, userId: proof.userId,
     credentialsVersion: proof.credentialsVersion, kind: proof.kind, tokenDigest: proof.tokenDigest,
     issuedAt: { $lte: time }, expiresAt: { $gt: time }, consumedAt: { $type: 'null' as const }, attempts: proof.attempts,
+    ...(proof.kind === 'mfa-challenge' ? { factorId: proof.factorId } : {
+      source: proof.source,
+      ...(proof.source === 'session' && { sessionDigest: proof.sessionDigest }),
+      ...(proof.source === 'staged' && { recoveryId: proof.recoveryId }),
+      ...(proof.encrypted && { encrypted: proof.encrypted }),
+    }),
   };
 }
 
@@ -165,9 +171,9 @@ export async function listTrustedDevices(database: Db, scope: ActorScope, time: 
   }));
 }
 
-export async function revokeTrustedDevice(database: Db, scope: ActorScope, time: Date, id: string) {
-  const deleted = await devices(database).updateOne(
+export async function revokeTrustedDevice(database: Db, scope: ActorScope, time: Date, id: string, token?: string) {
+  const device = await devices(database).findOneAndUpdate(
     { ...deviceScope(scope, time), _id: workspaceKey(scope.generationId, id), id }, { $set: { revokedAt: time } }, durable,
   );
-  return deleted.matchedCount === 1;
+  return device ? { current: token !== undefined && device.tokenDigest === tokenDigest(token) } : null;
 }
