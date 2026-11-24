@@ -17,7 +17,7 @@ export async function planProjectCreate(records: WorkspaceRecords, input: Relati
   const id = randomUUID();
   const managerId = randomUUID();
   return { effects: [
-    { kind: 'insert', collection: 'projects', id, fields: { ...input, hidden: false, backgroundId: null, backgroundPreset: null,
+    { kind: 'insert', collection: 'projects', id, fields: { ...input, hidden: false, boardOrderVersion: 1, backgroundId: null, backgroundPreset: null,
       ownerProjectManagerId: input.type === 'private' ? managerId : null, rank: rank.toString(), createdAt: timestamp, updatedAt: null } },
     { kind: 'insert', collection: 'projectManagers', id: managerId, revision: 1, fields: { projectId: id, userId, createdAt: timestamp } },
   ], result: { data: { id } }, audit: { action: 'projects.create', resourceId: id, resourceType: 'project' } };

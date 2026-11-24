@@ -23,6 +23,8 @@ Entity DTOs use `id`, `revision`, `createdAt` and `updatedAt`, plus typed parent
 
 Project detail returns visible board summaries. A manager also receives the manager roster, usable background references and project field templates. Card detail returns its list and board identity, label and assignee projections, attachments, cover, field groups and values. Fetch checklist contents, comments and activity by their scoped reads. Archive/trash show detail with restore, move and authorized disposal actions. Normal editor controls become available after restoration.
 
+Board creation matches the project's revision. Board movement matches the board's revision and takes `beforeBoardId` (null appends) and `projectBoardOrderVersion`. Project summaries expose `boardOrderVersion`, initialized at 1 for earlier projects. It changes with board creation, removal and actual reordering independently of the board's list order. Creation and movement return the affected board and project versions. Board deletion uses the board revision and the exact displayed name. Its empty response includes `Planner-Parent-Revision` while the actor still has project read access. Board deletion is available through the browser API.
+
 ## Workspace and card operations
 
 Prefixes below are relative to `/api/v1`. Compound requests and edits use the field rules in the rows that follow.

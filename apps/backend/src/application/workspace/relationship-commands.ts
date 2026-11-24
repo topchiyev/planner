@@ -5,6 +5,9 @@ import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { availableProjectImage } from './project-background.js';
 import { authorizeProjectDelete, planProjectCreate, planProjectDelete } from './project-lifecycle.js';
+import {
+  authorizeBoardCreate, authorizeBoardDelete, authorizeBoardManage, planBoardCreate, planBoardDelete, planBoardMove, planBoardUpdate,
+} from './board-lifecycle.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -113,6 +116,13 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'boards.create': define('boards.create', (scope, input) => authorizeBoardCreate(scope, input.id),
+      (_records, project, input, context, scope) => planBoardCreate(project, input, context, scope)),
+    'boards.move': define('boards.move', (scope, input) => authorizeBoardManage(scope, input.id),
+      (_records, board, input, context, scope) => planBoardMove(board, input, context, scope)),
+    'boards.update': define('boards.update', (scope, input) => authorizeBoardManage(scope, input.id), planBoardUpdate),
+    'boards.delete': define('boards.delete', (scope, input) => authorizeBoardDelete(database, scope, input, origin, idempotencyKey),
+      planBoardDelete),
     'projects.create': define('projects.create', async (scope) => { requireCapability(scope.roles.canCreateProject); },
       (records, _access, input, context) => planProjectCreate(records, input, context)),
     'projects.delete': define('projects.delete', (scope, input) => authorizeProjectDelete(database, scope, input, idempotencyKey),

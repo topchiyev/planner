@@ -8,6 +8,7 @@ import { createBoardEventStore } from '../board-events/store.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { availableMedia, unavailableMedia } from '../media/records.js';
@@ -24,7 +25,6 @@ const entity = ({ id, revision, createdAt, updatedAt }: EntityProjection) =>
 const ordered = (row: EntityProjection & { rank?: Long | null }) => ({ ...entity(row), rank: rank(row.rank) });
 const person = ({ id, name, username }: WorkspaceRow<'users'>) => ({ id, name, username: username ?? null });
 const labelDto = (row: WorkspaceRow<'labels'>) => ({ ...ordered(row), boardId: row.boardId, name: row.name ?? null, color: row.color ?? null });
-const boardDto = ({ board, permissions }: BoardAccessContext) => ({ ...ordered(board), projectId: board.projectId, name: board.name, permissions });
 
 function cardDto(card: WorkspaceRow<'cards'>, board: BoardAccessContext, list: WorkspaceRow<'lists'>) {
   return { ...ordered(card), boardId: board.board.id, listId: list.id, name: card.name, type: card.type, kind: card.kind,
@@ -57,7 +57,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     return {
       ...ordered(project), name: project.name, type: project.type, hidden: project.hidden, favorite: !!favorite,
       permissions: { ...permissions, canDelete: permissions.canDelete && boardCount === 0,
-        canChangeOwnership: await ownershipCanChange(context) }, boardCount,
+        canChangeOwnership: await ownershipCanChange(context) }, boardCount, boardOrderVersion: projectBoardOrderVersion(project),
     };
   }
 
@@ -220,7 +220,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         projectSummary(board.project),
         records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] } }, rankSort),
         records.find('labels', { boardId: id }, rankSort),
-        records.first('boardPreferences', { boardId: id }),
+        boardPreferencesRow(records, generationId, id),
         createBoardEventStore(database, generationId, id).highWater(),
         together((['board', 'archive', 'trash'] as const).map((kind) =>
           records.aggregate<{ _id: string; count: number }>('cards', { boardId: id, kind }, [
@@ -232,15 +232,11 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         board: boardDto(board), project,
         lists: lists.map((item) => ({ ...ordered(item), boardId: id, kind: item.kind, name: item.name,
           orderVersion: item.orderVersion ?? item.revision, cardCount: counts.get(item.id) ?? 0 })),
-        labels: labels.map(labelDto), orderVersion: board.board.orderVersion ?? board.board.revision,
+        labels: labels.map(labelDto), orderVersion: board.board.orderVersion ?? 1,
         latestEventSequence: latestSequence.toString(),
         eventCursor: eventCursors.encode({ actorId: actor.id, generationId, boardId: id }, latestSequence),
-        preferences: {
-          revision: preferences?.revision ?? null, defaultView: preferences?.defaultView ?? board.board.defaultView ?? 'kanban',
-          defaultCardType: preferences?.defaultCardType ?? null, restrictedCardType: preferences?.restrictedCardType ?? null,
-          showCreator: preferences?.showCreator ?? false, showCardAge: preferences?.showCardAge ?? false,
-          showCardCount: preferences?.showCardCount ?? false, expandChecklists: preferences?.expandChecklists ?? false,
-        },
+        preferences: boardPreferences(board.board, preferences),
+        selfMembership: board.membership ? { revision: board.membership.revision ?? null } : null,
       } };
     },
 

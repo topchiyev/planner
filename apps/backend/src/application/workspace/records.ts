@@ -22,7 +22,7 @@ interface Entity {
 type Ordered = { name: string; rank?: Long | null };
 interface Records {
   users: { name: string; username?: string | null; role: SiteRole; disabledAt: Date | null };
-  projects: Ordered & { type: 'private' | 'shared'; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null; backgroundPreset?: typeof projectGradientSchema.options[number] | null };
+  projects: Ordered & { type: 'private' | 'shared'; boardOrderVersion?: number; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null; backgroundPreset?: typeof projectGradientSchema.options[number] | null };
   projectManagers: { projectId: string; userId: string };
   projectFavorites: { projectId: string; userId: string };
   projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null; availability?: string | null; deletedAt?: Date | null };
@@ -45,13 +45,15 @@ interface Records {
   cardFollows: { cardId: string; userId: string };
   checklists: Ordered & { cardId: string; showOnFront?: boolean; hideCompleted?: boolean };
   tasks: {
-    checklistId: string; rank?: Long | null; name?: string; completed?: boolean; assigneeId?: string | null;
+    checklistId: string; rank?: Long | null; name?: string | null; completed?: boolean | null; assigneeId?: string | null;
     linkedCardId?: string | null; linkedUnavailable?: boolean;
   };
   fieldGroups: Ordered & { scopeType: FieldScope; scopeId: string; templateGroupId?: string | null };
   fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean };
   fieldValues: { cardId: string; fieldGroupId: string; fieldDefinitionId: string; value: string };
   comments: { boardId: string; cardId: string; authorId?: string | null; text: string };
+  activities: { boardId: string; cardId?: string | null };
+  notifications: { boardId?: string | null; cardId?: string | null };
   attachments: { cardId: string; name: string; kind: 'file' | 'link'; byteLength?: number | null; blobDigest?: string | null; url?: string | null; availability?: string | null; deletedAt?: Date | null };
   blobs: { digest: string; lifecycleState: string; byteLength: number };
   events: { boardId: string; sequence: Long };
@@ -107,7 +109,7 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
         { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) });
     },
     find<K extends WorkspaceRecordName>(name: K, filter: Document, sort?: Sort) {
-      return collection(name).find(scoped<K>(filter),
+      return collection(name).find<WorkspaceRow<K>>(scoped<K>(filter),
         { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) }).toArray();
     },
     count<K extends WorkspaceRecordName>(name: K, filter: Document) {

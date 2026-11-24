@@ -14,7 +14,8 @@ const projectErrors = new Map<string, string>([
   ['INVALID_PROJECT_BACKGROUND', 'Choose an available image from this project.'],
 ]);
 
-export function useProjectAction() {
+export function useWorkspaceMutation(errors: ReadonlyMap<string, string>, changed: string,
+  invalid = 'Check the information and try again.') {
   const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
   const revalidator = useRevalidator();
   const { pathname, search } = useLocation();
@@ -29,7 +30,7 @@ export function useProjectAction() {
   }, []);
   return {
     busy, problem, clearProblem: () => setProblem(''), actorId: session?.account.id,
-    run: async <T,>(input: readonly unknown[], execute: (csrf: string, key: string) => Promise<T>, done?: (result: T) => void, refresh = true) => {
+    run: async <T,>(input: readonly unknown[], execute: (csrf: string, key: string) => Promise<T>, done?: (result: T) => void | Promise<void>, refresh = true) => {
       if (!session || pending.current) return;
       pending.current = true;
       setBusy(true);
@@ -40,19 +41,19 @@ export function useProjectAction() {
         const result = await execute(session.csrfToken, attempt.current.key);
         attempt.current = null;
         if (!mounted.current) return;
-        done?.(result);
+        await done?.(result);
         if (refresh) await revalidator.revalidate();
       } catch (error) {
         if (!mounted.current) return;
         if (error instanceof WorkspaceRequestError) {
           if (error.status === 401) { window.location.replace(workspaceSignInPath(pathname + search)); return; }
           if (error.status === 409 || error.status === 403 || error.status === 404) {
-            setProblem(projectErrors.get(String(error.code)) ?? 'This project or your access changed. Current information has been loaded.');
+            setProblem(errors.get(String(error.code)) ?? changed);
             await revalidator.revalidate();
             return;
           }
-          setProblem(projectErrors.get(String(error.code)) ?? (error.status === 413 ? 'Choose an image up to 32 MiB.'
-            : error.status === 415 || error.status === 422 ? 'Check the project details or choose a supported image.'
+          setProblem(errors.get(String(error.code)) ?? (error.status === 413 ? 'Choose an image up to 32 MiB.'
+            : error.status === 415 || error.status === 422 ? invalid
               : 'Planner could not save this change. Try again.'));
         } else setProblem('Planner could not save this change. Try again.');
       } finally {
@@ -63,7 +64,14 @@ export function useProjectAction() {
   };
 }
 
-export function ProjectDialog({ title, children, onClose, busy = false }: {
+export function useProjectAction() {
+  return useWorkspaceMutation(projectErrors, 'This project or your access changed. Current information has been loaded.',
+    'Check the project details or choose a supported image.');
+}
+
+export { WorkspaceDialog as ProjectDialog };
+
+export function WorkspaceDialog({ title, children, onClose, busy = false }: {
   title: string; children: ReactNode; onClose: () => void; busy?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);

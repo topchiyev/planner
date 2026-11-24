@@ -50,7 +50,7 @@ export const cardAccessSchema = z.strictObject({
 export const workspacePersonSchema = z.strictObject({ id: publicIdSchema, name: z.string(), username: maybeText });
 export const boardSummarySchema = ordered.extend({ projectId: publicIdSchema, permissions: boardAccessSchema });
 export const projectSummarySchema = ordered.extend({
-  type: workspaceProjectType, hidden: z.boolean(), favorite: z.boolean(), permissions: projectAccessSchema, boardCount: nonnegative,
+  type: workspaceProjectType, hidden: z.boolean(), favorite: z.boolean(), permissions: projectAccessSchema, boardCount: nonnegative, boardOrderVersion: revisionSchema,
 });
 export const fieldDefinitionSchema = ordered.extend({ fieldGroupId: publicIdSchema, showOnFront: z.boolean() });
 export const fieldGroupSchema = ordered.extend({
@@ -66,17 +66,19 @@ export const boardListSchema = ordered.extend({
   boardId: publicIdSchema, kind: workspaceListKind, orderVersion: revisionSchema, cardCount: nonnegative,
 });
 export const boardLabelSchema = ordered.omit({ name: true }).extend({ boardId: publicIdSchema, name: maybeText, color: maybeText });
-export const boardPreferencesSchema = z.strictObject({
-  revision: revisionSchema.nullable(), defaultView: workspaceBoardView, defaultCardType: workspaceCardType.nullable(),
+export const boardSettingsSchema = z.strictObject({
+  defaultView: workspaceBoardView, defaultCardType: workspaceCardType.nullable(),
   restrictedCardType: workspaceCardType.nullable(), showCreator: z.boolean(), showCardAge: z.boolean(),
   showCardCount: z.boolean(), expandChecklists: z.boolean(),
 });
+export const boardPreferencesSchema = boardSettingsSchema.extend({ revision: revisionSchema.nullable() });
 export const boardWorkspaceSchema = z.strictObject({
   board: boardSummarySchema,
   project: projectSummarySchema,
   lists: z.array(boardListSchema),
   labels: z.array(boardLabelSchema),
   preferences: boardPreferencesSchema,
+  selfMembership: z.strictObject({ revision: revisionSchema.nullable() }).nullable(),
   orderVersion: revisionSchema,
   latestEventSequence: signedInt64TextSchema,
   eventCursor: boardEventCursorSchema,
