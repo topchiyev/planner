@@ -8,7 +8,7 @@ import { decodeRank, encodeRank, readLongField, readStoredInstant, signedLongFie
 import { readInstallation, requireCurrentSchema, verifyStorageSchema } from './schema.js';
 
 type Value = null | boolean | number | bigint | string | Date | Value[] | { [key: string]: Value };
-type Fields = Record<string, Value>;
+export type WorkspaceFields = Record<string, Value>;
 interface WorkspaceDocument {
   _id: string;
   id: string;
@@ -18,7 +18,7 @@ interface WorkspaceDocument {
 }
 
 const indexedCollections = new Set<WorkspaceCollection>(workspaceCollections);
-const identityFields = new Set(['_id', 'id', 'generationId', 'revision']);
+const identityFields = new Set(['_id', 'id', 'generationId', 'revision', 'commandEffectId']);
 const versionedCollections = new Set<WorkspaceCollection>([
   'users', 'projects', 'boards', 'boardPreferences', 'lists', 'cards', 'labels', 'checklists', 'tasks',
   'fieldGroups', 'fieldDefinitions', 'fieldValues', 'comments', 'attachments', 'projectBackgrounds',
@@ -58,7 +58,7 @@ function encodeValue(value: unknown): unknown {
   throw new TypeError('Expected an explicit supported workspace field value.');
 }
 
-function encodeFields(fields: Fields) {
+export function encodeWorkspaceFields(fields: WorkspaceFields) {
   if (!fields || Object.getPrototypeOf(fields) !== Object.prototype) {
     throw new TypeError('Expected workspace fields as an object.');
   }
@@ -79,6 +79,14 @@ function encodeFields(fields: Fields) {
     if (field === 'sourceInstanceId') return [field, sourceUuidSchema.parse(value)];
     return [field, encodeValue(value)];
   }));
+}
+
+export function workspaceInsertFields(name: WorkspaceCollection, fields: WorkspaceFields, revision?: number) {
+  const record = encodeWorkspaceFields(fields);
+  if (name === 'users' && !record.normalizedEmail) throw new TypeError('A user requires a normalized email.');
+  if (name === 'importIds') parseSourceIdentity(record.entity, record.sourceId);
+  const initial = revision === undefined && !versionedCollections.has(name) ? undefined : revisionSchema.parse(revision ?? 1);
+  return { ...record, ...(initial === undefined ? {} : { revision: initial }) };
 }
 
 function decodeValue(value: unknown): Value {
@@ -113,7 +121,7 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
       await checkBinding();
       const stored = await source.findOne(filter, { promoteLongs: false });
       if (!stored) return null;
-      const { _id, generationId: storedGeneration, ...logical } = stored;
+      const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;
       return Object.fromEntries(Object.entries(logical).map(([field, value]) => {
         if (integer64Fields.has(field)) return [field, readLongField(field, value)];
         if (dates.has(field)) return [field, readStoredInstant(value)];
@@ -121,25 +129,21 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
         return [field, decodeValue(value)];
       }));
     },
-    async insert(name: WorkspaceCollection, id: string, fields: Fields, revision?: number) {
+    async insert(name: WorkspaceCollection, id: string, fields: WorkspaceFields, revision?: number) {
       const source = collection(name);
-      const record = encodeFields(fields);
-      if (name === 'users' && !record.normalizedEmail) throw new TypeError('A user requires a normalized email.');
-      if (name === 'importIds') parseSourceIdentity(record.entity, record.sourceId);
-      const preparedRevision = revision === undefined && !versionedCollections.has(name) ? undefined
-        : revisionSchema.parse(revision ?? 1);
+      const record = workspaceInsertFields(name, fields, revision);
       const key = workspaceKey(generationId, id);
       await checkBinding();
       await source.insertOne({
-        ...record, _id: key, generationId, id, ...(preparedRevision === undefined ? {} : { revision: preparedRevision }),
+        ...record, _id: key, generationId, id,
       }, { writeConcern });
     },
-    async update(name: WorkspaceCollection, id: string, fields: Fields, expectedRevision: number) {
+    async update(name: WorkspaceCollection, id: string, fields: WorkspaceFields, expectedRevision: number) {
       const source = collection(name);
       const filter = lookup(id);
       const revision = revisionSchema.parse(expectedRevision);
       const nextRevision = revisionSchema.parse(revision + 1);
-      const changes = encodeFields(fields);
+      const changes = encodeWorkspaceFields(fields);
       if (name === 'importIds' && ('entity' in changes || 'sourceId' in changes)) {
         throw new TypeError('Source mapping identities cannot be updated.');
       }

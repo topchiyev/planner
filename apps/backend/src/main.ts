@@ -4,6 +4,7 @@ import { defaultAppPort } from '@planner/contracts/native';
 import type { CommandGate } from './application/command-gate/gate.js';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
+import { startNativeCommandRecovery } from './native/command-recovery.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
 import { readProtectedFile } from './native/mongo-host.js';
 import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
@@ -15,6 +16,7 @@ let app: ReturnType<typeof buildApp> | undefined;
 let closeAdmin: (() => Promise<void>) | undefined;
 let closeProxy: (() => Promise<void>) | undefined;
 let commandGate: CommandGate | undefined;
+let stopRecovery: (() => void) | undefined;
 
 try {
   const frontendRoot = fileURLToPath(new URL('../../frontend/dist/', import.meta.url));
@@ -45,6 +47,7 @@ try {
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess);
     dependencies = { frontendRoot, native: { origin: config.publicUrl, proxyToken, readAccess } };
     port = config.appPort;
+    stopRecovery = startNativeCommandRecovery(config, gate);
   } else {
     const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
     if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');
@@ -61,6 +64,7 @@ try {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
+      stopRecovery?.();
       await Promise.all([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
     } catch {
       console.error('Planner could not close its listeners.');
@@ -75,6 +79,7 @@ try {
   process.on('SIGTERM', shutdown);
   console.log(address);
 } catch {
+  stopRecovery?.();
   await Promise.allSettled([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
   console.error('Planner could not start its listeners.');
   process.exitCode = 1;
