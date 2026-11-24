@@ -244,8 +244,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         if (input.context === 'board') return { rank: rank(row.rank), id: row.id };
         return { listChangedAt: iso(row.listChangedAt), historySequence: rank(row.historySequence), id: row.id };
       });
-      const front = input.context === 'board' ? await checklistReads.front(selected.map(({ id }) => id), board.board.id) : null;
-      return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front?.get(row.id) ?? [] })),
+      const front = await checklistReads.front(selected.map(({ id }) => id), board.board.id);
+      return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front.get(row.id) ?? [] })),
         page, searchValidation: 'ok' as const };
     },
 

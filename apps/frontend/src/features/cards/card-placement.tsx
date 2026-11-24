@@ -7,7 +7,8 @@ import { readWorkspace, WorkspaceRequestError } from '../workspace/workspace-api
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
 
 export type PlacementWorkspace = NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>;
-export type PlacementCard = WorkspaceReadOutput<'boardCards'>['data'][number];
+export type PlacementCard = Pick<WorkspaceReadOutput<'boardCards'>['data'][number],
+  'id' | 'name' | 'revision' | 'boardId' | 'listId' | 'kind' | 'permissions'>;
 export type CardPlacement = { card: PlacementCard; source: BoardList; destinations: BoardList[] };
 
 export const cardPlacementErrors = new Map([

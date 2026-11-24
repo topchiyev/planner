@@ -117,6 +117,7 @@ export const taskProjection = z.discriminatedUnion('kind', [
 export const checklistSchema = ordered.extend({
   cardId: publicIdSchema, showOnFront: z.boolean(), hideCompleted: z.boolean(), orderVersion: revisionSchema, tasks: z.array(taskProjection),
 });
+const frontChecklistSchema = checklistSchema.extend({ tasks: z.array(taskProjection).max(5) });
 export const commentSchema = entity.extend({
   cardId: publicIdSchema, text: z.string(), author: workspacePersonSchema.nullable(),
   permissions: z.strictObject({ canEdit: z.boolean(), canDelete: z.boolean() }),
@@ -145,7 +146,7 @@ export const workspaceOperations = {
     context: workspaceCardContext.default('board'), q: z.string().trim().max(256).default(''),
     labelsAny: idList.default([]), labelsNone: idList.default([]), members: idList.default([]),
     listIds: idList.default([]), unassigned: queryBoolean.default(false), ...pageQuery,
-  }), page(cardSummarySchema.extend({ frontChecklists: z.array(checklistSchema).max(3) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
+  }), page(cardSummarySchema.extend({ frontChecklists: z.array(frontChecklistSchema).max(3) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
   cardGet: read('cards.get', '/api/v1/cards/:id', identifier.extend({ boardId: publicIdSchema.optional() }), data(cardDetailSchema)),
   boardLabels: read('labels.list', '/api/v1/boards/:id/labels', identifier, data(z.array(boardLabelSchema))),
   cardChecklists: read('checklists.list', '/api/v1/cards/:id/checklists', identifier, data(z.array(checklistSchema))),
