@@ -13,6 +13,7 @@ import { sourceColumns } from '../../apps/backend/dist/application/migration/sou
 import { stageBaseWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createChecklistReads } from '../../apps/backend/dist/application/workspace/checklist-reads.js';
+import { eligibleBoardPeople } from '../../apps/backend/dist/application/workspace/eligible-members.js';
 import { projectFieldGroup } from '../../apps/backend/dist/application/workspace/field-state.js';
 import { createWorkspaceRecords } from '../../apps/backend/dist/application/workspace/records.js';
 import { legacyPublicId, workspaceKey } from '../../apps/backend/dist/storage/identity.js';
@@ -337,6 +338,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
       UPDATE public.project SET background_type='gradient', background_gradient='ocean-dive' WHERE id=201;
       UPDATE public.project SET background_type='gradient', background_gradient='unrecognized-fixture-shade' WHERE id=202;
       UPDATE public.user_account SET default_editor_mode='unrecognized-fixture-editor', is_deactivated=true WHERE id=102;
+      UPDATE public.task SET assignee_user_id=101 WHERE id=553;
       UPDATE public.card SET list_id=403, list_changed_at='2026-02-14 08:09:10.000001' WHERE id=9007199254740997;
       UPDATE public.card SET stopwatch='{"startedAt":"2026-02-13T08:09:10.123456Z","total":42}' WHERE id=9007199254740993;
     `);
@@ -360,6 +362,9 @@ test('staging preserves exact gradient and history provenance and blocks malform
     assert.notEqual(user.disabledAt, null);
     const retainedOwner = await db.collection('projectManagers').findOne({ generationId, id: id('project_manager', '222') });
     assert.equal(retainedOwner.userId, user.id);
+    const retainedAssignment = await db.collection('cardAssignees').findOne({ generationId, id: id('card_membership', '521') });
+    assert.equal(retainedAssignment.userId, user.id);
+    assert.deepEqual(await eligibleBoardPeople(createWorkspaceRecords(db, generationId), generationId, id('board', '301'), { id: user.id }), []);
     assert.deepEqual((await provenance('user_account', '102')).unsupportedPreferences, ['editorMode']);
     const card = await db.collection('cards').findOne({ generationId, id: id('card', '9007199254740993') });
     assert.deepEqual(card.stopwatch, { startedAt: '2026-02-13T08:09:10.123Z', total: 42 });
@@ -474,6 +479,7 @@ test('staged relationship reconciliation preserves exact values and fails closed
       ['UPDATE public.label SET board_id=302 WHERE id=501', 'UPDATE public.label SET board_id=301 WHERE id=501', 'card label'],
       ['UPDATE public.task SET task_list_id=999 WHERE id=553', 'UPDATE public.task SET task_list_id=541 WHERE id=553', 'source checklist'],
       ['UPDATE public.task SET assignee_user_id=105 WHERE id=553', 'UPDATE public.task SET assignee_user_id=102 WHERE id=553', 'enabled direct member'],
+      ['UPDATE public.card_membership SET user_id=105 WHERE id=521', 'UPDATE public.card_membership SET user_id=102 WHERE id=521', 'no direct member'],
       ['UPDATE public.base_custom_field_group SET project_id=202 WHERE id=561',
         'UPDATE public.base_custom_field_group SET project_id=201 WHERE id=561', 'different project'],
       ['UPDATE public.custom_field_group SET card_id=9007199254740993 WHERE id=571',

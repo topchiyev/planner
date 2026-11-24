@@ -9,7 +9,7 @@ import { legacyPublicId, workspaceKey } from '../../storage/identity.js';
 import { verifyStorageSchema } from '../../storage/schema.js';
 import { workspaceInsertFields, type WorkspaceFields } from '../../storage/scoped.js';
 import { eligibleBoardPeople } from '../workspace/eligible-members.js';
-import { createWorkspaceRecords, type WorkspaceRecordName } from '../workspace/records.js';
+import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecordName } from '../workspace/records.js';
 import type { ImportIdentity } from './checkpoint.js';
 import { MigrationError } from './manifest.js';
 import { sourceKey, type SourceTable } from './source-projections.js';
@@ -96,6 +96,11 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
     get<K extends WorkspaceRecordName>(collection: K, id: string) {
       lease.assertHeld();
       return staged.get(collection, id);
+    },
+    async hasDirectBoardMembership(boardId: string, userId: string) {
+      lease.assertHeld();
+      return !!await staged.first('boardMembers', { boardId, userId,
+        $expr: { $and: [canonicalRow(generationId), equal('boardId', boardId), equal('userId', userId), directBoardRole] } });
     },
     async eligibleBoardMember(boardId: string, userId: string) {
       lease.assertHeld();

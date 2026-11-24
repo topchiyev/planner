@@ -173,7 +173,11 @@ export async function writeWorkspaceRelationship(store: ImportRecords, fallback:
         userId: await store.require('user_account', row.user_id), isPermanent: row.is_permanent });
     case 'card_membership': {
       const card = await cardBySource(store, row.card_id);
-      return store.write('cardAssignees', id, { ...times, cardId: card.id, userId: await checkAssignee(store, card, row.user_id) });
+      const userId = await store.require('user_account', row.user_id);
+      if (!await store.hasDirectBoardMembership(card.boardId, userId)) {
+        invalidBaseRow('A source card assignment has no direct member in its owning board.');
+      }
+      return store.write('cardAssignees', id, { ...times, cardId: card.id, userId });
     }
     case 'card_label': {
       const card = await cardBySource(store, row.card_id);
