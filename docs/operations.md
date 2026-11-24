@@ -28,6 +28,24 @@ Preflight reports the supported host, available storage, selected port status, i
 
 Both service accounts are dedicated non-login system identities. Installing or reinstalling lays down `planner.service` and `planner-mongodb.service` without enabling or starting them. The installer reloads a running systemd manager so it sees the new units. MongoDB’s unit requires `mongod.conf`, and the backend unit requires both configuration files. Setup starts and verifies the private database before starting the backend. An occupied selected port causes installation to stop before unpacking, including when a running Planner instance still owns its port. Stop Planner’s own services through the operator workflow before reinstalling on their selected ports. The package leaves unrelated MongoDB installations on `27017` in place. If an occupied path or systemd definition belongs to another installation, resolve it before retrying. Planner checks exact package ownership and rejects service-specific drop-ins and higher-priority tmpfiles overrides that could change the runtime directory.
 
+## Private database initialization
+
+The internal database initialization step runs as root under an exclusive lock on the managed configuration directory. It validates the package receipts, installed service accounts, data directory and selected TCP port before it initializes a database. The application setup workflow invokes this step with its validated database port.
+
+The temporary MongoDB process uses the dedicated `planner-mongodb` account and listens on a Unix socket in a mode `0700` directory. Initialization verifies the application account’s exact `readWrite` role on the `planner` database and matches its installation claim to the singleton database UUID. The temporary administrator is retired before systemd starts the permanent private MongoDB service on IPv4 loopback with authorization enabled and the localhost authentication exception disabled.
+
+The backend authenticates through the permanent Unix socket in `/run/planner-mongodb` after checking the socket namespace and the TCP listener owned by the MongoDB unit. The runtime directory permits local traversal and limits changes to the database service identity. MongoDB applies authentication on both endpoints.
+
+| File | Purpose and access |
+| --- | --- |
+| `/etc/planner/mongodb-init.json` | Root-only initialization journal that binds retries to the package receipt, data directory, database UUID and port. The journal drops the temporary administrator credential when provisioning completes. |
+| `/etc/planner/mongodb-app.json` | Application database credential and expected UUID, owned by `root:planner` with mode `0640`. |
+| `/etc/planner/mongod.conf` | Permanent MongoDB configuration, published after private bootstrap stops. It is owned by `root:planner-mongodb` with mode `0640`. |
+
+Retry an interrupted initialization with the same port and managed data directory. Changing the port or replacing the data directory requires a supported operator workflow. Readiness checks the permanent listener’s service identity and the database UUID and account role. Public readiness stays unavailable through incomplete setup, schema checks and recovery.
+
 ## Offline acceptance
 
 The [native installation test](../tests/release/native-installation.sh) runs as root in a disposable Ubuntu guest with networking disabled. Attach a read-only ISO containing the signed candidate and its test public key at the root, plus the signed prior package and its test public key under `previous/`. The script takes the ISO mount path. It verifies both signatures, checks failed installs and upgrades, and then installs and reinstalls the candidate while an independently owned MongoDB sentinel runs on port `27017`.
+
+Run the [private database acceptance test](../tests/release/native-mongodb.sh) in the same disposable guest after the native installation test passes. It exercises initialization, interruption, restart, a collision and an installation identity mismatch through the installed entry points.
