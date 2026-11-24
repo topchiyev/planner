@@ -131,6 +131,7 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
         ...(name === 'cards' && { projection: { previousListProvenance: 0, transferredAcrossBoards: 0 } }),
         ...(name === 'lists' && { projection: { transferredAcrossBoards: 0 } }),
         ...(name === 'fieldDefinitions' && { projection: { definitionOrderTieId: 0 } }),
+        ...(name === 'importIds' && { projection: { provenance: 0, order: 0, reference: 0 } }),
       });
       if (!stored) return null;
       const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;
