@@ -160,6 +160,8 @@ export function createBoardEventStreams(
         abort.addEventListener('abort', subscriber.disconnect, { once: true });
         if (!send(subscriber, () => { transport.begin(); return true; })) return;
         if (!valid) return reset(subscriber);
+        if (after === undefined && !send(subscriber, () =>
+          transport.frame({ event: 'ready', data: { boardId } }, cursors.encode(scope, high)))) return;
         subscriber.timer = setInterval(() => {
           subscriber.heartbeat = true;
           schedule(subscriber);
