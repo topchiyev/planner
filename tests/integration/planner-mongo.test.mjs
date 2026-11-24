@@ -93,7 +93,7 @@ test('a failed mongod startup removes the private bootstrap directory', { timeou
   await assert.rejects(() => lstat(directory), { code: 'ENOENT' });
 });
 
-test('an external TCP canary receives no connection when preflight rejects a supplied URI', { timeout: 15_000 }, async (t) => {
+test('public health, shell and integration entries reject external settings before startup', { timeout: 25_000 }, async (t) => {
   let accepted = 0;
   const canary = createServer((socket) => {
     accepted++;
@@ -106,19 +106,60 @@ test('an external TCP canary receives no connection when preflight rejects a sup
 
   const secret = 'fixture-only-credential-sentinel';
   const target = `mongodb://test:${secret}@127.0.0.1:${canary.address().port}/outside`;
-  const bin = await mkdtemp('/tmp/planner-mongo-test-bin-');
+  const bin = await mkdtemp('/tmp/planner-test-preflight-');
   t.after(() => rm(bin, { recursive: true, force: true }));
-  const marker = join(bin, 'child-started');
-  for (const command of ['npm', 'mongod']) {
-    await writeFile(join(bin, command), `#!/bin/sh\n: > '${marker}'\nexit 9\n`, { mode: 0o700 });
+  const marker = join(bin, 'startup-attempted');
+  const observer = join(bin, 'observe.cjs');
+  await writeFile(join(bin, 'mongod'), `#!/bin/sh\n: > '${marker}'\nexit 9\n`, { mode: 0o700 });
+  await writeFile(observer, `
+    const childProcess = require('node:child_process');
+    const { writeFileSync } = require('node:fs');
+    const { syncBuiltinESMExports } = require('node:module');
+    const { basename } = require('node:path');
+    const entry = process.argv[1] || '';
+    const fail = () => {
+      writeFileSync(${JSON.stringify(marker)}, '');
+      throw new Error('test observed startup before preflight');
+    };
+    if (entry.endsWith('/apps/backend/dist/main.js') ||
+        (basename(entry) === 'npm-cli.js' && process.argv[2] === 'run' && process.argv[3] === 'build')) fail();
+    if (['run-suite.ts', 'health.test.mjs', 'shell.test.mjs'].includes(basename(entry))) {
+      for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
+        childProcess[name] = fail;
+      }
+      syncBuiltinESMExports();
+    }
+  `);
+
+  const invocations = [
+    ['npm', ['run', 'test:integration']],
+    ['npm', ['run', 'test:health']],
+    ['npm', ['run', 'test:e2e']],
+    ['npm', ['run', 'test:shell']],
+    ['npm', ['run', 'verify:clean']],
+    [process.execPath, ['--test', 'tests/health.test.mjs']],
+    [process.execPath, ['--test', 'tests/shell.test.mjs']],
+  ];
+  // Each invocation starts an independent runner outside this test worker.
+  const childEnv = { ...process.env };
+  delete childEnv.NODE_TEST_CONTEXT;
+  for (const [command, args] of invocations) {
+    const result = spawnSync(command, args, {
+      env: {
+        ...childEnv,
+        PATH: `${bin}:${process.env.PATH}`,
+        NODE_OPTIONS: `--require=${observer}`,
+        PLANNER_MONGO_URI: target,
+      },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 1, args.join(' '));
+    assert.equal(output.includes(secret), false, 'refusal omits credential values');
+    assert.match(output, /only uses its own MongoDB fixture/u);
+    await assert.rejects(() => lstat(marker), { code: 'ENOENT' });
   }
-  const result = spawnSync(process.execPath, ['tests/run-integration.ts'], {
-    env: { ...process.env, PATH: bin, PLANNER_MONGO_URI: target }, encoding: 'utf8', timeout: 10_000,
-  });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /only uses its own MongoDB fixture/u);
-  assert.equal(`${result.stdout}${result.stderr}`.includes(secret), false, 'refusal omits credential values');
-  await assert.rejects(() => lstat(marker), { code: 'ENOENT' });
   await delay(50);
   assert.equal(accepted, 0);
 });

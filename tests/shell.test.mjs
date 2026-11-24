@@ -7,9 +7,13 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { chromium, expect } from '@playwright/test';
-import { createServer } from 'vite';
-import { workspaceIds } from './fixtures/planner-workspace.ts';
+import { assertOwnedMongoEnvironment } from './support/mongo-environment.ts';
+
+assertOwnedMongoEnvironment(process.env);
+
+const { chromium, expect } = await import('@playwright/test');
+const { createServer } = await import('vite');
+const { workspaceIds } = await import('./fixtures/planner-workspace.ts');
 
 const main = fileURLToPath(new URL('../apps/backend/dist/main.js', import.meta.url));
 const frontendRoot = fileURLToPath(new URL('../apps/frontend/', import.meta.url));

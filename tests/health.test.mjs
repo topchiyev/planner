@@ -4,10 +4,14 @@ import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
-import { build } from 'vite';
-import { buildApp } from '../apps/backend/dist/build-app.js';
-import { decodeHealthLive, decodeHealthReadiness } from '../apps/frontend/src/api/health.ts';
+import { assertOwnedMongoEnvironment } from './support/mongo-environment.ts';
+
+assertOwnedMongoEnvironment(process.env);
+
+const { healthOperations, PLANNER_VERSION } = await import('@planner/contracts');
+const { build } = await import('vite');
+const { buildApp } = await import('../apps/backend/dist/build-app.js');
+const { decodeHealthLive, decodeHealthReadiness } = await import('../apps/frontend/src/api/health.ts');
 
 const callerId = 'c0f3f51b-7ec9-4bf8-94b0-dc0d0f111bbb';
 const callerHeaders = { 'request-id': callerId, 'x-request-id': callerId };

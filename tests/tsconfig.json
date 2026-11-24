@@ -6,5 +6,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["fixtures/planner-workspace.ts", "run-integration.ts", "support/**/*.ts", "unit/**/*.ts"]
+  "include": ["fixtures/planner-workspace.ts", "run-suite.ts", "support/**/*.ts", "unit/**/*.ts"]
 }

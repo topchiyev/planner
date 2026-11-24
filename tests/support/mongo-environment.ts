@@ -7,6 +7,6 @@ export function assertOwnedMongoEnvironment(env: NodeJS.ProcessEnv, args: readon
     mongoEnvironment.test(key) || (genericDatabaseEnvironment.test(key) && mongoUri.test(value))
   ));
   if (args.length || configured) {
-    throw new Error('The integration runner only uses its own MongoDB fixture. Remove external MongoDB settings and arguments.');
+    throw new Error('The test runner only uses its own MongoDB fixture. Remove external MongoDB settings and arguments.');
   }
 }

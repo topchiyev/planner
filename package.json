@@ -18,14 +18,14 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "typecheck": "npm run typecheck --workspaces && tsc -p tests/tsconfig.json",
-    "verify": "npm run typecheck && npm test && npm run build && npm run test:health",
-    "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify",
-    "test:health": "node --import tsx --test tests/health.test.mjs",
+    "verify": "node tests/run-suite.ts verify",
+    "verify:clean": "node tests/run-suite.ts verify:clean",
+    "test:health": "node tests/run-suite.ts health",
     "dev": "npm run build --workspace @planner/contracts && npm run dev --workspace @planner/frontend",
-    "test:shell": "node --import tsx --test tests/shell.test.mjs",
-    "test": "node --import tsx --test \"tests/unit/**/*.test.{ts,mjs}\"",
-    "test:integration": "node tests/run-integration.ts",
-    "test:e2e": "npm run build && npm run test:shell"
+    "test:shell": "node tests/run-suite.ts shell",
+    "test": "node tests/run-suite.ts unit",
+    "test:integration": "node tests/run-suite.ts integration",
+    "test:e2e": "node tests/run-suite.ts e2e"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",

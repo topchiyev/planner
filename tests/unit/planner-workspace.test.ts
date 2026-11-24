@@ -37,14 +37,15 @@ test('fixture roles exercise private ownership, scoped readers and retained disa
   );
   assert.ok(fixture.users.every(({ email }) => email.endsWith('@planner.invalid')));
   assert.equal(user(ids.admin)?.role, 'admin');
-  assert.equal(member(ids.admin), undefined);
+  assert.equal(member(ids.admin, ids.privateBoard), undefined);
   assert.ok(!fixture.projectManagers.some(({ userId }) => userId === ids.admin));
   const privateProject = project(ids.privateProject);
-  const ownerEdge = fixture.projectManagers.find((item) => item.id === privateProject?.ownerProjectManagerId);
+  const privateManagers = fixture.projectManagers.filter(({ projectId }) => projectId === ids.privateProject);
   assert.equal(privateProject?.type, 'private');
-  assert.ok(ownerEdge);
-  assert.equal(ownerEdge.userId, ids.privateOwner);
-  assert.equal(ownerEdge.projectId, ids.privateProject);
+  assert.equal(user(ids.privateOwner)?.role, 'projectOwner');
+  assert.deepEqual(privateManagers.map(({ id, userId }) => ({ id, userId })), [
+    { id: privateProject?.ownerProjectManagerId, userId: ids.privateOwner },
+  ]);
   assert.equal(project(ids.sharedProject)?.type, 'shared');
   assert.equal(project(ids.sharedProject)?.ownerProjectManagerId, null);
   assert.equal(project(ids.hiddenProject)?.hidden, true);
@@ -52,8 +53,10 @@ test('fixture roles exercise private ownership, scoped readers and retained disa
   assert.equal(user(ids.createOnlyOwner)?.role, 'projectOwner');
   assert.ok(!fixture.projectManagers.some(({ userId }) => userId === ids.createOnlyOwner));
   assert.ok(!fixture.boardMembers.some(({ userId }) => userId === ids.createOnlyOwner));
-  assert.ok(fixture.projectManagers.some(({ projectId, userId }) => projectId === ids.privateProject && userId === ids.projectManager));
-  assert.equal(member(ids.projectManager), undefined);
+  assert.equal(user(ids.projectManager)?.role, 'projectOwner');
+  assert.equal(user(ids.projectManager)?.disabled, false);
+  assert.ok(fixture.projectManagers.some(({ projectId, userId }) => projectId === ids.sharedProject && userId === ids.projectManager));
+  assert.equal(member(ids.projectManager, ids.sharedBoard), undefined);
   assert.equal(member(ids.firstEditor)?.role, 'editor');
   assert.equal(member(ids.secondEditor)?.role, 'editor');
   assert.equal(user(ids.secondEditor)?.username, null);
