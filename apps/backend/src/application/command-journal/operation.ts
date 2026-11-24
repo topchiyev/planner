@@ -14,7 +14,7 @@ export type PlannedEffect =
 export interface CommandPlan {
   effects: readonly PlannedEffect[];
   result: JournalValue;
-  audit: { resourceType: string; resourceId: string; action: string; detail?: JournalValue };
+  audit: { resourceType: string; resourceId: string; action: string; detail?: JournalValue; origin?: 'web' | 'mcp' | 'operator' | 'system' };
   events?: readonly { boardId: string; kind: string; payload: JournalValue }[];
 }
 

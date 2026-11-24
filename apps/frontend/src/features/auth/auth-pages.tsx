@@ -1,5 +1,5 @@
 import {
-  firstAdminInputSchema, firstAdminOutputSchema, loginOutputSchema,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginOutputSchema,
 } from '@planner/contracts';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { PageHeading } from '../../app/page-state.js';
@@ -103,6 +103,52 @@ export function FirstAdminPage() {
   );
 }
 
+export function AccountRecoveryPage() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<'confirmed' | 'enrollment-required' | null>(null);
+
+  async function recover(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    const values = new FormData(event.currentTarget);
+    const input = accountRecoveryInputSchema.safeParse({
+      grant: String(values.get('grant') ?? '').trim(), password: values.get('password'),
+    });
+    if (!input.success || input.data.password !== values.get('password-confirmation')) {
+      setError('Check your grant and enter the same 12 to 128 character password twice.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await postJson('/api/v1/recovery/consume', input.data);
+      if (response.status === 400) setError('The recovery grant is invalid or has expired.');
+      else if (response.status === 429) setError('Too many recovery attempts. Try again later.');
+      else if (response.ok) setStatus(accountRecoveryOutputSchema.parse(await response.json()).status);
+      else setError('Planner could not reset the password. Try again.');
+    } catch { setError('Planner could not reset the password. Try again.'); }
+    finally { setBusy(false); }
+  }
+
+  if (status) return <AuthPage title="Password set">
+    <p>{status === 'enrollment-required' ? 'This account still requires multifactor enrollment. Contact your Planner administrator.'
+      : 'Sign in using the password you just set.'}</p>
+    <a className="primary-button auth-continue" href="/sign-in">Continue to sign in</a>
+  </AuthPage>;
+
+  return <AuthPage title="Recover your account">
+    <p>Enter the recovery grant your Planner operator gave you.</p>
+    <form className="auth-form" method="post" onSubmit={(event) => void recover(event)}>
+      <label>Recovery grant<input autoComplete="off" maxLength={96} name="grant" required spellCheck={false} type="password" /></label>
+      <label>New password<input autoComplete="new-password" maxLength={256} name="password" required type="password" /></label>
+      <label>Confirm password<input autoComplete="new-password" maxLength={256} name="password-confirmation" required type="password" /></label>
+      <FormFeedback error={error} />
+      <button className="primary-button" disabled={busy} type="submit">{busy ? 'Setting password…' : 'Set password'}</button>
+    </form>
+  </AuthPage>;
+}
+
 export function SignInPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -148,6 +194,7 @@ export function SignInPage() {
         <FormFeedback error={error} />
         <button className="primary-button" disabled={busy} type="submit">{busy ? 'Signing in…' : 'Sign in'}</button>
       </form>
+      <a className="auth-continue" href="/account-recovery">Recover your account</a>
     </AuthPage>
   );
 }

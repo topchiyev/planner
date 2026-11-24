@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
-import { get } from 'node:http';
+import { get, request as localRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { PLANNER_VERSION } from '@planner/contracts';
+import { accountApprovalResultSchema, accountApprovalSchema, PLANNER_VERSION } from '@planner/contracts';
 import {
   nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
 } from '@planner/contracts/native';
+import { publicIdSchema } from '@planner/contracts/storage';
 import type { MongoClient } from 'mongodb';
 import { firstAdminBinding } from '../application/auth/first-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
@@ -150,15 +151,24 @@ function verifySetupFiles(
   checkPackagePorts(intent?.options, !!config);
 }
 
+function protectedAdminSocket(owner: ReturnType<typeof verifyOwnership>) {
+  const run = lstatSync('/run');
+  if (!run.isDirectory() || run.uid !== 0 || run.gid !== 0 || (run.mode & 0o022) !== 0) {
+    throw new NativeMongoError('The Planner operator socket is unavailable.');
+  }
+  checkDirectory(adminRuntimeDirectory, owner.appUid, owner.appGroup, 0o750);
+  const socketPath = `${adminRuntimeDirectory}/admin.sock`;
+  const stat = lstatSync(socketPath);
+  if (!stat.isSocket() || stat.uid !== owner.appUid || stat.gid !== owner.appGroup
+      || stat.nlink !== 1 || (stat.mode & 0o7777) !== 0o600) {
+    throw new NativeMongoError('The Planner operator socket is unavailable.');
+  }
+  return socketPath;
+}
+
 async function appAccess(owner: ReturnType<typeof verifyOwnership>) {
   try {
-    const run = lstatSync('/run');
-    if (!run.isDirectory() || run.uid !== 0 || run.gid !== 0 || (run.mode & 0o022) !== 0) return undefined;
-    checkDirectory(adminRuntimeDirectory, owner.appUid, owner.appGroup, 0o750);
-    const socketPath = `${adminRuntimeDirectory}/admin.sock`;
-    const stat = lstatSync(socketPath);
-    if (!stat.isSocket() || stat.uid !== owner.appUid || stat.gid !== owner.appGroup
-        || stat.nlink !== 1 || (stat.mode & 0o7777) !== 0o600) return undefined;
+    const socketPath = protectedAdminSocket(owner);
     const signal = AbortSignal.timeout(3_500);
     return await new Promise<RuntimeAccess | undefined>((resolve) => {
       const request = get({ socketPath, path: '/status', signal }, (response) => {
@@ -322,6 +332,47 @@ async function verifyInstalledStorage() {
   }
 }
 
+async function handleAccountApproval(operation: 'inspect' | 'confirm', id: string, format: string) {
+  const owner = verifyOwnership();
+  const socketPath = protectedAdminSocket(owner);
+  const applied = operation === 'confirm';
+  const data = await new Promise<unknown>((resolve, reject) => {
+    const request = localRequest({ socketPath, signal: AbortSignal.timeout(6_000), method: applied ? 'POST' : 'GET',
+      path: `/accounts/approvals/${id}${applied ? '/confirm' : ''}`, headers: { 'Content-Length': 0 } }, (response) => {
+      void (async () => {
+        let body = '';
+        response.setEncoding('utf8');
+        for await (const chunk of response) {
+          body += chunk;
+          if (body.length > 4096) throw new NativeMongoError('The Planner operator response is invalid.');
+        }
+        if (response.statusCode !== 200) {
+          throw new NativeMongoError('The account approval is unavailable. Check its expiration, actor and target.');
+        }
+        return JSON.parse(body);
+      })().then(resolve, reject);
+    });
+    request.once('error', reject).end();
+  });
+  const result = applied ? accountApprovalResultSchema.parse(data) : { approval: accountApprovalSchema.parse(data) };
+  if (format === 'json') {
+    console.log(JSON.stringify(result));
+    return;
+  }
+  const { approval } = result;
+  console.log(`Account approval ${approval.id} ${applied ? 'applied' : 'pending'}.`);
+  console.log(`Administrator ${approval.actorId}, account ${approval.targetId}, revision ${approval.revision}.`);
+  const change = approval.change;
+  console.log(change.action === 'role' ? `Set the site role to ${change.role}.`
+    : change.action === 'availability' ? (change.disabled ? 'Disable this account.' : 'Reactivate this account.')
+    : 'Reset this account password.');
+  console.log(`Approval expires at ${approval.expiresAt}.`);
+  if ('recovery' in result && result.recovery) {
+    console.log(`Local recovery grant expires at ${result.recovery.expiresAt}. Give it privately to this account holder.`);
+    console.log(result.recovery.grant);
+  }
+}
+
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === 'package-remove' && args.length === 0) {
@@ -332,6 +383,8 @@ try {
         systemctl('disable', app, database);
       });
     });
+  } else if ((action === 'account-inspect' || action === 'account-confirm') && args.length === 2) {
+    await handleAccountApproval(action === 'account-inspect' ? 'inspect' : 'confirm', publicIdSchema.parse(args[0]), args[1]);
   } else if (action === 'verify-storage' && args.length === 1) {
     const result = await verifyInstalledStorage();
     console.log(args[0] === 'json' ? JSON.stringify(result) : `Planner storage schema ${result.schemaVersion} verified.`);

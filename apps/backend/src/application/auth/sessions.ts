@@ -29,6 +29,35 @@ interface SessionRecord {
 
 type LoginResult = { status: 'invalid' | 'enrollment-required' } | { status: 'authenticated'; token: string; session: BrowserSession };
 
+export async function activeAccountGeneration(database: Db, installationId: string) {
+  const installation = await readInstallation(database, installationId);
+  requireCurrentSchema(installation);
+  return installation.setup?.pendingAction === 'complete' ? installation.activeGenerationId : null;
+}
+
+// The caller holds a read or command lease through verification and use.
+export async function loadCurrentBrowserSession(database: Db, installationId: string, token: string, time: Date) {
+  const generationId = await activeAccountGeneration(database, installationId);
+  if (!generationId) return null;
+  const digest = tokenDigest(token);
+  const record = await database.collection<SessionRecord>('sessions').findOne({ installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' } });
+  if (!record || !publicIdSchema.safeParse(record.id).success || record._id !== workspaceKey(generationId, record.id)
+      || !publicIdSchema.safeParse(record.userId).success || !isStoredDate(record.createdAt)
+      || !isStoredDate(record.lastActivityAt) || !isStoredDate(record.expiresAt)
+      || record.createdAt > record.lastActivityAt || record.lastActivityAt > time
+      || record.expiresAt.getTime() !== record.createdAt.getTime() + absoluteSessionMs || time >= record.expiresAt) return null;
+  const stored = await accounts(database).findOne({
+    _id: workspaceKey(generationId, record.userId), generationId, id: record.userId,
+  });
+  const account = getLocalAccount(stored);
+  if (!stored || !account || account.auth.mfa !== 'none' || account.auth.credentialsVersion !== record.credentialsVersion
+      || time.getTime() - record.lastActivityAt.getTime() >= account.inactivityMs) return null;
+  const match = {
+    _id: record._id, installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' as const },
+  };
+  return { account, stored, generationId, time, match };
+}
+
 export function createBrowserSessions(
   database: Db,
   installationId: string,
@@ -37,33 +66,8 @@ export function createBrowserSessions(
   now = () => new Date(),
 ) {
   const sessions = database.collection<SessionRecord>('sessions');
-  async function activeGeneration() {
-    const installation = await readInstallation(database, installationId);
-    requireCurrentSchema(installation);
-    return installation.setup?.pendingAction === 'complete' ? installation.activeGenerationId : null;
-  }
-
-  async function loadCurrent(token: string) {
-    const generationId = await activeGeneration();
-    if (!generationId) return null;
-    const time = now();
-    const digest = tokenDigest(token);
-    const record = await sessions.findOne({ installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' } });
-    if (!record || !publicIdSchema.safeParse(record.id).success || record._id !== workspaceKey(generationId, record.id)
-        || !publicIdSchema.safeParse(record.userId).success || !isStoredDate(record.createdAt)
-        || !isStoredDate(record.lastActivityAt) || !isStoredDate(record.expiresAt)
-        || record.createdAt > record.lastActivityAt || record.lastActivityAt > time
-        || record.expiresAt.getTime() !== record.createdAt.getTime() + absoluteSessionMs || time >= record.expiresAt) return null;
-    const account = getLocalAccount(await accounts(database).findOne({
-      _id: workspaceKey(generationId, record.userId), generationId, id: record.userId,
-    }));
-    if (!account || account.auth.mfa !== 'none' || account.auth.credentialsVersion !== record.credentialsVersion
-        || time.getTime() - record.lastActivityAt.getTime() >= account.inactivityMs) return null;
-    const match = {
-      _id: record._id, installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' as const },
-    };
-    return { account, time, match };
-  }
+  const activeGeneration = () => activeAccountGeneration(database, installationId);
+  const loadCurrent = (token: string) => loadCurrentBrowserSession(database, installationId, token, now());
 
   return {
     async login(input: LoginInput): Promise<LoginResult> {
