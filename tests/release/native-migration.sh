@@ -158,7 +158,20 @@ PY2
     else
         sql "$db" <"$prepared/source.sql"
     fi
-    sql "$db" -c "REVOKE TEMPORARY ON DATABASE $db FROM PUBLIC; GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader"
+    sql "$db" -c "REVOKE TEMPORARY ON DATABASE $db FROM PUBLIC"
+    if [ "$release" = 2.3.0 ]; then
+        "$node" --input-type=module - <<'JS' | sql "$db"
+import { sourceColumns } from '/opt/planner/current/apps/backend/dist/application/migration/source-catalog.js';
+for (const [table, columns] of Object.entries(sourceColumns)) {
+  const grant = columns.map((column) => '"' + column + '"').join(',');
+  console.log('GRANT SELECT (' + grant + ') ON TABLE public."' + table + '" TO fixture_reader;');
+}
+JS
+        [ "$(sql "$db" -c "SELECT pg_catalog.has_column_privilege('fixture_reader','public.user_account','password','SELECT')")" = f ]
+        [ "$(sql "$db" -c "SELECT pg_catalog.has_column_privilege('fixture_reader','public.session','access_token','SELECT')")" = f ]
+    else
+        sql "$db" -c 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader'
+    fi
     printf '[source-%s]\nisolated=true\nhost=%s\nport=%s\ndbname=%s\nuser=fixture_reader\n' \
         "$suffix" "$socket" "$port" "$db" >>/etc/planner/migration-pg.services
     PGHOST=/unused PGSERVICE=ignored PGDATABASE=postgres PGUSER=ignored PGOPTIONS='-c transaction_read_only=off' \
