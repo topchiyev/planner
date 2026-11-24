@@ -3,6 +3,7 @@ import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from 'mongodb';
 import { readSessionCookie } from '../application/auth/credentials.js';
+import type { BoardEventCursors } from '../application/board-events/cursor.js';
 import type { CommandGate } from '../application/command-gate/gate.js';
 import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../application/workspace/authorization.js';
@@ -14,12 +15,14 @@ export interface WorkspaceReader {
   read<K extends WorkspaceReadOperation>(token: string, operation: K, input: WorkspaceReadInput<K>): Promise<WorkspaceReadOutput<K>>;
 }
 
-export function createWorkspaceReader(database: Db, installationId: string, gate: CommandGate, now = () => new Date()): WorkspaceReader {
+export function createWorkspaceReader(
+  database: Db, installationId: string, gate: CommandGate, eventCursors: BoardEventCursors, now = () => new Date(),
+): WorkspaceReader {
   return {
     read<K extends WorkspaceReadOperation>(token: string, operation: K, input: WorkspaceReadInput<K>) {
       return gate.readSnapshot(async () => {
         const scope = await resolveBrowserWorkspace(database, installationId, token, now());
-        const handler = createWorkspaceReads(database, scope)[operation] as (value: WorkspaceReadInput<K>) => Promise<unknown>;
+        const handler = createWorkspaceReads(database, scope, eventCursors)[operation] as (value: WorkspaceReadInput<K>) => Promise<unknown>;
         const output = await handler(input);
         return workspaceOperations[operation].output.parse(output) as WorkspaceReadOutput<K>;
       });
@@ -27,12 +30,14 @@ export function createWorkspaceReader(database: Db, installationId: string, gate
   };
 }
 
-export function createNativeWorkspaceReader(config: NativeInstallationConfig, gate: CommandGate): WorkspaceReader {
+export function createNativeWorkspaceReader(
+  config: NativeInstallationConfig, gate: CommandGate, eventCursors: BoardEventCursors,
+): WorkspaceReader {
   return {
     async read(token, operation, input) {
       const client = await connectConfiguredNativeMongo(config);
       try {
-        return await createWorkspaceReader(client.db(databaseName), config.installationId, gate).read(token, operation, input);
+        return await createWorkspaceReader(client.db(databaseName), config.installationId, gate, eventCursors).read(token, operation, input);
       } finally { await client.close(); }
     },
   };

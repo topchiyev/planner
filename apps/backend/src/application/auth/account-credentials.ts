@@ -187,21 +187,26 @@ async function finishAccountChange(db: Db, installationId: string, account: Acco
   assertChanged(completed.matchedCount);
 }
 
+type AccountAccessObserver = (database: Db, actorId: string) => void | Promise<void>;
+
 // The native recovery worker holds the exclusive command gate while finishing private account transitions.
-export async function recoverAccountChanges(database: Db, installationId: string) {
+export async function recoverAccountChanges(database: Db, installationId: string, onAccessChanged?: AccountAccessObserver) {
   const generationId = await activeAccountGeneration(database, installationId);
   if (!generationId) return;
   const pending = accounts(database).find({ generationId, accountChange: { $exists: true } }, { limit: 2 });
   const [account, extra] = await pending.toArray();
   if (extra) throw new CommandRecoveryError('Multiple account transitions are pending.');
-  if (account) await finishAccountChange(database, installationId, account);
+  if (account) {
+    await finishAccountChange(database, installationId, account);
+    await onAccessChanged?.(database, account.id);
+  }
 }
 
 type ChangeInput = Pick<AccountChange, 'id' | 'actorId' | 'kind' | 'origin' | 'appliedAt' | 'approval' | 'recovery' | 'recoveryId'>;
 
 export function createAccountCredentials(
   database: Db, installationId: string, gate: CommandGate, hasher: PasswordHasher,
-  now = () => new Date(), checkpoint?: () => void | Promise<void>,
+  now = () => new Date(), checkpoint?: () => void | Promise<void>, onAccessChanged?: AccountAccessObserver,
 ) {
   async function current(token: string, actorId: string) {
     const session = await loadCurrentBrowserSession(database, installationId, token, now());
@@ -221,6 +226,7 @@ export function createAccountCredentials(
     if (!updated) throw new CommandRecoveryError('An account changed while recording its transition.');
     await checkpoint?.();
     await finishAccountChange(database, installationId, updated);
+    await onAccessChanged?.(database, target.id);
   }
 
   async function pendingApproval(id: string) {

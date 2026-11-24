@@ -3,6 +3,8 @@ import { safeMediaLink, type WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document, Long } from 'mongodb';
 import { decodeRank, readStoredInstant } from '../../storage/identity.js';
+import type { BoardEventCursors } from '../board-events/cursor.js';
+import { createBoardEventStore } from '../board-events/store.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
@@ -32,7 +34,7 @@ const fieldDefinition = (row: WorkspaceRow<'fieldDefinitions'>) => ({
   ...ordered(row), name: row.name, fieldGroupId: row.fieldGroupId, showOnFront: row.showOnFront ?? false,
 });
 
-export function createWorkspaceReads(database: Db, access: WorkspaceAuthorization) {
+export function createWorkspaceReads(database: Db, access: WorkspaceAuthorization, eventCursors: BoardEventCursors) {
   const { generationId, actor } = access;
   const records = createWorkspaceRecords(database, generationId);
   const canonical = canonicalRow(generationId);
@@ -212,12 +214,12 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
     async boardWorkspace({ id }: WorkspaceReadInput<'boardWorkspace'>) {
       const board = await access.requireBoard(id);
-      const [project, lists, labels, preferences, last, totals] = await together([
+      const [project, lists, labels, preferences, latestSequence, totals] = await together([
         projectSummary(board.project),
         records.find('lists', { boardId: id, kind: { $in: ['active', 'closed', 'archive', 'trash'] } }, rankSort),
         records.find('labels', { boardId: id }, rankSort),
         records.first('boardPreferences', { boardId: id }),
-        records.first('events', { boardId: id }, { sequence: -1 }),
+        createBoardEventStore(database, generationId, id).highWater(),
         together((['board', 'archive', 'trash'] as const).map((kind) =>
           records.aggregate<{ _id: string; count: number }>('cards', { boardId: id, kind }, [
             ...cardPlacementStages(records, id, kind), { $group: { _id: '$listId', count: { $sum: 1 } } },
@@ -229,7 +231,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         lists: lists.map((item) => ({ ...ordered(item), boardId: id, kind: item.kind, name: item.name,
           orderVersion: item.orderVersion ?? item.revision, cardCount: counts.get(item.id) ?? 0 })),
         labels: labels.map(labelDto), orderVersion: board.board.orderVersion ?? board.board.revision,
-        latestEventSequence: last ? decodeRank(last.sequence).toString() : '0',
+        latestEventSequence: latestSequence.toString(),
+        eventCursor: eventCursors.encode({ actorId: actor.id, generationId, boardId: id }, latestSequence),
         preferences: {
           revision: preferences?.revision ?? null, defaultView: preferences?.defaultView ?? board.board.defaultView ?? 'kanban',
           defaultCardType: preferences?.defaultCardType ?? null, restrictedCardType: preferences?.restrictedCardType ?? null,

@@ -1,9 +1,11 @@
-import { randomUUID } from 'node:crypto';
+import { createSecretKey, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
+import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
+import { createBoardEventStreams } from '../../apps/backend/dist/application/board-events/streams.js';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
@@ -21,11 +23,11 @@ export const origin = 'https://planner.example.test';
 export const ids = workspaceIds;
 export const fixtureId = (sequence) => `65160d3b-4e42-4023-880e-${sequence.toString(16).padStart(12, '0')}`;
 
-export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia } = {}) {
+export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia, clock, heartbeatMs } = {}) {
   const installationId = randomUUID();
   const generationId = ids.generation;
   const stagedGenerationId = randomUUID();
-  const now = () => new Date('2026-03-19T13:13:59.719Z');
+  const now = clock ?? (() => new Date('2026-03-19T13:13:59.719Z'));
   const source = createWorkspaceFixture();
   const hasher = createPasswordHasher();
   const passwordVerifier = await hasher.encode(password);
@@ -92,13 +94,21 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   const gate = new CommandGate(acquireWriterDirectory(writer, owner, owner));
   await new CommandJournal(gate, db, installationId).recover();
   const sessions = createBrowserSessions(db, installationId, gate, hasher, now);
-  const reader = createWorkspaceReader(db, installationId, gate, now);
+  const cursorKey = createSecretKey(randomBytes(32));
+  const cursors = createBoardEventCursors(cursorKey);
+  const reader = createWorkspaceReader(db, installationId, gate, cursors, now);
+  const streams = createBoardEventStreams(async () => db, installationId, gate, cursors, { now, heartbeatMs });
   const media = await configureMedia?.({ db, directory, installationId, generationId, gate, now });
   const app = buildApp({
     native: { origin, proxyToken, readAccess: async () => gate.ready ? ({ kind: 'ready' }) : ({ kind: 'unavailable' }), workspace: reader,
-      media,
-      relationships: createWorkspaceRelationships(db, installationId, gate, now), auth: {
-      confirm: async () => false, login: sessions.login, revoke: sessions.revoke,
+      media, boardEvents: streams,
+      relationships: createWorkspaceRelationships(db, installationId, gate, now, undefined, streams.revalidateBoards), auth: {
+      confirm: async () => false, login: sessions.login,
+      async revoke(token) {
+        const revoked = await sessions.revoke(token);
+        if (revoked) streams.disconnectToken(token);
+        return revoked;
+      },
       async read(token) {
         const session = await sessions.read(token);
         await beforeAdmission?.({ session, db, gate, generationId });
@@ -117,13 +127,13 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
     } });
   }
   return {
-    db, installationId, generationId, stagedGenerationId, scope, gate, reader, now, call, insert, socketPath: join(dir, 'http.sock'),
+    db, installationId, generationId, stagedGenerationId, scope, gate, reader, now, call, insert, streams, cursors, cursorKey, socketPath: join(dir, 'http.sock'),
     async login(id) {
       const account = source.users.find((row) => row.id === id);
       return call('/api/v1/session/login', null, { method: 'POST', headers: { Origin: origin },
         body: { identifier: account.email, password } });
     },
-    close: async () => { await closeProxy(); await app.close(); await gate.closeAndDrain(); },
+    close: async () => { streams.stop(); await closeProxy(); await app.close(); await gate.closeAndDrain(); },
   };
 }
 

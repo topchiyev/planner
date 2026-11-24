@@ -10,6 +10,7 @@ import { startMediaCleanup, sweepPrivateMedia, verifyActiveMedia } from './appli
 import { createPrivateMediaStore } from './storage/blobs/private-store.js';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
+import { startNativeBoardEvents, type NativeBoardEvents } from './native/board-event-runtime.js';
 import { createNativeBrowserAuth } from './native/browser-auth.js';
 import { startNativeCommandRecovery } from './native/command-recovery.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
@@ -30,6 +31,7 @@ let commandGate: CommandGate | undefined;
 let stopRecovery: (() => void) | undefined;
 let stopMediaCleanup: (() => void) | undefined;
 let closeMedia: (() => Promise<void>) | undefined;
+let boardEvents: NativeBoardEvents | undefined;
 
 try {
   const frontendRoot = fileURLToPath(new URL('../../frontend/dist/', import.meta.url));
@@ -63,21 +65,25 @@ try {
     const mediaStore = await createPrivateMediaStore('/var/lib/planner/staging', '/var/lib/planner/blobs');
     closeMedia = mediaStore.close;
     const mediaDecoder = createMediaDecoder(fileURLToPath(new URL('../../../lib/decode-media.py', import.meta.url)));
-    const auth = createNativeBrowserAuth(config, gate, mfaKey.key);
+    const events = startNativeBoardEvents(config, gate, mfaKey.key);
+    boardEvents = events;
+    const auth = createNativeBrowserAuth(config, gate, mfaKey.key, events.streams);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
-      origin: config.publicUrl, proxyToken, readAccess, auth, workspace: createNativeWorkspaceReader(config, gate),
-      relationships: createNativeWorkspaceRelationships(config, gate),
+      origin: config.publicUrl, proxyToken, readAccess, auth,
+      workspace: createNativeWorkspaceReader(config, gate, events.cursors),
+      relationships: createNativeWorkspaceRelationships(config, gate, events.wake, events.streams.revalidateBoards),
+      boardEvents: events.streams,
       media: createNativeMedia(config, gate, mediaStore, mediaDecoder),
     } };
     port = config.appPort;
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
       await recoverFirstAdmin(db, installationId);
-      await recoverAccountChanges(db, installationId);
+      await recoverAccountChanges(db, installationId, events.streams.revalidateActor);
       await recoverFactorChanges(db, installationId);
       await verifyActiveMedia(db, installationId, mediaStore);
       await sweepPrivateMedia(db, mediaStore);
-    }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey));
+    }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey), events.streams.revalidateBoards);
     stopMediaCleanup = startMediaCleanup(gate, () => withNativeMediaDatabase(config, (db) =>
       gate.runCommand(() => sweepPrivateMedia(db, mediaStore))));
   } else {
@@ -98,8 +104,9 @@ try {
     try {
       stopRecovery?.();
       stopMediaCleanup?.();
+      boardEvents?.stop();
       await Promise.all([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
-      await closeMedia?.();
+      await Promise.all([closeMedia?.(), boardEvents?.close()]);
     } catch {
       console.error('Planner could not close its listeners.');
       process.exitCode = 1;
@@ -115,8 +122,9 @@ try {
 } catch {
   stopRecovery?.();
   stopMediaCleanup?.();
+  boardEvents?.stop();
   await Promise.allSettled([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
-  await closeMedia?.().catch(() => undefined);
+  await Promise.allSettled([closeMedia?.(), boardEvents?.close()]);
   console.error('Planner could not start its listeners.');
   process.exitCode = 1;
 }

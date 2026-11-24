@@ -8,7 +8,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from 'mongodb';
 import { readSessionCookie } from '../application/auth/credentials.js';
 import type { CommandGate } from '../application/command-gate/gate.js';
-import { CommandJournal } from '../application/command-journal/journal.js';
+import { CommandJournal, type AfterCommandCommit } from '../application/command-journal/journal.js';
 import { CommandConflict, CommandInputError } from '../application/command-journal/operation.js';
 import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../application/workspace/authorization.js';
@@ -28,7 +28,7 @@ export interface WorkspaceRelationships {
 }
 
 export function createWorkspaceRelationships(
-  database: Db, installationId: string, gate: CommandGate, now = () => new Date(),
+  database: Db, installationId: string, gate: CommandGate, now = () => new Date(), onCommitted?: () => void, afterCommit?: AfterCommandCommit,
 ): WorkspaceRelationships {
   const resolve = (token: string) => resolveBrowserWorkspace(database, installationId, token, now());
   return {
@@ -43,6 +43,7 @@ export function createWorkspaceRelationships(
       token: string, actorId: string, operation: K, idempotencyKey: string, input: RelationshipCommandInput<K>,
     ) {
       const journal = new CommandJournal(gate, database, installationId, {
+        afterCommit,
         operations: createRelationshipJournalOperations(database, async (context) => {
           const scope = await resolve(token);
           if (scope.actor.id !== context.actorId || scope.generationId !== context.generationId) {
@@ -52,16 +53,19 @@ export function createWorkspaceRelationships(
         }),
       });
       const result = await journal.execute({ actorId, operationId: operation, idempotencyKey, input });
+      onCommitted?.();
       return relationshipCommands[operation].output.parse(result) as RelationshipCommandOutput<K>;
     },
   };
 }
 
-export function createNativeWorkspaceRelationships(config: NativeInstallationConfig, gate: CommandGate): WorkspaceRelationships {
+export function createNativeWorkspaceRelationships(
+  config: NativeInstallationConfig, gate: CommandGate, onCommitted?: () => void, afterCommit?: AfterCommandCommit,
+): WorkspaceRelationships {
   async function withConnection<T>(use: (relationships: WorkspaceRelationships) => Promise<T>) {
     const client = await connectConfiguredNativeMongo(config);
     try {
-      return await use(createWorkspaceRelationships(client.db(databaseName), config.installationId, gate));
+      return await use(createWorkspaceRelationships(client.db(databaseName), config.installationId, gate, undefined, onCommitted, afterCommit));
     } finally { await client.close(); }
   }
 

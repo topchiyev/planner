@@ -1,7 +1,7 @@
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { Db } from 'mongodb';
 import type { CommandGate } from '../application/command-gate/gate.js';
-import { CommandJournal } from '../application/command-journal/journal.js';
+import { CommandJournal, type AfterCommandCommit } from '../application/command-journal/journal.js';
 import { CommandRecoveryError } from '../application/command-journal/operation.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
@@ -39,6 +39,7 @@ export function startNativeCommandRecovery(
   config: NativeInstallationConfig, gate: CommandGate,
   recoverPrivate?: (database: Db, installationId: string) => Promise<void>,
   verifyBeforeReplay?: (database: Db, installationId: string) => Promise<void>,
+  afterCommit?: AfterCommandCommit,
 ) {
   return keepCommandRecovery(gate, async (running) => {
     const client = await connectConfiguredNativeMongo(config);
@@ -46,7 +47,7 @@ export function startNativeCommandRecovery(
       if (!running()) return;
       const database = client.db(databaseName);
       await verifyBeforeReplay?.(database, config.installationId);
-      if (running()) await new CommandJournal(gate, database, config.installationId).recover(
+      if (running()) await new CommandJournal(gate, database, config.installationId, { afterCommit }).recover(
         recoverPrivate && (() => recoverPrivate(database, config.installationId)),
       );
     } finally { await client.close(); }
