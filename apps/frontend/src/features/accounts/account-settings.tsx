@@ -19,7 +19,7 @@ async function readSettings(signal?: AbortSignal) {
     accountRequest(profilePath, accountProfileSchema, { signal }),
     accountRequest(preferencesPath, accountPreferencesSchema, { signal }),
   ]);
-  return { profile, preferences: preferences.preferences };
+  return { profile, preferences };
 }
 
 const profileFields = [
@@ -52,7 +52,6 @@ export function AccountSettingsPage() {
   const { csrfToken } = useRouteLoaderData('app-shell') as BrowserSession;
   const [profile, setProfile] = useState(initial.profile);
   const [preferences, setPreferences] = useState(initial.preferences);
-  const [preferencesRevision, setPreferencesRevision] = useState(initial.profile.revision);
   const [notice, setNotice] = useState('');
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
@@ -73,7 +72,6 @@ export function AccountSettingsPage() {
           const latest = await readSettings();
           setProfile(latest.profile);
           setPreferences(latest.preferences);
-          setPreferencesRevision(latest.profile.revision);
           setProblem('This account changed. The current settings have been loaded.');
         } catch { setProblem('This account changed. Reload this page before trying again.'); }
       }
@@ -94,8 +92,10 @@ export function AccountSettingsPage() {
     const input = profileUpdateSchema.safeParse({ ...changes, revision: profile.revision,
       ...(currentPassword && { currentPassword }) });
     if (!input.success) throw new Error('Check the profile fields and your current password.');
-    setProfile(await accountRequest(profilePath, accountProfileSchema,
-      accountMutation('PATCH', csrfToken, input.data, crypto.randomUUID())));
+    const result = await accountRequest(profilePath, accountProfileSchema,
+      accountMutation('PATCH', csrfToken, input.data, crypto.randomUUID()));
+    setProfile(result);
+    setPreferences((previous) => previous.revision === input.data.revision ? { ...previous, revision: result.revision } : previous);
     setNotice('Profile saved.');
   }
 
@@ -104,11 +104,14 @@ export function AccountSettingsPage() {
       ...Object.keys(preferenceChoices).map((field) => [field, values.get(field)]),
       ...preferenceChecks.map(([field]) => [field, values.has(field)]),
     ]);
+    const desired = preferencesSchema.parse(next);
+    const changes = Object.fromEntries(Object.entries(desired)
+      .filter(([field, value]) => preferences.preferences[field as keyof AccountPreferences] !== value));
+    if (Object.keys(changes).length === 0) { setNotice('Your preferences are up to date.'); return; }
     const result = await accountRequest(preferencesPath, accountPreferencesSchema,
-      accountMutation('PATCH', csrfToken, { revision: profile.revision, preferences: preferencesSchema.parse(next) }, crypto.randomUUID()));
-    setPreferences(result.preferences);
-    setPreferencesRevision(result.revision);
-    setProfile((previous) => ({ ...previous, revision: result.revision }));
+      accountMutation('PATCH', csrfToken, { revision: preferences.revision, preferences: changes }, crypto.randomUUID()));
+    setPreferences(result);
+    setProfile((previous) => previous.revision === preferences.revision ? { ...previous, revision: result.revision } : previous);
     setNotice('Preferences saved.');
   }
 
@@ -142,14 +145,14 @@ export function AccountSettingsPage() {
         </section>
         <section className="account-panel">
           <h2>Preferences</h2>
-          <form className="auth-form" method="post" key={preferencesRevision} onSubmit={(event) => void submit(event, savePreferences)}>
+          <form className="auth-form" method="post" key={preferences.revision} onSubmit={(event) => void submit(event, savePreferences)}>
             {Object.entries(preferenceChoices).map(([field, choice]) => (
-              <label key={field}>{choice.label}<select name={field} defaultValue={preferences[field as keyof AccountPreferences] as string}>
+              <label key={field}>{choice.label}<select name={field} defaultValue={preferences.preferences[field as keyof AccountPreferences] as string}>
                 {choice.options.map(([value, name]) => <option key={value} value={value}>{name}</option>)}
               </select></label>
             ))}
             {preferenceChecks.map(([field, label]) => (
-              <label className="account-check" key={field}><input name={field} type="checkbox" defaultChecked={preferences[field]} />{label}</label>
+              <label className="account-check" key={field}><input name={field} type="checkbox" defaultChecked={preferences.preferences[field]} />{label}</label>
             ))}
             <button className="primary-button" disabled={busy} type="submit">Save preferences</button>
           </form>
