@@ -1254,7 +1254,7 @@ test('project, board and card fields share templates and preserve exact values t
     let dialog = owner.getByRole('dialog', { name: 'Add field template' });
     await dialog.getByLabel('Template name').fill('Release window');
     await dialog.getByRole('button', { name: 'Create template' }).click();
-    let template = settings.getByRole('region', { name: 'Release window', exact: true });
+    const template = settings.getByRole('region', { name: 'Release window', exact: true });
     await template.getByRole('button', { name: 'Add field', exact: true }).click();
     dialog = owner.getByRole('dialog', { name: 'Add field' });
     await dialog.getByLabel('Field name').fill('Deployment note');
@@ -1306,11 +1306,31 @@ test('project, board and card fields share templates and preserve exact values t
     await owner.getByRole('dialog', { name: 'Save as project template' }).getByRole('button', { name: 'Save as project template' }).click();
     await expect(owner.getByRole('dialog', { name: 'Save as project template' })).toHaveCount(0);
     await expect(ownerLocal.getByLabel('Deployment note value')).toHaveValue('0\n');
+
+    const dirty = '  draft / λ  ';
+    await boardFields.getByLabel('Deployment note value').fill(dirty);
+    const ownerBoard = owner.getByRole('region', { name: 'Custom fields' }).getByRole('region', { name: 'Release window', exact: true });
+    await ownerBoard.getByLabel('Deployment note value').fill('Colleague update');
+    const changed = owner.waitForResponse((response) =>
+      response.request().method() === 'PUT' && response.url().includes('/field-values/'));
+    await ownerBoard.getByRole('button', { name: 'Save value' }).click();
+    assert.equal((await changed).status(), 200);
+    await editor.getByRole('button', { name: 'Follow card', exact: true }).click();
+    await expect(boardFields.getByRole('alert')).toContainText('Current value: Colleague update');
+    await expect(boardFields.getByLabel('Deployment note value')).toHaveValue(dirty);
+    await expect(boardFields.getByRole('button', { name: 'Save value' })).toBeDisabled();
+    await boardFields.getByRole('button', { name: 'Keep draft' }).click();
+    const reapplied = editor.waitForResponse((response) =>
+      response.request().method() === 'PUT' && response.url().includes('/field-values/'));
+    await boardFields.getByRole('button', { name: 'Save value' }).click();
+    assert.equal((await reapplied).status(), 200);
+
     await signIn(viewer, origin, 'viewer');
     await viewer.goto(cardPath);
     const readOnly = viewer.getByRole('region', { name: 'Custom fields' });
-    await expect(readOnly.getByRole('region', { name: 'Release window', exact: true }).locator('.field-value')).toHaveText(original, { useInnerText: true });
+    await expect(readOnly.getByRole('region', { name: 'Release window', exact: true }).locator('.field-value')).toHaveJSProperty('textContent', dirty);
     await expect(readOnly.getByRole('button', { name: 'Save value' })).toHaveCount(0);
+    await viewer.getByRole('link', { name: 'Close card' }).click();
     await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(2);
   });
 });

@@ -19,7 +19,7 @@ export async function fieldCommand<K extends keyof typeof fieldCommands>(name: K
   const operation = fieldCommands[name];
   const template = 'routes' in operation ? operation.routes.find(({ fixed }) => fixed.scopeType === options.scope)?.path : operation.path;
   if (!template) throw new TypeError('Select a field group scope.');
-  let path = template;
+  let path: string = template;
   for (const [part, id] of Object.entries({ id: options.id, groupId: options.groupId, fieldId: options.fieldId })) {
     if (id !== undefined) path = path.replace(':' + part, publicIdSchema.parse(id));
   }

@@ -4,6 +4,8 @@ import test from 'node:test';
 import { relationshipParentRevisionHeader } from '@planner/contracts';
 import { csrfToken, readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
+import { planTransferredCardFieldGroup } from '../../apps/backend/dist/application/workspace/field-copies.js';
+import { createWorkspaceRecords } from '../../apps/backend/dist/application/workspace/records.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../../apps/backend/dist/application/workspace/relationship-commands.js';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
@@ -225,6 +227,14 @@ test('interrupted board field detach remaps inherited tuples across batches and 
         cardId: id, fieldGroupId: first, fieldDefinitionId: def, value: '  λ ' + index + ' ',
       });
     }
+    const transfer = await planTransferredCardFieldGroup(createWorkspaceRecords(f.db, f.generationId),
+      await row(f, 'fieldGroups', first),
+      { id: ids.activeCard, boardId: ids.privateBoard, projectId: ids.privateProject, rank: '1024' }, f.now().toISOString());
+    assert.deepEqual(transfer.effects.filter(({ collection }) => collection === 'fieldValues').map(({ id }) => id).sort(),
+      [val, fixtureId(592)].sort());
+    assert.ok(transfer.effects.filter(({ collection }) => collection === 'fieldValues')
+      .every(({ fields }) => fields.fieldGroupId === transfer.groupId));
+    assert.equal((await row(f, 'fieldValues', copyValue)).fieldGroupId, first);
     const idempotencyKey = randomUUID();
     const journal = new CommandJournal(f.gate, f.db, f.installationId, {
       operations: createRelationshipJournalOperations(f.db, () =>
