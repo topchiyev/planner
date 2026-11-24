@@ -46,7 +46,7 @@ Retry an interrupted initialization with the same port and managed data director
 
 ## Configure and operate Planner
 
-Run setup as root and pass the canonical public HTTPS origin. Omit the port flags to use `27430` for the application and `27431` for MongoDB.
+Run setup as root and pass the canonical public HTTPS origin. Omit the port flags to use `27430` for the application and `27431` for MongoDB. Both selected ports must be within the range the service accounts can bind on the host.
 
 ```sh
 sudo plannerctl setup --mode fresh --public-url https://planner.example.test
@@ -54,7 +54,7 @@ sudo plannerctl status --json
 sudo plannerctl restart
 ```
 
-Fresh setup prints a local first-administrator enrollment grant that expires after 30 minutes. Protect the setup output as a credential. If setup is interrupted, repeat the same command with the original mode, origin and ports. The root-only setup intent lets Planner resume and deliver the same unexpired grant. MongoDB stores its digest, expiry and installation and enrollment generation identities. Status never prints the grant or database credentials.
+Fresh setup prints a local first-administrator enrollment grant that expires 30 minutes after issuance. Protect the setup output as a credential. If setup is interrupted, repeat the same command with the original mode, origin and ports. The root-only setup intent lets Planner resume and deliver the same unexpired, unconsumed grant. MongoDB stores its digest, issuance time, expiry and installation and enrollment generation identities. Status omits the grant and database credentials.
 
 Use `--mode import` to prepare an installation for migration preflight. It records that pending action and leaves the active generation unset. Both modes keep workspace readiness unavailable while their respective setup steps are pending.
 

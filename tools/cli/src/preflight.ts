@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parsePreflightOptions } from '@planner/contracts';
+import { parsePreflightOptions } from '@planner/contracts/native';
 
 const minimumAvailableKiB = 524_288;
 

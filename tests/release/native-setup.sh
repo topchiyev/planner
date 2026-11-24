@@ -143,6 +143,37 @@ expect_failure() {
 expect_failure 'Specify an HTTPS public origin' /usr/bin/plannerctl setup --mode "$mode" --public-url http://invalid.test
 expect_failure 'Choose distinct ports' /usr/bin/plannerctl setup --mode "$mode" --public-url "$origin" --app-port "$db_port" --db-port "$db_port"
 expect_failure 'Complete Planner setup' /usr/bin/plannerctl start
+minimum_port=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)
+if [ "$minimum_port" -gt 1 ]; then
+    privileged_port=$((minimum_port - 1))
+    while [ "$privileged_port" -gt 1 ] && [ -n "$(ss -H -ltn "sport = :$privileged_port")" ]; do
+        privileged_port=$((privileged_port - 1))
+    done
+    [ -z "$(ss -H -ltn "sport = :$privileged_port")" ]
+    for role in app db; do
+        rejected_app=$app_port rejected_db=$db_port
+        if [ "$role" = app ]; then rejected_app=$privileged_port; else rejected_db=$privileged_port; fi
+        expect_failure "Choose ports at or above $minimum_port" /usr/bin/plannerctl preflight \
+            --public-url "$origin" --app-port "$rejected_app" --db-port "$rejected_db"
+        expect_failure "Choose ports at or above $minimum_port" /usr/bin/plannerctl setup --mode "$mode" \
+            --public-url "$origin" --app-port "$rejected_app" --db-port "$rejected_db"
+    done
+    [[ ! -e "$intent" && ! -e "$config" && ! -e /etc/planner/mongodb-init.json ]]
+fi
+
+ports_file=/etc/planner/native-ports
+printf '%s %s\n' "$app_port" "$db_port" > "$ports_file"
+foreign_ports=$(sha256sum "$ports_file")
+expect_failure 'package ports do not match the setup intent' "${setup[@]}"
+[ "$(sha256sum "$ports_file")" = "$foreign_ports" ]
+unlink "$ports_file"
+ln -s /dev/null "$ports_file"
+expect_failure 'Unexpected Planner database file identity or permissions' "${setup[@]}"
+[ "$(readlink "$ports_file")" = /dev/null ]
+unlink "$ports_file"
+[[ ! -e "$intent" && ! -e "$config" && ! -e /etc/planner/mongodb-init.json ]]
+[[ "$(pid planner.service)" = 0 && "$(pid planner-mongodb.service)" = 0 ]]
+
 for port in "$app_port" "$db_port"; do
     collision=planner-test-collision-$port.service
     systemd-run --unit="$collision" --uid=nobody /usr/bin/python3 -m http.server "$port" --bind 127.0.0.1
@@ -167,10 +198,23 @@ flock -nx 9
 expect_failure 'initialization lock is unavailable' "${setup[@]}"
 [ "$(stat -c '%U:%G:%a' "$intent")" = root:root:600 ]
 [[ ! -e "$config" && ! -e /etc/planner/mongodb-init.json ]]
-sha256sum "$intent" > "$work/interrupted-intent.sha256"
 flock -u 9
 exec 9<&-
 
+python3 - "$intent" <<'PY'
+import json, sys, time
+from pathlib import Path
+path = Path(sys.argv[1])
+intent = json.loads(path.read_text())
+intent['createdAt'] = int(time.time() * 1000) - 2 * 60 * 60 * 1000
+assert 'expiresAt' not in intent.get('grant', {})
+path.write_text(json.dumps(intent, indent=2) + '\n')
+PY
+sha256sum "$intent" > "$work/interrupted-intent.sha256"
+printf '27430 %s\n' "$db_port" > "$ports_file"
+expect_failure 'package ports do not match the setup intent' "${setup[@]}"
+[[ ! -e "$config" && ! -e /etc/planner/mongodb-init.json ]]
+printf '%s %s\n' "$app_port" "$db_port" > "$ports_file"
 "${setup[@]}" > "$work/first.json"
 sha256sum --check "$work/interrupted-intent.sha256"
 wait_live
@@ -206,7 +250,24 @@ try {
   const database = client.db('planner');
   const installation = database.collection('installation');
   const key = { _id: 'installation' };
-  if (action !== 'verify') {
+  const recoveryGrants = database.collection('recoveryGrants');
+  if (action === 'consume') {
+    const result = await recoveryGrants.updateOne({ kind: 'first-admin', consumedAt: null },
+      { $set: { consumedAt: new Date() } }, { writeConcern: { w: 1, j: true } });
+    assert.equal(result.modifiedCount, 1);
+  } else if (action === 'consumed') {
+    const grants = await recoveryGrants.find().toArray();
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0].tokenDigest, createHash('sha256').update(report.firstAdminGrant.token).digest('hex'));
+    assert.equal(grants[0].expiresAt.toISOString(), report.firstAdminGrant.expiresAt);
+    assert.ok(grants[0].consumedAt instanceof Date);
+  } else if (action === 'prune-consumed') {
+    const result = await recoveryGrants.deleteOne({ consumedAt: { $type: 'date' } }, { writeConcern: { w: 1, j: true } });
+    assert.equal(result.deletedCount, 1);
+  } else if (action === 'not-reissued') {
+    assert.equal(await recoveryGrants.countDocuments(), 0);
+    assert.ok((await installation.findOne(key)).setup.firstAdminGrantIssuedAt instanceof Date);
+  } else if (action !== 'verify') {
     const installationId = action === 'wrong' ? 'c511939b-a51b-4af0-8e50-c2cf617c1959' : credentials.installationId;
     await installation.updateOne(key, { $set: { installationId } }, { writeConcern: { w: 1, j: true } });
   } else {
@@ -217,7 +278,7 @@ try {
     assert.equal(report.configuration, 'configured');
     assert.equal(report.readiness, 'unavailable');
     assert.equal(report.pendingAction, stored.setup.pendingAction);
-    const grants = await database.collection('recoveryGrants').find().toArray();
+    const grants = await recoveryGrants.find().toArray();
     if (mode === 'fresh') {
       assert.equal(stored.setup.pendingAction, 'first-admin-enrollment');
       assert.equal(grants.length, 1);
@@ -226,6 +287,10 @@ try {
       assert.equal(grants[0].tokenDigest, createHash('sha256').update(report.firstAdminGrant.token).digest('hex'));
       assert.equal(grants[0].expiresAt.toISOString(), report.firstAdminGrant.expiresAt);
       assert.equal(grants[0].consumedAt, null);
+      const intent = JSON.parse(await readFile('/etc/planner/setup-intent.json', 'utf8'));
+      assert.equal(grants[0].expiresAt.getTime() - grants[0].issuedAt.getTime(), 30 * 60 * 1000);
+      assert.ok(grants[0].issuedAt.getTime() - intent.createdAt > 60 * 60 * 1000);
+      assert.equal(stored.setup.firstAdminGrantIssuedAt.getTime(), grants[0].issuedAt.getTime());
       assert.ok(grants[0].expiresAt.getTime() > Date.now());
       assert.ok(grants[0].expiresAt.getTime() - Date.now() <= 30 * 60 * 1000);
       assert.ok(!JSON.stringify(grants).includes(report.firstAdminGrant.token));
@@ -254,13 +319,52 @@ wait_live
 wait_live
 database_setup verify
 
+low_storage() {
+    local scratch=$work/low-storage dir
+    install -d -m 0700 "$scratch"
+    mount -t tmpfs -o size=256m,mode=0711,nodev,nosuid tmpfs "$scratch"
+    cp --preserve=mode,ownership /var/lib/planner/.native-installation "$scratch/"
+    for dir in mongodb blobs staging backups; do
+        mkdir "$scratch/$dir"
+        mount --bind "/var/lib/planner/$dir" "$scratch/$dir"
+    done
+    mount --rbind "$scratch" /var/lib/planner
+    [ "$(df -Pk /var/lib/planner | awk 'END {print $4}')" -lt 524288 ]
+}
+
+normal_storage() {
+    local scratch=$work/low-storage dir
+    for dir in mongodb blobs staging backups; do
+        umount "/var/lib/planner/$dir"
+        umount "$scratch/$dir"
+    done
+    umount /var/lib/planner
+    umount "$scratch"
+}
+
 runuser -u planner -- sh -c 'printf "%s\n" retained > /var/lib/planner/blobs/setup-test'
 /usr/bin/plannerctl stop
 [[ "$(pid planner.service)" = 0 && "$(pid planner-mongodb.service)" = 0 ]]
 expect_failure 'requested package ports differ' env PLANNER_INSTALL_APP_PORT=27430 dpkg -i "$package"
 /usr/bin/plannerctl start
 wait_live
+low_storage
+/usr/bin/plannerctl status --json > "$work/low-storage-status.json"
+/usr/bin/plannerctl stop
+[[ "$(pid planner.service)" = 0 && "$(pid planner-mongodb.service)" = 0 ]]
+expect_failure 'At least 512 MiB must be free on the Planner state filesystem' /usr/bin/plannerctl preflight \
+    --public-url "$origin" --app-port "$app_port" --db-port "$db_port"
+expect_failure 'Planner native database ownership checks failed' /usr/bin/plannerctl start
+normal_storage
+/usr/bin/plannerctl start
+wait_live
+low_storage
 dpkg -r planner-workspace
+normal_storage
+if systemctl is-active --quiet planner.service || systemctl is-active --quiet planner-mongodb.service; then
+    echo 'Planner services are still active after package removal.' >&2
+    exit 1
+fi
 if command -v plannerctl; then
     echo 'Planner CLI still exists after package removal.' >&2
     exit 1
@@ -278,6 +382,21 @@ sha256sum --check "$work/protected-files.sha256"
 [ "$(awk '{print $22}' "/proc/$foreign_pid/stat")" = "$foreign_start" ]
 [ "$(sha256sum "$work/foreign.conf")" = "$foreign_config" ]
 [ "$(foreign_record check)" = "$foreign_id" ]
+if [ "$mode" = fresh ]; then
+    database_setup consume
+    "${setup[@]}" > "$work/consumed.json"
+    python3 - "$work/consumed.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    report = json.load(stream)
+assert 'firstAdminGrant' not in report
+PY
+    database_setup consumed
+    database_setup prune-consumed
+    "${setup[@]}" > "$work/pruned.json"
+    cmp "$work/consumed.json" "$work/pruned.json"
+    database_setup not-reissued
+fi
 /usr/bin/plannerctl status --json > "$work/status.json"
 python3 - "$work/status.json" <<'PY'
 import json, sys

@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { defaultAppPort, type NativeInstallationConfig } from '@planner/contracts';
+import { defaultAppPort, type NativeInstallationConfig } from '@planner/contracts/native';
 import { buildApp } from './build-app.js';
 import { checkMongoReadiness } from './native/mongo-readiness.js';
 import { readInstallationConfig } from './native/setup-state.js';
