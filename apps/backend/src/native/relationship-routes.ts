@@ -28,7 +28,7 @@ export interface WorkspaceRelationships {
 }
 
 export function createWorkspaceRelationships(
-  database: Db, installationId: string, gate: CommandGate, now = () => new Date(),
+  database: Db, installationId: string, gate: CommandGate, now = () => new Date(), onCommitted?: () => void,
 ): WorkspaceRelationships {
   const resolve = (token: string) => resolveBrowserWorkspace(database, installationId, token, now());
   return {
@@ -52,16 +52,19 @@ export function createWorkspaceRelationships(
         }),
       });
       const result = await journal.execute({ actorId, operationId: operation, idempotencyKey, input });
+      onCommitted?.();
       return relationshipCommands[operation].output.parse(result) as RelationshipCommandOutput<K>;
     },
   };
 }
 
-export function createNativeWorkspaceRelationships(config: NativeInstallationConfig, gate: CommandGate): WorkspaceRelationships {
+export function createNativeWorkspaceRelationships(
+  config: NativeInstallationConfig, gate: CommandGate, onCommitted?: () => void,
+): WorkspaceRelationships {
   async function withConnection<T>(use: (relationships: WorkspaceRelationships) => Promise<T>) {
     const client = await connectConfiguredNativeMongo(config);
     try {
-      return await use(createWorkspaceRelationships(client.db(databaseName), config.installationId, gate));
+      return await use(createWorkspaceRelationships(client.db(databaseName), config.installationId, gate, undefined, onCommitted));
     } finally { await client.close(); }
   }
 

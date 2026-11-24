@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
+import type { BoardEventStreams } from './application/board-events/streams.js';
 import { registerFrontendShell } from './frontend-shell.js';
 import { registerAccountRoutes } from './native/account-routes.js';
+import { registerBoardEventRoutes } from './native/board-event-routes.js';
 import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-auth.js';
 import { registerMediaRoutes, type MediaAccess } from './native/media-routes.js';
 import { registerNativeMfaRoutes } from './native/mfa-routes.js';
@@ -10,7 +12,13 @@ import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/ht
 import { registerRelationshipRoutes, type WorkspaceRelationships } from './native/relationship-routes.js';
 import { registerWorkspaceRoutes, type WorkspaceReader } from './native/workspace-routes.js';
 
-type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth; workspace?: WorkspaceReader; relationships?: WorkspaceRelationships; media?: MediaAccess };
+type NativeAuthBoundary = NativeHttpBoundary & {
+  auth: BrowserAuth;
+  workspace?: WorkspaceReader;
+  relationships?: WorkspaceRelationships;
+  media?: MediaAccess;
+  boardEvents?: BoardEventStreams;
+};
 
 export type AppDependencies = {
   frontendRoot?: string;
@@ -30,6 +38,7 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
     if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);
     if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
     if (native.media) registerMediaRoutes(app, native.media);
+    if (native.boardEvents) registerBoardEventRoutes(app, native.boardEvents);
     if (native.workspace) registerWorkspaceRoutes(app, native.workspace);
     if (native.relationships) registerRelationshipRoutes(app, native.relationships);
   }
