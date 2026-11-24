@@ -74,12 +74,13 @@ export function BoardPage() {
 
   useEffect(() => {
     if (!viewKey || explicitView) return;
+    const scope = viewKey;
     function rememberViewOnLink(event: MouseEvent) {
       if (event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
       const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
       if (!(link instanceof HTMLAnchorElement) || (link.target && link.target !== '_self') || link.hasAttribute('download')
           || link.origin !== window.location.origin || link.pathname + link.search === pathname + search) return;
-      saveBoardEntryView(viewKey!, key, view);
+      saveBoardEntryView(scope, key, view);
     }
     document.addEventListener('click', rememberViewOnLink, { capture: true });
     return () => document.removeEventListener('click', rememberViewOnLink, { capture: true });
