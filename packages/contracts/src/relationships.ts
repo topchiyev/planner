@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { affiliationCommands } from './affiliations.js';
 import { cardTransitionCommands } from './card-transitions.js';
 import { cardLifecycleCommands } from './card-lifecycle.js';
 import { boardLifecycleCommands } from './board-lifecycle.js';
@@ -74,6 +75,7 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 }
 
 export const relationshipCommands = {
+  ...affiliationCommands,
   ...listMaintenanceCommands,
   ...cardLifecycleCommands,
   ...cardTransitionCommands,

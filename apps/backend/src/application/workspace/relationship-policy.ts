@@ -23,6 +23,7 @@ const failures = {
   projectName: [422, 'PROJECT_NAME_MISMATCH', 'Enter the project name exactly as displayed.'],
   projectPlacement: [409, 'PROJECT_PLACEMENT', 'Planner could not append this project to the current order.'],
   boardOrder: [409, 'BOARD_ORDER_CONFLICT', 'The board order changed. Reload and try again.'],
+  labelOrder: [409, 'LABEL_ORDER_CONFLICT', 'Planner could not append this label to the current palette order.'],
   listOrder: [409, 'LIST_ORDER_CONFLICT', 'The list order changed. Reload and try again.'],
   listAnchor: [422, 'INVALID_LIST_ANCHOR', 'Choose a different list as the destination.'],
   boardDeleteData: [422, 'BOARD_DELETE_DATA_LIMIT', 'This board has imported data too large to preserve during deletion.'],
@@ -110,7 +111,7 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
 }
 
 export function touchRevision(
-  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists', row: Parameters<typeof rowRevision>[0] & { revision: number },
+  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels', row: Parameters<typeof rowRevision>[0] & { revision: number },
   timestamp: string, expected = row.revision,
 ): Extract<PlannedEffect, { kind: 'update' }> & { revision: number } {
   const revision = requireRevision(row, expected, true)!;

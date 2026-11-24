@@ -9,6 +9,9 @@ import { authorizeProjectDelete, planProjectCreate, planProjectDelete } from './
 import {
   authorizeBoardCreate, authorizeBoardDelete, authorizeBoardManage, planBoardCreate, planBoardDelete, planBoardMove, planBoardUpdate,
 } from './board-lifecycle.js';
+import { authorizeCardAffiliation, authorizeCardAssignment, authorizeCardLabel, planCardAssignment, planCardLabel } from './card-affiliations.js';
+import { authorizeLabelDelete, authorizeLabelEdit, authorizePaletteBoard, planLabelCreate, planLabelDelete, planLabelUpdate } from './label-commands.js';
+import { authorizeBoardFollow, authorizeCardFollow, planPersonalFollow } from './personal-follows.js';
 import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
 import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
 import { authorizeFiniteListDeletion, planFiniteListDeletion } from './finite-list-deletion.js';
@@ -127,6 +130,25 @@ export function createRelationshipJournalOperations(
     'lists.create': define('lists.create', (scope, input) => authorizeListCreate(scope, input.id), planListCreate),
     'lists.update': define('lists.update', (scope, input) => authorizeListEdit(scope, input.id), planListUpdate),
     'lists.move': define('lists.move', authorizeListMove, planListMove),
+    'labels.create': define('labels.create', (scope, input) => authorizePaletteBoard(scope, input.id), planLabelCreate),
+    'labels.update': define('labels.update', (scope, input) => authorizeLabelEdit(scope, input.id), planLabelUpdate),
+    'labels.delete': define('labels.delete', (scope, input) => authorizeLabelDelete(database, scope, input, idempotencyKey), planLabelDelete),
+    'cards.addLabel': define('cards.addLabel', authorizeCardLabel, (records, access, input, context) =>
+      planCardLabel(true, records, access, input, context)),
+    'cards.removeLabel': define('cards.removeLabel', authorizeCardLabel, (records, access, input, context) =>
+      planCardLabel(false, records, access, input, context)),
+    'cards.assign': define('cards.assign', (scope, input) => authorizeCardAssignment(database, scope, input),
+      (records, access, input, context) => planCardAssignment(true, records, access, input, context)),
+    'cards.unassign': define('cards.unassign', authorizeCardAffiliation, (records, access, input, context) =>
+      planCardAssignment(false, records, access, input, context)),
+    'boards.follow': define('boards.follow', (scope, input) => authorizeBoardFollow(scope, input.id),
+      (records, board, input, context) => planPersonalFollow('board', true, records, board, input.expectedRevision, context)),
+    'boards.unfollow': define('boards.unfollow', (scope, input) => authorizeBoardFollow(scope, input.id),
+      (records, board, input, context) => planPersonalFollow('board', false, records, board, input.expectedRevision, context)),
+    'cards.follow': define('cards.follow', (scope, input) => authorizeCardFollow(scope, input.id),
+      (records, card, input, context) => planPersonalFollow('card', true, records, card, input.expectedRevision, context)),
+    'cards.unfollow': define('cards.unfollow', (scope, input) => authorizeCardFollow(scope, input.id),
+      (records, card, input, context) => planPersonalFollow('card', false, records, card, input.expectedRevision, context)),
     'cards.move': define('cards.move', authorizeCardTransition,
       (records, access, input, context) => planCardTransition(database, records, access, { operation: 'cards.move', input }, context)),
     'cards.archive': define('cards.archive', authorizeCardTransition,
