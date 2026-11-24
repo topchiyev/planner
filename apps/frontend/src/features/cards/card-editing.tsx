@@ -5,6 +5,7 @@ import { relationshipCommand } from '../projects/project-api.js';
 import { useWorkspaceMutation } from '../projects/project-controls.js';
 import { workspaceNavigationId, type loadWorkspaceNavigation } from '../workspace/workspace-loaders.js';
 import type { EditorMode } from './card-markdown.js';
+import './card-editor.css';
 
 const CardDescription = lazy(async () => ({ default: (await import('./card-markdown.js')).CardDescription }));
 const CardMarkdownInput = lazy(async () => ({ default: (await import('./card-markdown.js')).CardMarkdownInput }));

@@ -6,7 +6,6 @@ import StarterKit from '@tiptap/starter-kit';
 import { cardMentionToken, maximumCardDescriptionLength } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { MemberPicker, type Mention } from '../affiliations/member-picker.js';
-import './card-editor.css';
 
 export type EditorMode = 'markup' | 'wysiwyg';
 
