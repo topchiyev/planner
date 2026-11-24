@@ -1,5 +1,6 @@
 import { maximumSignedInt64, rankSpacing } from '@planner/contracts/storage';
 import { Long, type Db, type Document } from 'mongodb';
+import { canonicalRow } from '../workspace/records.js';
 import { invalidBaseRow } from './base-fields.js';
 import { compareSourceKeys } from './source-projections.js';
 import type { relationshipRankTables } from './workspace-relationships.js';
@@ -15,6 +16,29 @@ function ordinal(row: OrderRow, spacing: bigint) {
   return result;
 }
 
+// A template and all its instances share definition ranks. A given instance sees a subsequence
+// of that family, so its inherited and local definitions retain the same source position and numeric tie.
+function definitionFamily(generationId: string): Document[] {
+  return [
+    { $lookup: {
+      from: 'importIds',
+      as: 'family',
+      let: { instance: '$order.definitionOwnerInstance' },
+      pipeline: [
+        { $match: { generationId, entity: 'custom_field_group', $expr: { $and: [
+          canonicalRow(generationId),
+          { $eq: ['$sourceId', '$$instance'] },
+          { $eq: [{ $type: '$reference.templateSourceId' }, 'string'] },
+        ] } } },
+        { $limit: 1 },
+        { $project: { _id: 0, template: '$reference.templateSourceId' } },
+      ],
+    } },
+    { $set: { 'order.parent': { $ifNull: [{ $concat: ['template:', { $first: '$family.template' }] }, '$order.parent'] } } },
+    { $unset: 'family' },
+  ];
+}
+
 /** Keep rank sorting in MongoDB, and merge its typed numeric IDs with the bounded verified source pages. */
 export function openBaseOrder(db: Db, generationId: string, table: OrderedTable, after: string | null, kind: 'rank' | 'history') {
   const history = kind === 'history';
@@ -24,6 +48,7 @@ export function openBaseOrder(db: Db, generationId: string, table: OrderedTable,
   const cursor = db.collection('importIds').aggregate<OrderRow>([
     { $match: { generationId, entity: table, ...match } },
     { $project: { _id: 0, order: 1, sourceId: 1, numericId: { $toLong: '$sourceId' } } },
+    ...(table === 'custom_field' ? definitionFamily(generationId) : []),
     { $setWindowFields: {
       partitionBy: history ? '$order.board' : '$order.parent',
       sortBy: order,

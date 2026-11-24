@@ -1,6 +1,7 @@
 import { labelColorSchema } from '@planner/contracts';
 import { cardClosed } from '../workspace/card-state.js';
 import type { WorkspaceRow } from '../workspace/records.js';
+import { MigrationError } from './manifest.js';
 import { invalidBaseRow, targetTimes } from './base-fields.js';
 import type { ImportOrder, ImportProvenance, ImportRecords, ImportReference } from './staged-records.js';
 import type { SourceRow, SourceTable } from './source-projections.js';
@@ -46,12 +47,13 @@ export async function reserveWorkspaceRelationship(store: ImportRecords, entry: 
       order = { parent: row.project_id, position: 0 };
       break;
     case 'custom_field_group':
-      reference = oneOwner(row.board_id, row.card_id, 'board', 'card');
+      reference = { ...oneOwner(row.board_id, row.card_id, 'board', 'card'), templateSourceId: row.base_custom_field_group_id };
       order = { parent: reference.kind + ':' + reference.parent, position: row.position };
       break;
     case 'custom_field':
       reference = oneOwner(row.base_custom_field_group_id, row.custom_field_group_id, 'template', 'instance');
-      order = { parent: reference.kind + ':' + reference.parent, position: row.position };
+      order = { parent: reference.kind + ':' + reference.parent, position: row.position,
+        ...(reference.kind === 'instance' && { definitionOwnerInstance: reference.parent }) };
       break;
     case 'label':
       reference = { parent: row.board_id };
@@ -74,16 +76,23 @@ export async function reserveWorkspaceRelationship(store: ImportRecords, entry: 
   await store.reserve(table, row.id, provenance, order, reference);
 }
 
+async function verifyReservedParent(store: ImportRecords, table: 'label' | 'task_list', sourceId: string, parentSourceId: string) {
+  const match = await store.mapping(table, sourceId);
+  if (match?.reference?.parent !== parentSourceId) {
+    throw new MigrationError('target-write', 'The protected relationship parent does not match the verified source.');
+  }
+}
+
 async function cardBySource(store: ImportRecords, sourceId: string) {
   const card = await store.get('cards', await store.require('card', sourceId));
   if (!card) invalidBaseRow('An owning source card was not staged.');
   return card;
 }
 
-async function checkAssignee(store: ImportRecords, card: WorkspaceRow<'cards'>, sourceId: string) {
+async function directAssignee(store: ImportRecords, card: WorkspaceRow<'cards'>, sourceId: string) {
   const userId = await store.require('user_account', sourceId);
-  if (!await store.eligibleBoardMember(card.boardId, userId)) {
-    invalidBaseRow('A source assignment has no enabled direct member in its owning board.');
+  if (!await store.hasDirectBoardMembership(card.boardId, userId)) {
+    invalidBaseRow('A source assignment has no direct member in its owning board.');
   }
   return userId;
 }
@@ -103,7 +112,7 @@ async function writeTask(store: ImportRecords, id: string, row: SourceRow<'task'
   const checklist = await store.mapping('task_list', row.task_list_id);
   if (!checklist?.reference) invalidBaseRow('A required source checklist is missing.');
   const card = await cardBySource(store, checklist.reference.parent);
-  const assigneeId = row.assignee_user_id === null ? null : await checkAssignee(store, card, row.assignee_user_id);
+  const assigneeId = row.assignee_user_id === null ? null : await directAssignee(store, card, row.assignee_user_id);
   let link;
   if (row.linked_card_id === null) {
     link = { linkedCardId: null, linkedUnavailable: false, name: sourceName(row.name), completed: row.is_completed };
@@ -117,6 +126,10 @@ async function writeTask(store: ImportRecords, id: string, row: SourceRow<'task'
 
 async function writeInstance(store: ImportRecords, id: string, row: SourceRow<'custom_field_group'>, fallback: string, rank: bigint) {
   const owner = oneOwner(row.board_id, row.card_id, 'board', 'card');
+  const reserved = (await store.mapping('custom_field_group', row.id))?.reference;
+  if (reserved?.parent !== owner.parent || reserved.kind !== owner.kind || reserved.templateSourceId !== row.base_custom_field_group_id) {
+    throw new MigrationError('target-write', 'The protected field instance does not match its verified source owner or template.');
+  }
   const scopeType = owner.kind === 'board' ? 'board' : 'card';
   const card = scopeType === 'card' ? await cardBySource(store, owner.parent) : null;
   const boardId = card?.boardId ?? await store.require('board', owner.parent);
@@ -166,7 +179,7 @@ export async function writeWorkspaceRelationship(store: ImportRecords, fallback:
         userId: await store.require('user_account', row.user_id), isPermanent: row.is_permanent });
     case 'card_membership': {
       const card = await cardBySource(store, row.card_id);
-      return store.write('cardAssignees', id, { ...times, cardId: card.id, userId: await checkAssignee(store, card, row.user_id) });
+      return store.write('cardAssignees', id, { ...times, cardId: card.id, userId: await directAssignee(store, card, row.user_id) });
     }
     case 'card_label': {
       const card = await cardBySource(store, row.card_id);
@@ -177,12 +190,14 @@ export async function writeWorkspaceRelationship(store: ImportRecords, fallback:
       return store.write('cardLabels', id, { ...times, cardId: card.id, labelId: label.id });
     }
     case 'label': {
+      await verifyReservedParent(store, table, row.id, row.board_id);
       const color = labelColorSchema.safeParse(row.color);
       if (!color.success) invalidBaseRow('A source label has an unsupported color.');
       return store.write('labels', id, { ...times, boardId: await store.require('board', row.board_id), rank: requireRank(rank),
         name: row.name === null ? null : sourceName(row.name), color: color.data });
     }
     case 'task_list':
+      await verifyReservedParent(store, table, row.id, row.card_id);
       return store.write('checklists', id, { ...times, cardId: (await cardBySource(store, row.card_id)).id, rank: requireRank(rank),
         name: sourceName(row.name), showOnFront: row.show_on_front_of_card, hideCompleted: row.hide_completed_tasks, orderVersion: 1 });
     case 'task':
