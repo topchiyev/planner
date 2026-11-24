@@ -1,5 +1,5 @@
 import {
-  boardDeleteReceipt, fieldDefinitionDeleteReceipt, fieldGroupDeleteReceipt, fieldCommands, checklistDeleteReceipt, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
+  boardDeleteReceipt, fieldDefinitionDeleteReceipt, fieldGroupDeleteReceipt, fieldCommands, checklistDeleteReceipt, removedComment, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
   type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
@@ -139,7 +139,7 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             const quoted = typeof header === 'string' ? /^"(0|[1-9]\d{0,15})"$/u.exec(header) : null;
             if (!key.success || Object.hasOwn(values, 'expectedRevision')) return badInput(request, reply);
             const argumentsForCommand: Record<string, unknown> = { ...params, ...values };
-            if (operation.target === 'create') {
+            if (operation.target === 'create' || operation.target === 'unversioned') {
               if (header !== undefined) return badInput(request, reply);
             } else {
               if (!quoted) return badInput(request, reply);
@@ -170,6 +170,8 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
                 reply.header(relationshipParentRevisionHeader, fieldDefinitionDeleteReceipt.parse(result).data.parentRevision);
               } else if (operation.id === 'fields.clearValue') {
                 reply.header(relationshipParentRevisionHeader, fieldCommands[operation.id].output.parse(result).data.revision);
+              } else if (operation.id === 'comments.delete') {
+                reply.header(relationshipParentRevisionHeader, removedComment.parse(result).data.cardRevision);
               } else if (operation.id === 'tasks.delete') {
                 reply.header(relationshipParentRevisionHeader, taskDeleteReceipt.parse(result).data.checklist.revision);
               } else if (operation.target === 'edge') {

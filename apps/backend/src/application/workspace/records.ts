@@ -54,8 +54,11 @@ interface Records {
   fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean };
   fieldValues: { cardId: string; fieldGroupId: string; fieldDefinitionId: string; value: string };
   comments: { boardId: string; cardId: string; authorId?: string | null; text: string };
-  activities: { boardId: string; cardId?: string | null };
-  notifications: { boardId?: string | null; cardId?: string | null };
+  activities: { boardId?: string | null; cardId?: string | null; kind?: string; actorId?: string | null };
+  notifications: {
+    boardId?: string | null; cardId?: string | null; kind?: string; recipientId?: string | null; actorId?: string | null;
+    commentId?: string | null; activityId?: string | null; readAt?: Date | null;
+  };
   attachments: { cardId: string; name: string; kind: 'file' | 'link'; byteLength?: number | null; blobDigest?: string | null; url?: string | null; availability?: string | null; deletedAt?: Date | null };
   blobs: { digest: string; lifecycleState: string; byteLength: number };
   events: { boardId: string; sequence: Long };

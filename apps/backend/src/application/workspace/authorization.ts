@@ -152,7 +152,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
   const membershipRow = (board: Board) => records.first('boardMembers', { boardId: board.id, ...actorMember(board.id) });
 
   // Match a linked target inside a paginated board query without inspecting private rows in the result.
-  function readableCardLookup(as: string, from: string) {
+  function readableCardLookup(as: string, from: string, summary = false) {
     return records.lookup('cards', as, { targetId: from }, {
       $expr: { $and: [canonical, equal('id', '$$targetId')] },
     }, [
@@ -182,7 +182,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
         { $project: { _id: 1 } },
       ]),
       { $match: { 'readableTargetBoard.0': { $exists: true } } },
-      { $project: { _id: 1 } },
+      { $project: summary ? { _id: 0, id: 1, name: 1, boardId: 1, kind: 1 } : { _id: 1 } },
     ]);
   }
 

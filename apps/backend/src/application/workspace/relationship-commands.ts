@@ -14,6 +14,9 @@ import { authorizeLabelDelete, authorizeLabelEdit, authorizePaletteBoard, planLa
 import { authorizeBoardFollow, authorizeCardFollow, planPersonalFollow } from './personal-follows.js';
 import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
 import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
+import { authorizeCommentCreate, authorizeCommentDelete, authorizeCommentEdit,
+  planCommentCreate, planCommentDelete, planCommentUpdate } from './comment-commands.js';
+import { authorizeNotificationUpdate, planNotificationUpdate, planReadNotifications } from './notification-commands.js';
 import { authorizeCardTransfer, planCrossBoardCardMove, planDuplicateCard } from './card-transfer.js';
 import { finiteList } from './card-history.js';
 import { authorizeTransferReplay, captureTransferReplay } from './transfer-replay.js';
@@ -142,6 +145,16 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'comments.create': define('comments.create', (scope, input) => authorizeCommentCreate(scope, input.id), planCommentCreate),
+    'comments.update': define('comments.update', (scope, input) => authorizeCommentEdit(scope, input.id), planCommentUpdate),
+    'comments.delete': define('comments.delete', (scope, input) =>
+      authorizeCommentDelete(database, scope, input, idempotencyKey), planCommentDelete),
+    'notifications.update': define('notifications.update', (scope, input) =>
+      authorizeNotificationUpdate(database, scope, input.id), planNotificationUpdate),
+    'notifications.readAll': define('notifications.readAll', async () => null,
+      (records, card, _input, context, actor) => planReadNotifications(records, card, actor, context)),
+    'notifications.readCard': define('notifications.readCard', (scope, input) => scope.requireCard(input.id),
+      (records, card, _input, context, actor) => planReadNotifications(records, card, actor, context)),
     'fields.createTemplate': define('fields.createTemplate', (scope, input) => authorizeFieldOwner(scope, 'project', input.id), planFieldGroupCreate),
     'fields.createGroup': define('fields.createGroup', (scope, input) => authorizeFieldOwner(scope, input.scopeType, input.id), planFieldGroupCreate),
     'fields.updateGroup': define('fields.updateGroup', (scope, input) => authorizeGroupEdit(scope, input.id), planFieldGroupUpdate),
