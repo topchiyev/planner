@@ -35,7 +35,7 @@ interface Records {
   lists: Ordered & { boardId: string; kind: ListKind; transferredAcrossBoards?: boolean; orderVersion?: number; color?: ListColor | null };
   cards: Ordered & {
     fieldGroupOrderVersion?: number; transferredAcrossBoards?: boolean; boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
-    description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
+    description?: string | null; creatorId?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
     dueDateCompleted?: boolean | null; isDueCompleted?: boolean | null; stopwatch?: unknown; checklistOrderVersion?: number;
     listChangedAt?: Date | null; historySequence?: Long; coverAttachmentId?: string | null;
   };

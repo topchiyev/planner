@@ -238,11 +238,18 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const board = resolved ?? await access.requireBoard(input.id);
       const { selected, page, counts, searchValidation } = await selectBoardCards(records, access, board, input);
       const ids = selected.map(({ id }) => id);
-      const [front, fields, covers] = await together([
+      const [front, fields, covers, creators] = await together([
         checklistReads.front(ids, board.board.id), frontFields(board, ids), cardCovers(records, generationId, selected),
+        (async () => {
+          const ids = [...new Set(selected.flatMap(({ creatorId }) => publicIdSchema.safeParse(creatorId).success ? [creatorId!] : []))];
+          if (!ids.length || !boardPreferences(board.board, await boardPreferencesRow(records, generationId, board.board.id)).showCreator) return [];
+          return eligibleBoardPeople(records, generationId, board.board.id, { id: { $in: ids } });
+        })(),
       ]);
+      const creatorsById = new Map(creators.map((creator) => [creator.id, creator]));
       return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front.get(row.id) ?? [],
-        frontFields: fields.get(row.id) ?? [], cover: covers.get(row.id) ?? null })),
+        frontFields: fields.get(row.id) ?? [], cover: covers.get(row.id) ?? null,
+        creator: row.creatorId ? creatorsById.get(row.creatorId) ?? null : null })),
         counts, page, searchValidation };
     },
 

@@ -123,8 +123,8 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
         if (revoked) streams.disconnectToken(token);
         return revoked;
       },
-      async read(token) {
-        const session = await sessions.read(token);
+      async read(token, activity) {
+        const session = await sessions.read(token, activity);
         await beforeAdmission?.({ session, db, gate, generationId });
         return session;
       },

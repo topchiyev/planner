@@ -82,6 +82,8 @@ export function createBrowserSessions(
   const sessions = database.collection<SessionRecord>('sessions');
   const activeGeneration = () => activeAccountGeneration(database, installationId);
   const loadCurrent = (token: string) => loadCurrentBrowserSession(database, installationId, token, now());
+  const browserSession = (current: NonNullable<Awaited<ReturnType<typeof loadCurrent>>>, token: string): BrowserSession =>
+    ({ status: 'authenticated', account: current.account.actor, csrfToken: csrfToken(token) });
 
   async function createSession(
     generationId: string, account: NonNullable<ReturnType<typeof getLocalAccount>>, time: Date, factorId?: string,
@@ -150,13 +152,17 @@ export function createBrowserSessions(
       });
     },
 
-    read(token: string) {
+    read(token: string, activity: 'active' | 'passive' = 'active') {
+      if (activity === 'passive') return gate.readSnapshot(async () => {
+        const current = await loadCurrent(token);
+        return current && current.deadline > now().getTime() ? browserSession(current, token) : null;
+      });
       return gate.runCommand(async (): Promise<BrowserSession | null> => {
         const current = await loadCurrent(token);
         if (!current) return null;
         const touched = await sessions.updateOne(current.match, { $max: { lastActivityAt: current.time } }, durable);
         assertChanged(touched.matchedCount);
-        return { status: 'authenticated', account: current.account.actor, csrfToken: csrfToken(token) };
+        return browserSession(current, token);
       });
     },
 

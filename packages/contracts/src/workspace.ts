@@ -164,7 +164,7 @@ export const workspaceOperations = {
     context: workspaceCardContext.default('board'), q: boardSearchQuery.default(''),
     labelsAny: boardQueryIds.default([]), labelsNone: boardQueryIds.default([]), members: boardQueryIds.default([]),
     listIds: boardQueryIds.default([]), unassigned: queryBoolean.default(false), ...pageQuery,
-  }), page(cardSummarySchema.extend({ cover: z.strictObject({ attachmentId: publicIdSchema, hasThumbnail: z.boolean() }).nullable(), frontChecklists: z.array(frontChecklistSchema).max(3), frontFields: z.array(z.strictObject({
+  }), page(cardSummarySchema.extend({ creator: workspacePersonSchema.nullable(), cover: z.strictObject({ attachmentId: publicIdSchema, hasThumbnail: z.boolean() }).nullable(), frontChecklists: z.array(frontChecklistSchema).max(3), frontFields: z.array(z.strictObject({
     fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, name: z.string(), value: z.string(),
   })) })).extend({
     counts: z.array(z.strictObject({ listId: publicIdSchema, count: nonnegative })),
