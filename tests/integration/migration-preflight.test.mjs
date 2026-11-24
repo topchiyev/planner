@@ -140,6 +140,9 @@ test('both synthetic restored tags match the native-source preflight through a t
     postgres.write(database, 'GRANT UPDATE(name) ON public.board TO fixture_reader');
     await assert.rejects(inspectMigration(request, owner, config), refuses('source-role'));
     postgres.write(database, 'REVOKE UPDATE(name) ON public.board FROM fixture_reader');
+    postgres.write(database, 'REVOKE SELECT ON public.card FROM fixture_reader; GRANT SELECT(id) ON public.card TO fixture_reader');
+    await assert.rejects(inspectMigration(request, owner, config), refuses('source-role'));
+    postgres.write(database, 'REVOKE SELECT(id) ON public.card FROM fixture_reader; GRANT SELECT ON public.card TO fixture_reader');
     postgres.write(database, 'ALTER TABLE public.board ADD COLUMN drift text');
     await assert.rejects(inspectMigration(request, owner, config), refuses('source-catalog'));
     postgres.write(database, 'ALTER TABLE public.board DROP COLUMN drift');

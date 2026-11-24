@@ -144,6 +144,9 @@ source_service=source-231
 sql "$db" -c 'GRANT UPDATE(name) ON public.board TO fixture_reader'
 refuses source-role preflight_directory "$prepared" "$source_service"
 sql "$db" -c 'REVOKE UPDATE(name) ON public.board FROM fixture_reader'
+sql "$db" -c 'REVOKE SELECT ON public.card FROM fixture_reader; GRANT SELECT(id) ON public.card TO fixture_reader'
+refuses source-role preflight_directory "$prepared" "$source_service"
+sql "$db" -c 'REVOKE SELECT(id) ON public.card FROM fixture_reader; GRANT SELECT ON public.card TO fixture_reader'
 sql "$db" -c 'ALTER TABLE public.board ADD COLUMN unsupported text'
 refuses source-catalog preflight_directory "$prepared" "$source_service"
 sql "$db" -c 'ALTER TABLE public.board DROP COLUMN unsupported'
