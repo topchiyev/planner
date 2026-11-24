@@ -157,7 +157,7 @@ export function BoardLists({ workspace, lists, counts, kanban = false, renderCon
   const dragContents = <>
     <ul className={'workspace-list-summary board-editable-lists' + (kanban ? ' board-kanban-columns' : '')} aria-label="Board lists">
       {lists.map((list) => <EditableList key={list.id} list={list} count={counts ? counts.get(list.id) ?? 0 : undefined} busy={action.busy} dragging={dragging}
-        showCount={workspace.preferences.showCardCount} allowDrag={kanban && lists.length > 1} edit={() => {
+        showCount={workspace.preferences.showCardCount} allowDrag={lists.length > 1} edit={() => {
           action.clearProblem(); setMessage(''); setDialog({ kind: 'edit', listId: list.id });
         }} move={() => {
           const captured = snapshot(list.id);

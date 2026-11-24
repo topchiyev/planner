@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect } from 'react';
+import { useEffect, useLayoutEffect, useMemo } from 'react';
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRouteLoaderData, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
@@ -12,7 +12,7 @@ import { ActivityFeed } from '../discussions/feed.js';
 import { BoardFilters } from './board-filters.js';
 import { BoardCards, cardOpenerId, getCardOpener, type BoardView } from '../cards/board-cards.js';
 import { BoardRefreshContext } from './board-refresh.js';
-import { readBoardView, saveBoardView } from './board-filter-store.js';
+import { readBoardEntryView, readBoardView, saveBoardEntryView, saveBoardView } from './board-filter-store.js';
 import { useLiveBoard, type LiveBoard, type LiveCard } from './use-live-board.js';
 
 export type BoardInspectorContext = { board: LiveBoard | null | undefined; liveCard: LiveCard | undefined };
@@ -54,8 +54,9 @@ export function BoardPage() {
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
   const viewKey = board && [board.recipeScope, board.board.id, context.id].join('/');
   const explicitView = availableViews.find(({ id }) => id === params.get('view'))?.id;
+  const entryView = useMemo(() => viewKey && readBoardEntryView(viewKey, key), [viewKey, key]);
   const storedView = viewKey && readBoardView(viewKey);
-  const view = explicitView ?? availableViews.find(({ id }) => id === storedView)?.id ?? defaultView;
+  const view = explicitView ?? availableViews.find(({ id }) => id === (entryView ?? storedView))?.id ?? defaultView;
 
   useEffect(() => {
     if (viewKey && explicitView) saveBoardView(viewKey, explicitView);
@@ -70,6 +71,20 @@ export function BoardPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [inspectorOpen, concealed, board?.recipeScope, pathname, search, key, routeState?.cardReturnKey]);
+
+  useEffect(() => {
+    if (!viewKey || explicitView) return;
+    const scope = viewKey;
+    function rememberViewOnLink(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+      if (!(link instanceof HTMLAnchorElement) || (link.target && link.target !== '_self') || link.hasAttribute('download')
+          || link.origin !== window.location.origin || link.pathname + link.search === pathname + search) return;
+      saveBoardEntryView(scope, key, view);
+    }
+    document.addEventListener('click', rememberViewOnLink, { capture: true });
+    return () => document.removeEventListener('click', rememberViewOnLink, { capture: true });
+  }, [viewKey, explicitView, key, view, pathname, search]);
 
   function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: BoardView) {
     const nextParams = new URLSearchParams(params);

@@ -74,8 +74,8 @@ export function BoardCards({ workspace, lists, context, view, removed }: {
     {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} counts={counts} kanban={kanban} renderContents={contents}
       wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={cards}>{children}{display}</BoardCardPlacement>} />
       : <>
-        {(context === 'board' || workspace.preferences.showCardCount) && <ReadonlyBoardLists lists={lists} counts={counts}
-          showCount={workspace.preferences.showCardCount} kanban={kanban} renderContents={kanban ? contents : undefined} />}
+        <ReadonlyBoardLists lists={lists} counts={counts}
+          showCount={workspace.preferences.showCardCount} kanban={kanban} renderContents={kanban ? contents : undefined} />
         {display}
       </>}
     {(workspace.recipeCursor || current.page.nextCursor) && <nav aria-label="Card pages" className="workspace-pagination">

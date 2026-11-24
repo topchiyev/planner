@@ -428,6 +428,9 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     const href = await dispatch.getAttribute('href');
     await dispatch.click();
     await expect(main.getByRole('heading', { name: 'Morning dispatch', level: 1 })).toBeVisible();
+    await owner.reload();
+    await expect(main.getByRole('navigation', { name: 'Board view' }).getByRole('link', { name: 'Kanban' }))
+      .toHaveAttribute('aria-current', 'page');
     await main.getByRole('button', { name: 'Board settings', exact: true }).click();
     const settings = owner.getByRole('dialog', { name: 'Board settings' });
     await settings.getByLabel('Default view').selectOption('grid');
@@ -453,7 +456,10 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     await owner.reload();
     await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.goBack();
+    await expect(owner).toHaveURL((url) => !url.searchParams.has('view'));
     await expect(view.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
+    await owner.goto(origin + href + '?view=list');
+    await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await main.getByRole('button', { name: 'Board settings', exact: true }).click();
     await expect(settings.getByLabel('Default view')).toHaveValue('grid');
     await expect(settings.getByLabel('Restrict card type')).toHaveValue('story');
@@ -1445,16 +1451,29 @@ test('native card media keeps files private, manages covers by revision and open
       await secondEditor.goto(path);
       await expect(file(secondEditor, 'sample.png').getByText('Cover', { exact: true })).toBeVisible();
 
-      await otherImage.getByRole('button', { name: 'Use sample.jpeg as cover' }).click();
-      await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
-      const secondImageId = (await stored()).coverAttachmentId;
-      assert.notEqual(secondImageId, firstImageId);
-      const [stale] = await Promise.all([
-        secondEditor.waitForResponse((response) =>
-          response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard)),
-        panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click(),
-      ]);
-      assert.equal(stale.status(), 409);
+      const coverRevision = (await stored()).revision;
+      const requested = Promise.withResolvers();
+      const releaseCover = Promise.withResolvers();
+      const coverPath = '**/api/v1/cards/' + ids.activeCard;
+      await secondEditor.route(coverPath, async (intercepted) => {
+        if (intercepted.request().method() === 'PATCH') {
+          requested.resolve(intercepted.request().headers()['if-match']);
+          await releaseCover.promise;
+        }
+        await intercepted.continue().catch(() => {});
+      });
+      const staleResponse = secondEditor.waitForResponse((response) =>
+        response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard));
+      try {
+        await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
+        assert.equal(await requested.promise, '"' + coverRevision + '"');
+        await otherImage.getByRole('button', { name: 'Use sample.jpeg as cover' }).click();
+        await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
+        const secondImageId = (await stored()).coverAttachmentId;
+        assert.notEqual(secondImageId, firstImageId);
+      } finally { releaseCover.resolve(); }
+      assert.equal((await staleResponse).status(), 409);
+      await secondEditor.unroute(coverPath);
       await expect(panel(secondEditor).getByRole('alert')).toContainText('Review the current information');
       await expect(file(secondEditor, 'sample.jpeg').getByText('Cover', { exact: true })).toBeVisible();
       await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
@@ -1963,6 +1982,12 @@ test('native board layouts share card placement, preference display, and paged i
     assert.equal(new URL(editor.url()).search, paged);
     await cardLink.click();
     await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
+    const inspectorViews = editor.getByRole('navigation', { name: 'Board view' });
+    await inspectorViews.getByRole('link', { name: 'List' }).click();
+    await expect(inspectorViews.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await editor.goBack();
+    await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
+    await expect(inspectorViews.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     await editor.goBack();
     await expect(cardLink).toBeFocused();
     await cardGrid.getByRole('button', { name: 'Move card Layout second card' }).press('Enter');
@@ -1981,6 +2006,13 @@ test('native board layouts share card placement, preference display, and paged i
     await editor.getByRole('link', { name: 'Archive', exact: true }).click();
     await expect(views.getByRole('link', { name: 'Kanban' })).toHaveCount(0);
     await expect(views.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await views.getByRole('link', { name: 'Grid' }).click();
+    await expect(views.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
+    await editor.getByRole('link', { name: 'Trash', exact: true }).click();
+    await expect(views.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await editor.getByRole('link', { name: 'Archive', exact: true }).click();
+    await expect(views.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
+    await expect(editor).toHaveURL((url) => !url.searchParams.has('view'));
 
     await signIn(narrow, origin, 'viewer');
     await narrow.goto(path + '/cards/' + after + '?view=list');
