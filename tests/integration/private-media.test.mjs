@@ -489,3 +489,28 @@ test('deleting a board removes only its attachment references and preserves shar
     assert.equal(await f.db.collection('blobs').countDocuments({ digest: checksum(bytes) }), 1);
   });
 });
+
+test('historical cards retain authenticated exact file bytes while ordinary mutations are denied', { timeout: 100_000 }, async () => {
+  await withMedia(async (f) => {
+    const editor = await login(f, ids.firstEditor);
+    const viewer = await login(f, ids.viewer);
+    const outsider = await login(f, ids.unrelated);
+    const card = cardPath(ids.activeCard);
+    const original = Buffer.from([0x00, 0x7f, 0xfe, 0x41]);
+    const created = await upload(f, card + '/attachment-files', editor, 1, original, 'historical.dat');
+    assert.equal(created.status, 201);
+    const ref = filePath(created.data.data.reference.id);
+    const archive = await f.call(card + '/archive', editor, { method: 'POST', headers: expected(editor, 2),
+      body: { sourceOrderVersion: 1, destinationOrderVersion: 1 } });
+    assert.equal(archive.status, 200, JSON.stringify(archive.data));
+    assert.equal((await f.call(card, viewer)).data.data.attachments[0].available, true);
+    const full = await socket(f, ref + '/download', viewer);
+    assert.deepEqual([full.status, full.bytes], [200, original]);
+    assert.equal((await socket(f, ref + '/download', outsider, { method: 'HEAD', headers: { Range: 'bytes=0-1', 'If-None-Match': '*' } })).status, 404);
+    assert.equal((await f.call(ref, editor, { method: 'PATCH', headers: expected(editor, 1), body: { name: 'Historical edit' } })).status, 403);
+    const restore = await f.call(card + '/restore', editor, { method: 'POST', headers: expected(editor, 3),
+      body: { sourceOrderVersion: 2, destinationOrderVersion: 2 } });
+    assert.equal(restore.status, 200, JSON.stringify(restore.data));
+    assert.equal((await f.call(ref, editor, { method: 'PATCH', headers: expected(editor, 1), body: { name: 'Restored file' } })).status, 200);
+  });
+});

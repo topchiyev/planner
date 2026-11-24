@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
+import { BoardCardPlacement, CardAppendTarget, DraggableBoardCard } from './card-placement-dnd.js';
+import { DeleteList } from '../lists/delete-list.js';
 import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-lists.js';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceDialog, useWorkspaceMutation } from '../projects/project-controls.js';
@@ -49,7 +51,8 @@ export function BoardCards({ workspace, lists, context }: { workspace: Workspace
   }
 
   return <>
-    {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} renderContents={renderContents} /> :
+    {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} renderContents={renderContents}
+      wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={current.data}>{children}</BoardCardPlacement>} /> :
       <ReadonlyBoardLists lists={lists} renderContents={renderContents} />}
     {problem && <p className="workspace-problem" role="alert">{problem}</p>}
     {current.page.nextCursor && <button className="workspace-button" type="button" disabled={loading} onClick={() => void loadMore()}>Load more cards</button>}
@@ -62,12 +65,18 @@ function CardsInList({ workspace, list, cards, editable, search }: {
   const [creating, setCreating] = useState(false);
   return <>
     {cards.length > 0 && <ul className="board-cards" aria-label={'Cards in ' + list.name}>
-      {cards.map((card) => <li key={card.id}><Link to={{ pathname: cardPath(card.boardId, card.id), search }}>{card.name}</Link>
-        {card.closed && <span>Closed</span>}
-      </li>)}
+      {cards.map((card) => {
+        const content = <><Link to={{ pathname: cardPath(card.boardId, card.id), search }}>{card.name}</Link>
+          {card.closed && <span>Closed</span>}</>;
+        return editable ? <DraggableBoardCard card={card} key={card.id}>{content}</DraggableBoardCard> : <li key={card.id}>{content}</li>;
+      })}
     </ul>}
-    {editable && <button className="workspace-button board-add-card" type="button" aria-label={'Add card to ' + list.name}
-      onClick={() => setCreating(true)}>Add card</button>}
+    {editable && <CardAppendTarget listId={list.id} />}
+    {editable && <div className="project-actions">
+      <button className="workspace-button board-add-card" type="button" aria-label={'Add card to ' + list.name}
+        onClick={() => setCreating(true)}>Add card</button>
+      <DeleteList workspace={workspace} list={list} />
+    </div>}
     {editable && creating && <CreateCardDialog workspace={workspace} list={list} cards={cards} close={() => setCreating(false)} />}
   </>;
 }
