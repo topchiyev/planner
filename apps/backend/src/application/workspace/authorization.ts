@@ -37,7 +37,10 @@ function reference(value: unknown) {
   return found(id.success ? id.data : null);
 }
 
-const ownerlessSharedProject = { type: 'shared', ownerProjectManagerId: { $type: 'null' } } as const;
+const ownerlessSharedProject = { $expr: { $and: [
+  { $eq: ['$type', 'shared'] }, { $eq: [{ $type: '$ownerProjectManagerId' }, 'null'] },
+] } };
+const directRole = { $in: ['$role', ['editor', 'viewer']] };
 const isDirectMember = (member: WorkspaceRow<'boardMembers'> | null) => member?.role === 'editor' || member?.role === 'viewer';
 
 type Project = WorkspaceRow<'projects'>;
@@ -135,7 +138,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
   }
 
   const managerRow = (project: Project) => records.first('projectManagers', { projectId: project.id, userId: principal.id });
-  const membershipRow = (board: Board) => records.first('boardMembers', { boardId: board.id, userId: principal.id, role: { $in: ['editor', 'viewer'] } });
+  const membershipRow = (board: Board) => records.first('boardMembers', { boardId: board.id, userId: principal.id, $expr: directRole });
 
   function visibleBoards(project: ProjectAccessContext) {
     if (project.manager || project.sharedAdmin) {
@@ -143,7 +146,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     }
     return records.aggregate<Board>('boards', { projectId: project.project.id }, [
       records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, {
-        userId: principal.id, role: { $in: ['editor', 'viewer'] }, $expr: { $eq: ['$boardId', '$$boardId'] },
+        userId: principal.id, $expr: { $and: [{ $eq: ['$boardId', '$$boardId'] }, directRole] },
       }, [{ $limit: 1 }]),
       { $match: { 'actorMembership.0': { $exists: true } } },
       { $sort: rankSort },
@@ -171,7 +174,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
         $expr: { $eq: ['$projectId', '$$projectId'] },
       }, [
         records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, {
-          userId: principal.id, role: { $in: ['editor', 'viewer'] }, $expr: { $eq: ['$boardId', '$$boardId'] },
+          userId: principal.id, $expr: { $and: [{ $eq: ['$boardId', '$$boardId'] }, directRole] },
         }, [{ $limit: 1 }]),
         { $match: { 'actorMembership.0': { $exists: true } } },
         { $limit: 1 },

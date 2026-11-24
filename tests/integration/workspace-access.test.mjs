@@ -39,6 +39,10 @@ test('protected workspace endpoints enforce ownership, hidden context, independe
         type: 'project', kind: 'trash', rank: null, name: 'Shared historical card' });
       await f.insert('boards', sibling, { projectId: ids.privateProject, name: 'Private sibling secret', rank: '2048' });
       await f.insert('projectFavorites', fixtureId(703), { projectId: ids.hiddenProject, userId: ids.admin });
+      const invalidOwner = fixtureId(706);
+      await f.insert('projects', invalidOwner, { name: 'Invalid owner must stay private to outsiders', type: 'shared', hidden: false,
+        ownerProjectManagerId: [null, ids.privateOwnerManager], rank: '0' });
+      await f.insert('boardMembers', fixtureId(707), { boardId: ids.privateBoard, userId: ids.admin, role: ['viewer'], canComment: true });
       const admin = await actor(f, ids.admin);
       const owner = await actor(f, ids.privateOwner);
       const manager = await actor(f, ids.projectManager);
@@ -52,6 +56,7 @@ test('protected workspace endpoints enforce ownership, hidden context, independe
       assert.equal((await f.call(projects, admin, { headers: { 'X-Forwarded-Host': 'foreign.invalid' } })).status, 401);
 
       assert.equal((await f.call(projects + '/' + ids.privateProject, admin)).status, 404);
+      assert.equal((await f.call(projects + '/' + invalidOwner, admin)).status, 404);
       assert.equal((await f.call(boardPath(ids.privateBoard), admin)).status, 404);
       assert.equal((await f.call(cardPath(ids.activeCard), admin)).status, 404);
       const missing = await f.call(boardPath(fixtureId(999)), admin);
