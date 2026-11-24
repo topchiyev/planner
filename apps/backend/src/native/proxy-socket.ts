@@ -7,7 +7,8 @@ export const proxyRuntimeDirectory = '/run/planner-proxy';
 
 export async function startProxySocket(directory: string, app: FastifyInstance) {
   await app.ready();
-  const server = createServer((request, reply) => {
+  // The trusted proxy can forward a complete board filter sign-in URL plus its headers.
+  const server = createServer({ maxHeaderSize: 32 * 1024 }, (request, reply) => {
     markProxyRequest(request);
     app.routing(request, reply);
   });
