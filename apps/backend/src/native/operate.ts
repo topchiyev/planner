@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
+import { get } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { PLANNER_VERSION } from '@planner/contracts';
@@ -7,17 +8,20 @@ import {
   nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
 } from '@planner/contracts/native';
 import type { MongoClient } from 'mongodb';
+import { firstAdminBinding } from '../application/auth/first-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
-  currentStorageSchema, migrateStorageSchema, readInstallation, StorageSchemaError, verifyStorageSchema,
+  currentStorageSchema, migrateStorageSchema, readInstallation, requireCurrentSchema, StorageSchemaError, verifyStorageSchema,
   type InstallationDocument,
 } from '../storage/schema.js';
 import {
   checkDirectory, checkReceipt, ensureNativeMongo, inspectNativeMongo, packageAccount, readProtectedFile,
   stopNativeMongoBootstrap,
 } from './mongo-host.js';
+import { adminRuntimeDirectory } from './admin-socket.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
+import type { RuntimeAccess } from './runtime-access.js';
 import {
   checkPackagePorts, createSetupIntent, pendingAction, persistSetup, publishInstallationConfig, readInstallationConfig,
   readPersistedSetup, readSetupIntent, sameSetup,
@@ -43,7 +47,7 @@ function verifyOwnership() {
   if (process.getuid?.() !== 0) throw new NativeMongoError('Planner operator commands require root.');
   command(preflight, ['ownership'], 'Planner native ownership checks failed.');
   checkDirectory(statePath, 0, 0, 0o711);
-  return { receipt: checkReceipt(), appGroup: packageAccount('-g', 'planner') };
+  return { receipt: checkReceipt(), appGroup: packageAccount('-g', 'planner'), appUid: packageAccount('-u', 'planner') };
 }
 
 async function withInstallationLock<T>(callback: (owner: ReturnType<typeof verifyOwnership>) => Promise<T>) {
@@ -146,7 +150,55 @@ function verifySetupFiles(
   checkPackagePorts(intent?.options, !!config);
 }
 
-function status(owner: ReturnType<typeof verifyOwnership>) {
+async function appAccess(owner: ReturnType<typeof verifyOwnership>) {
+  try {
+    const run = lstatSync('/run');
+    if (!run.isDirectory() || run.uid !== 0 || run.gid !== 0 || (run.mode & 0o022) !== 0) return undefined;
+    checkDirectory(adminRuntimeDirectory, owner.appUid, owner.appGroup, 0o750);
+    const socketPath = `${adminRuntimeDirectory}/admin.sock`;
+    const stat = lstatSync(socketPath);
+    if (!stat.isSocket() || stat.uid !== owner.appUid || stat.gid !== owner.appGroup
+        || stat.nlink !== 1 || (stat.mode & 0o7777) !== 0o600) return undefined;
+    const signal = AbortSignal.timeout(3_500);
+    return await new Promise<RuntimeAccess | undefined>((resolve) => {
+      const request = get({ socketPath, path: '/status', signal }, (response) => {
+        void (async () => {
+          let body = '';
+          response.setEncoding('utf8');
+          for await (const chunk of response) {
+            body += chunk;
+            if (body.length > 1024) return undefined;
+          }
+          const result = response.statusCode === 200 ? JSON.parse(body) as { access?: RuntimeAccess } : null;
+          return result?.access;
+        })().then(resolve, () => resolve(undefined));
+      });
+      request.once('error', () => resolve(undefined));
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function storedPendingAction(config: NativeInstallationConfig, appGroup: number) {
+  try {
+    const client = await connectOwnedDatabase(config, appGroup);
+    try {
+      const installation = await readInstallation(client.db(databaseName), config.installationId);
+      requireCurrentSchema(installation);
+      if (installation.setup?.mode !== config.mode) return undefined;
+      const binding = firstAdminBinding(installation);
+      if (binding) return binding.published ? 'complete' : 'first-admin-enrollment';
+      if (installation.activeGenerationId === null && installation.setup.pendingAction === 'migration-preflight') {
+        return 'migration-preflight';
+      }
+    } finally { await client.close(); }
+  } catch {
+    // A configured but unverified installation reports unknown setup state.
+  }
+}
+
+async function status(owner: ReturnType<typeof verifyOwnership>, confirmed?: boolean) {
   const config = readInstallationConfig(owner.appGroup);
   const intent = readSetupIntent(owner.receipt);
   verifySetupFiles(config, intent);
@@ -154,13 +206,22 @@ function status(owner: ReturnType<typeof verifyOwnership>) {
     const state = systemctl('show', '--property=ActiveState', '--value', unit);
     return ['active', 'inactive', 'activating', 'deactivating', 'failed'].includes(state) ? state : 'unknown';
   };
+  const services = { application: serviceState(app), database: serviceState(database) };
+  const access = config && services.application === 'active' ? await appAccess(owner) : undefined;
+  const ready = access?.kind === 'ready';
+  let action: string;
+  if (!config) action = intent ? 'resume-setup' : 'setup';
+  else if (ready || confirmed) action = 'complete';
+  else if (confirmed === false || access?.kind === 'enrollment'
+      || (access?.kind === 'unavailable' && access.reason === 'migration')) action = pendingAction(config.mode);
+  else action = (services.database === 'active' ? await storedPendingAction(config, owner.appGroup) : undefined) ?? 'unknown';
   return {
     version: PLANNER_VERSION,
     configuration: config ? 'configured' : intent ? 'configuring' : 'unconfigured',
     mode: intent?.options.mode ?? null,
-    pendingAction: config ? pendingAction(config.mode) : intent ? 'resume-setup' : 'setup',
-    readiness: 'unavailable',
-    services: { application: serviceState(app), database: serviceState(database) },
+    pendingAction: action,
+    readiness: ready ? 'ready' : 'unavailable',
+    services,
   };
 }
 
@@ -178,11 +239,11 @@ async function setup(options: NativeSetupOptions) {
       const client = await connectOwnedDatabase(existing, owner.appGroup);
       try {
         await verifyStorageSchema(client.db(databaseName), existing.installationId);
-        const grant = await readPersistedSetup(client, existing.installationId, intent);
-        return { ...status(owner), ...(grant && { firstAdminGrant: grant }) };
+        const { confirmed, grant } = await readPersistedSetup(client, existing.installationId, intent);
+        return { ...await status(owner, confirmed), ...(grant && { firstAdminGrant: grant }) };
       } finally { await client.close(); }
     }
-    const grant = await withStoppedWriter(async (writer) => {
+    const { confirmed, grant } = await withStoppedWriter(async (writer) => {
       if (!intent) {
         if (['/etc/planner/mongodb-init.json', '/etc/planner/mongod.conf', mongoCredentialFile]
           .some((path) => lstatSync(path, { throwIfNoEntry: false }))) {
@@ -209,7 +270,7 @@ async function setup(options: NativeSetupOptions) {
       } finally { await client.close(); }
     });
     await startApplication(options.appPort);
-    return { ...status(owner), ...(grant && { firstAdminGrant: grant }) };
+    return { ...await status(owner, confirmed), ...(grant && { firstAdminGrant: grant }) };
   });
 }
 
@@ -280,7 +341,7 @@ try {
     if (action === 'setup' && args.length === 1) {
       result = await setup(nativeSetupOptions.parse(JSON.parse(args[0])));
     } else if (action === 'status' && args.length === 0) {
-      result = status(verifyOwnership());
+      result = await status(verifyOwnership());
     } else if ((action === 'start' || action === 'stop' || action === 'restart') && args.length === 0) {
       result = await control(action);
     } else {

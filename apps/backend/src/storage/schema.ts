@@ -25,7 +25,7 @@ export interface InstallationDocument {
   schemaMigration?: MigrationProgress;
   setup?: {
     mode: 'fresh' | 'import';
-    pendingAction: 'first-admin-enrollment' | 'migration-preflight';
+    pendingAction: 'first-admin-enrollment' | 'migration-preflight' | 'complete';
     enrollmentGenerationId: string | null;
     firstAdminGrantIssuedAt?: Date;
   };

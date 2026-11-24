@@ -16,7 +16,7 @@ if (mode === 'serve') {
   const { startProxySocket } = await import(new URL('native/proxy-socket.js', backend));
   const proxyToken = (await readFile('/etc/planner/proxy-token', 'utf8')).trim();
   process.umask(0o077);
-  const app = buildApp({ native: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }) } });
+  const app = buildApp({ transportFixture: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }) } });
   app.get('/fixture/context', (req) => {
     const { headersDistinct, rawHeaders } = req.raw;
     const rawNames = rawHeaders.filter((_name, index) => index % 2 === 0).map((name) => name.toLowerCase());

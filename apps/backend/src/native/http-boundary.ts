@@ -12,6 +12,7 @@ interface ConnectionContext {
 declare module 'fastify' {
   interface FastifyRequest {
     plannerConnection: ConnectionContext | null;
+    plannerAccess: RuntimeAccess | null;
   }
 }
 
@@ -71,6 +72,7 @@ function sanitizeHeaders(request: FastifyRequest, authority: string) {
 }
 
 export function registerNativeHttpBoundary(app: FastifyInstance, boundary: NativeHttpBoundary) {
+  app.decorateRequest('plannerAccess', null);
   const authority = new URL(boundary.origin).host;
   const token = boundary.proxyToken === undefined ? undefined : Buffer.from(boundary.proxyToken, 'hex');
   app.addHook('onRequest', async (request, reply) => {
@@ -84,6 +86,7 @@ export function registerNativeHttpBoundary(app: FastifyInstance, boundary: Nativ
         || (request.routeOptions.url === '/assets/*' && /^\/assets\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(pathname)))) return;
 
     const access = await Promise.resolve().then(boundary.readAccess).catch(() => undefined);
+    request.plannerAccess = access ?? null;
     if (access?.kind === 'ready') return;
     if (access?.kind === 'enrollment') {
       if (read && pathname === (access.step === 'recovery' ? '/recover' : '/enroll-mfa')) return;

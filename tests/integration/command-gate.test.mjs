@@ -258,7 +258,7 @@ test('uncertain operations fail maintenance, clean rejections preserve order, an
   const gate = new CommandGate(lease);
   lease.release();
   assert.throws(() => acquireWriterDirectory(directory, owner, owner), /already owns/u);
-  const app = buildApp({ native: { origin: 'https://planner.example.test', readAccess: async () => gate.ready
+  const app = buildApp({ transportFixture: { origin: 'https://planner.example.test', readAccess: async () => gate.ready
     ? { kind: 'ready' } : { kind: 'unavailable', reason: 'schema-or-recovery' } } });
   t.after(async () => { await app.close(); await gate.closeAndDrain(); });
   const status = () => app.inject('/health/ready');
