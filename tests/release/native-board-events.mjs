@@ -60,7 +60,9 @@ async function browser() {
     const closed = async () => page.waitForFunction(() => window.eventSourceClosed, undefined, { timeout: 12_000 });
     const subscribe = async (after) => page.evaluate(({ path, after }) => new Promise((resolve, reject) => {
       const source = new EventSource(path + '/events' + (after ? '?after=' + encodeURIComponent(after) : ''));
+      window.activeStream = source;
       window.receivedEvents = [];
+      window.readyCursor = null;
       window.eventSourceClosed = false;
       source.onopen = () => resolve();
       source.onerror = () => {
@@ -68,6 +70,7 @@ async function browser() {
         window.eventSourceClosed = true;
         reject(new Error('Board stream did not open.'));
       };
+      source.addEventListener('ready', (event) => { window.readyCursor = event.lastEventId; });
       source.addEventListener('board.access-changed', (event) => {
         window.receivedEvents.push({ cursor: event.lastEventId, data: JSON.parse(event.data), state: source.readyState });
       });
@@ -86,7 +89,11 @@ async function browser() {
     });
     const initial = await page.evaluate(async (path) => (await (await fetch(path + '/workspace')).json()).data, path);
     assert.equal(initial.latestEventSequence, '0');
-    await subscribe(initial.eventCursor);
+    await subscribe();
+    await page.waitForFunction(() => window.readyCursor !== null);
+    const readyCursor = await page.evaluate(() => window.readyCursor);
+    assert.equal(readyCursor, initial.eventCursor);
+    await page.evaluate(() => window.activeStream.close());
     async function change(canComment, revision) {
       const response = await page.evaluate(async ({ path, id, revision, csrf, key, canComment }) => {
         const result = await fetch(path + '/members/' + id, { method: 'PATCH', headers: {
@@ -97,6 +104,7 @@ async function browser() {
       assert.equal(response, 200);
     }
     await change(true, 1);
+    await subscribe(readyCursor);
     await wait(1);
     const first = await page.evaluate(() => window.receivedEvents[0]);
     assert.deepEqual(first.data, { boardId });
@@ -114,6 +122,10 @@ async function browser() {
     await closed();
     await run('systemctl', ['start', 'planner-mongodb.service']);
     await readiness(200);
+    await subscribe(readyCursor);
+    await wait(2);
+    assert.deepEqual(await page.evaluate(() => window.receivedEvents), ordered);
+    await page.evaluate(() => window.activeStream.close());
     await run('systemctl', ['restart', 'planner.service']);
     await readiness(200);
     await subscribe(initial.eventCursor);

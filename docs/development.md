@@ -174,7 +174,7 @@ Additions return `201` with the affiliation and its new parent revision. Edits r
 
 ### Board event streams
 
-The board workspace response includes `latestEventSequence` as a decimal string and `eventCursor` for opening `GET /api/v1/boards/:id/events?after=<eventCursor>`. A reconnect's `Last-Event-ID` takes precedence. Without either cursor, the stream starts after the current authorized sequence. A valid cursor survives a native process restart and applies only to its actor, generation and board.
+The board workspace response includes `latestEventSequence` as a decimal string and `eventCursor` for opening `GET /api/v1/boards/:id/events?after=<eventCursor>`. A reconnect's `Last-Event-ID` takes precedence. Without either cursor, the stream sends a `ready` handshake whose SSE `id` is the current authorized cursor, then starts after that sequence. The handshake records no domain event. A valid cursor survives a native process restart and applies only to its actor, generation and board.
 
 The stream replays at most 1,000 contiguous events. A cursor that cannot be replayed receives a `reset` event and the connection closes. On reset, close the EventSource, fetch a new board snapshot and open a stream using its cursor. Each event and the 20-second heartbeat recheck the session and board access without refreshing inactivity. The relationship command rechecks affected subscriptions before releasing the writer, so regranting access requires a new stream. A connection that falls behind its transport buffer closes and can reconnect using its last event ID.
 

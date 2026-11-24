@@ -8,6 +8,7 @@ const card = board.extend({ id: publicIdSchema });
 const changedCard = card.extend({ revision: revisionSchema });
 
 export const boardEventFrameSchema = z.discriminatedUnion('event', [
+  z.strictObject({ event: z.literal('ready'), data: board }),
   z.strictObject({ event: z.literal('board.access-changed'), data: board }),
   z.strictObject({ event: z.literal('board.invalidated'), data: board }),
   z.strictObject({ event: z.literal('card.removed'), data: card }),

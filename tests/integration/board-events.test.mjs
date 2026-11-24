@@ -124,7 +124,18 @@ test('authorized HTTP snapshots and reconnects share a restart-stable, scope-bou
       const codec = createBoardEventCursors(f.cursorKey);
       assert.equal(codec.decode({ actorId: ids.viewer, boardId: ids.privateBoard, generationId: f.generationId }, empty.eventCursor), 0n);
 
-      await append(f, ...Array.from({ length: 1_001 }, (_, index) => event(f, ids.privateBoard, BigInt(index + 1))));
+      const firstConnection = await open(f, ids.privateBoard, viewer);
+      const ready = await firstConnection.next();
+      assert.deepEqual(ready, { event: 'ready', data: { boardId: ids.privateBoard }, id: empty.eventCursor });
+      firstConnection.close();
+      await append(f, event(f, ids.privateBoard, 1n));
+      const firstReconnect = await open(f, ids.privateBoard, viewer, { headers: { 'Last-Event-ID': ready.id } });
+      try {
+        assert.deepEqual(await firstReconnect.next(), {
+          event: 'board.access-changed', data: { boardId: ids.privateBoard }, id: cursor(f, ids.viewer, ids.privateBoard, 1n),
+        });
+      } finally { firstReconnect.close(); }
+      await append(f, ...Array.from({ length: 1_000 }, (_, index) => event(f, ids.privateBoard, BigInt(index + 2))));
       await reset(f, ids.privateBoard, viewer, { after: empty.eventCursor });
       await reset(f, ids.privateBoard, owner, { after: cursor(f, ids.viewer, ids.privateBoard, 1_001n) });
       await reset(f, ids.privateBoard, viewer, { after: cursor(f, ids.viewer, ids.sharedBoard, 1_001n) });
@@ -135,7 +146,11 @@ test('authorized HTTP snapshots and reconnects share a restart-stable, scope-bou
       }, 1_001n) });
 
       const live = await open(f, ids.privateBoard, viewer);
-      try { assert.deepEqual(await live.next({ heartbeat: true }), { heartbeat: true }); } finally { live.close(); }
+      try {
+        assert.deepEqual(await live.next(), { event: 'ready', data: { boardId: ids.privateBoard },
+          id: cursor(f, ids.viewer, ids.privateBoard, 1_001n) });
+        assert.deepEqual(await live.next({ heartbeat: true }), { heartbeat: true });
+      } finally { live.close(); }
       const replay = await open(f, ids.privateBoard, viewer, { after: 'invalid', headers: { 'Last-Event-ID': cursor(f, ids.viewer, ids.privateBoard, 1n) } });
       try {
         for (let sequence = 2n; sequence <= 1_001n; sequence++) {
@@ -193,11 +208,15 @@ test('outbox acknowledgement and concurrent live access changes do not duplicate
         await dispatch();
         assert.equal(await stream.next(), null);
         const regranted = await open(f, ids.privateBoard, viewer);
-        try { assert.deepEqual(await regranted.next({ heartbeat: true }), { heartbeat: true }); } finally { regranted.close(); }
+        try {
+          assert.equal((await regranted.next()).event, 'ready');
+          assert.deepEqual(await regranted.next({ heartbeat: true }), { heartbeat: true });
+        } finally { regranted.close(); }
       } finally { stream.close(); }
 
       const manager = await open(f, ids.privateBoard, owner);
       try {
+        assert.equal((await manager.next()).event, 'ready');
         const self = boardPath(ids.privateBoard) + '/members/' + ids.privateOwner;
         assert.equal((await mutate(f, owner, self, 'DELETE', 1)).status, 204);
         await dispatch();
@@ -212,6 +231,7 @@ test('outbox acknowledgement and concurrent live access changes do not duplicate
       await dispatch();
       const inherited = await open(f, ids.sharedBoard, admin);
       try {
+        assert.equal((await inherited.next()).event, 'ready');
         assert.equal((await mutate(f, admin, boardPath(ids.sharedBoard) + '/members/' + ids.admin, 'DELETE', 1)).status, 204);
         await dispatch();
         assert.equal((await inherited.next()).event, 'board.access-changed');
@@ -280,6 +300,8 @@ test('logout closes only its stream, stale generation closes the survivor, and a
       const firstStream = await open(f, ids.privateBoard, first);
       const secondStream = await open(f, ids.privateBoard, second);
       try {
+        assert.equal((await firstStream.next()).event, 'ready');
+        assert.equal((await secondStream.next()).event, 'ready');
         assert.equal((await mutate(f, first, '/api/v1/session', 'DELETE', 1)).status, 204);
         assert.equal(await firstStream.next(), null);
         assert.deepEqual(await secondStream.next({ heartbeat: true }), { heartbeat: true });
