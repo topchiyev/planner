@@ -115,6 +115,15 @@ test('a same-board move updates closure, scoped linked completion and eligible d
     assert.deepEqual(localEvents.map(({ kind, payload }) => [kind, payload]), [['card.changed', { id: card, revision: 2 }], ['board.invalidated', {}]]);
     assert.equal(await f.db.collection('activities').countDocuments({ ...f.scope, cardId: card }), 1);
 
+    await data(mutate(f, editor, 'PATCH', cardPath(card), 2, { closed: true }));
+    const priorReorder = await f.db.collection('cards').findOne({ ...f.scope, id: card });
+    const reordered = await data(move(3, { beforeCardId: null, ...versions(2, 2) }));
+    assert.equal(reordered.card.closed, true);
+    assert.deepEqual(reordered.source, reordered.destination);
+    assert.equal(reordered.destination.orderVersion, 3);
+    const afterReorder = await f.db.collection('cards').findOne({ ...f.scope, id: card });
+    assert.deepEqual(afterReorder.listChangedAt, priorReorder.listChangedAt);
+
     await expected(mutate(f, manager, 'PATCH', boardPath(ids.privateBoard) + '/members/' + ids.firstEditor, 1,
       { role: 'viewer', canComment: false }), 200);
     await expected(move(1, {}, key), 403);
