@@ -1,8 +1,9 @@
 import {
-  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginOutputSchema,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginWithMfaOutputSchema,
 } from '@planner/contracts';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { PageHeading } from '../../app/page-state.js';
+import { MfaEnrollmentForm, MfaSignIn } from './mfa-forms.js';
 import { sessionPath } from './browser-session.js';
 
 function AuthPage({ title, children }: { title: string; children: ReactNode }) {
@@ -149,7 +150,23 @@ export function AccountRecoveryPage() {
   </AuthPage>;
 }
 
+export function StagedMfaPage() {
+  const [complete, setComplete] = useState(false);
+  return complete ? (
+    <AuthPage key="complete" title="Authenticator set up">
+      <p>Your operator can continue the import.</p>
+    </AuthPage>
+  ) : (
+    <AuthPage title="Set up your authenticator">
+      <p>Use your enrollment ticket to secure the recovered account.</p>
+      <MfaEnrollmentForm enterTicket onSaved={() => setComplete(true)} />
+    </AuthPage>
+  );
+}
+
 export function SignInPage() {
+  const [challengeId, setChallengeId] = useState<string>();
+  const [enrollmentId, setEnrollmentId] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -168,12 +185,10 @@ export function SignInPage() {
       } else if (response.status === 429) {
         setError('Too many sign-in attempts. Try again later.');
       } else if (response.ok) {
-        const session = loginOutputSchema.parse(await response.json());
-        if (session.status === 'enrollment-required') {
-          setError('This account requires enrollment before you can sign in. Contact your Planner administrator.');
-        } else {
-          window.location.replace('/workspace');
-        }
+        const session = loginWithMfaOutputSchema.parse(await response.json());
+        if (session.status === 'enrollment-required') setEnrollmentId(session.enrollmentId);
+        else if (session.status === 'challenge-required') setChallengeId(session.challengeId);
+        else window.location.replace('/workspace');
       } else {
         setError('Planner could not sign you in. Try again.');
       }
@@ -182,6 +197,16 @@ export function SignInPage() {
     } finally { setBusy(false); }
   }
 
+  if (challengeId) return (
+    <AuthPage key="challenge" title="Verify your sign-in">
+      <MfaSignIn challengeId={challengeId} />
+    </AuthPage>
+  );
+  if (enrollmentId) return (
+    <AuthPage key="enrollment" title="Set up your authenticator">
+      <MfaEnrollmentForm enrollmentId={enrollmentId} onSaved={() => window.location.replace('/sign-in')} />
+    </AuthPage>
+  );
   return (
     <AuthPage title="Sign in">
       <form className="auth-form" method="post" onSubmit={(event) => void signIn(event)}>

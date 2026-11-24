@@ -14,37 +14,17 @@ import { accountById, accountEpoch, accountLookup, AccountActionError, nextAccou
 import { accounts, type AccountRecord } from './accounts.js';
 import { newToken, tokenDigest } from './credentials.js';
 import { isPasswordVerifier, type PasswordHasher } from './password.js';
+import { isProtectedGrant, recoveryLifetimeMs, type ProtectedGrant, type RecoveryGrant } from './account-grant.js';
+import { getFactor } from './mfa-account.js';
 import { activeAccountGeneration, loadCurrentBrowserSession } from './sessions.js';
 
 const approvalLifetimeMs = 10 * 60_000;
-const recoveryLifetimeMs = 30 * 60_000;
-
-interface ProtectedGrant {
-  _id: string;
-  id: string;
-  installationId: string;
-  generationId: string;
-  userId: string;
-  actorId: string;
-  targetEpoch: number;
-  tokenDigest: string;
-  issuedAt: Date;
-  expiresAt: Date;
-  consumedAt: Date | null;
-  revokedAt: Date | null;
-}
 
 interface Approval extends ProtectedGrant {
   kind: 'account-approval';
   actorEpoch: number;
   targetRevision: number;
   change: AccountApprovalAction;
-}
-
-interface RecoveryGrant extends ProtectedGrant {
-  kind: 'account-recovery';
-  actorEpoch: number;
-  targetRevision: number;
 }
 
 export interface AccountChange {
@@ -80,10 +60,7 @@ function grantIdentity(grant: ProtectedGrant) {
 }
 
 function checkGrant(grant: ProtectedGrant, lifetime: number) {
-  if (!validId(grant.id) || !validId(grant.actorId) || !validId(grant.userId) || !validEpoch(grant.targetEpoch)
-      || grant._id !== workspaceKey(grant.generationId, grant.id) || !/^[0-9a-f]{64}$/u.test(grant.tokenDigest)
-      || !isStoredDate(grant.issuedAt) || !isStoredDate(grant.expiresAt)
-      || grant.expiresAt.getTime() !== grant.issuedAt.getTime() + lifetime) {
+  if (!isProtectedGrant(grant, lifetime)) {
     throw new CommandRecoveryError('An account grant has invalid protected state.');
   }
 }
@@ -346,14 +323,15 @@ export function createAccountCredentials(
         const localAuth = nextAuth(target, passwordVerifier);
         await commit(target, { id: grant.id, recoveryId: grant.id, actorId: target.id, kind: 'reset-consumed',
           origin: 'web', appliedAt }, { localAuth });
-        return { status: localAuth.mfa !== 'none' ? 'enrollment-required' : 'confirmed' } as const;
+        return { status: localAuth.mfa === 'enrollment-required' ? 'enrollment-required' : 'confirmed' } as const;
       });
     },
   };
 }
 
 function nextAuth(account: AccountRecord, passwordVerifier = account.localAuth?.passwordVerifier ?? null) {
-  const mfa = account.requiresMfaEnrollment ? 'enrollment-required' : account.localAuth?.mfa ?? 'none';
+  const previousMfa = account.localAuth?.mfa ?? 'none';
+  const mfa = account.requiresMfaEnrollment || (previousMfa === 'totp' && !getFactor(account)) ? 'enrollment-required' : previousMfa;
   const credentialsVersion = accountEpoch(account) + 1;
   if (!Number.isSafeInteger(credentialsVersion)) throw new AccountActionError('revision');
   return { ...account.localAuth, passwordVerifier, credentialsVersion, mfa };

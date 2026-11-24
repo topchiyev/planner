@@ -2,6 +2,7 @@ import { lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultAppPort } from '@planner/contracts/native';
 import { recoverAccountChanges } from './application/auth/account-credentials.js';
+import { recoverFactorChanges } from './application/auth/mfa-account.js';
 import { recoverFirstAdmin } from './application/auth/first-admin.js';
 import type { CommandGate } from './application/command-gate/gate.js';
 import { buildApp, type AppDependencies } from './build-app.js';
@@ -9,6 +10,7 @@ import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.j
 import { createNativeBrowserAuth } from './native/browser-auth.js';
 import { startNativeCommandRecovery } from './native/command-recovery.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
+import { assertNativeMfaKey, readNativeMfaKey } from './native/mfa-key.js';
 import { readProtectedFile } from './native/mongo-host.js';
 import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
 import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
@@ -49,7 +51,8 @@ try {
     });
     // Apply this before binding the local operator socket, including direct service-account startup.
     process.umask(0o077);
-    const auth = createNativeBrowserAuth(config, gate);
+    const mfaKey = readNativeMfaKey(config.installationId, group);
+    const auth = createNativeBrowserAuth(config, gate, mfaKey.key);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth,
@@ -58,7 +61,8 @@ try {
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
       await recoverFirstAdmin(db, installationId);
       await recoverAccountChanges(db, installationId);
-    });
+      await recoverFactorChanges(db, installationId);
+    }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey));
   } else {
     const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
     if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');

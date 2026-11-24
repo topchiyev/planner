@@ -1,6 +1,7 @@
+import type { KeyObject } from 'node:crypto';
 import {
-  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, sessionSchema,
-  type BrowserSession, type FirstAdminInput, type LoginInput,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, sessionSchema,
+  type BrowserSession, type FirstAdminInput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -13,10 +14,13 @@ import { createAccountCredentials, type AccountCredentials } from '../applicatio
 import { createAccountDirectory, type AccountDirectory } from '../application/auth/account-directory.js';
 import { AccountActionError } from '../application/auth/account-policy.js';
 import { createFirstAdminEnrollment } from '../application/auth/first-admin.js';
+import { readTrustedDeviceCookie } from '../application/auth/mfa-cookie.js';
+import { createMfaManagement } from '../application/auth/mfa-management.js';
 import { createPasswordHasher, HashCapacityError } from '../application/auth/password.js';
 import { createBrowserSessions, type BrowserSessions } from '../application/auth/sessions.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
+import { browserMfaVerifyPath, mfaEnrollmentPath, mfaEnrollmentVerifyPath, type NativeMfa } from './mfa-routes.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -26,24 +30,40 @@ declare module 'fastify' {
 
 export type NativeAccountManagement = AccountDirectory & AccountCredentials;
 
-export interface BrowserAuth extends BrowserSessions {
+export interface BrowserAuth extends Pick<BrowserSessions, 'login' | 'read' | 'revoke'> {
   accountManagement?: NativeAccountManagement;
+  mfa?: NativeMfa;
   confirm: (input: FirstAdminInput) => Promise<boolean>;
 }
 
-export function createNativeBrowserAuth(config: NativeInstallationConfig, gate: CommandGate): BrowserAuth & { accountManagement: NativeAccountManagement } {
+export function createNativeBrowserAuth(
+  config: NativeInstallationConfig, gate: CommandGate, mfaKey: KeyObject,
+): BrowserAuth & { accountManagement: NativeAccountManagement; mfa: NativeMfa } {
   const hasher = createPasswordHasher();
+  const allowFactorOwner = createLoginRateLimit();
   async function withDatabase<T>(operation: (database: Db) => Promise<T>) {
     const client = await connectConfiguredNativeMongo(config);
     try { return await operation(client.db(databaseName)); }
     finally { await client.close(); }
   }
-  const sessions = (database: Db) => createBrowserSessions(database, config.installationId, gate, hasher);
+  const sessions = (database: Db) => createBrowserSessions(database, config.installationId, gate, hasher, undefined, mfaKey);
+  const factors = (database: Db) => createMfaManagement(database, config.installationId, gate, mfaKey, hasher);
 
   const directory = (database: Db) => createAccountDirectory(database, config.installationId, gate, hasher);
   const credentials = (database: Db) => createAccountCredentials(database, config.installationId, gate, hasher);
 
   return {
+    mfa: {
+      verify: (input, address) => withDatabase((database) => sessions(database).verifyMfa(input, (id) => allowFactorOwner(id, address))),
+      manage: {
+        begin: (...args) => withDatabase((database) => factors(database).begin(...args)),
+        confirm: (...args) => withDatabase((database) => factors(database).confirm(...args)),
+        renew: (...args) => withDatabase((database) => factors(database).renew(...args)),
+        disable: (...args) => withDatabase((database) => factors(database).disable(...args)),
+        list: (...args) => withDatabase((database) => factors(database).list(...args)),
+        revoke: (...args) => withDatabase((database) => factors(database).revoke(...args)),
+      },
+    },
     accountManagement: {
       profile: (...args) => withDatabase((database) => directory(database).profile(...args)),
       preferences: (...args) => withDatabase((database) => directory(database).preferences(...args)),
@@ -58,7 +78,7 @@ export function createNativeBrowserAuth(config: NativeInstallationConfig, gate: 
       consumeRecovery: (...args) => withDatabase((database) => credentials(database).consumeRecovery(...args)),
     },
     confirm: (input) => withDatabase((database) => createFirstAdminEnrollment(database, config.installationId, gate, hasher)(input)),
-    login: (input: LoginInput) => withDatabase((database) => sessions(database).login(input)),
+    login: (...args) => withDatabase((database) => sessions(database).login(...args)),
     read: (token) => withDatabase((database) => sessions(database).read(token)),
     revoke: (token) => withDatabase((database) => sessions(database).revoke(token)),
   };
@@ -93,11 +113,12 @@ function requestPath(request: FastifyRequest) {
 }
 
 function isShellPage(pathname: string) {
-  return /^\/(?:workspace\/?|settings\/?|admin\/accounts\/?|projects\/[^/]+\/?|boards\/[^/]+(?:\/cards\/[^/]+)?\/?)$/u.test(pathname);
+  return /^\/(?:workspace\/?|settings(?:\/security)?\/?|admin\/accounts\/?|projects\/[^/]+\/?|boards\/[^/]+(?:\/cards\/[^/]+)?\/?)$/u.test(pathname);
 }
 
-function isPublicBrowserRoute(method: string, pathname: string) {
-  if (method === 'POST') return pathname === recoverPath || pathname === loginPath;
+function isPublicBrowserRoute(method: string, pathname: string, mfa: boolean) {
+  if (method === 'POST') return pathname === recoverPath || pathname === loginPath
+    || (mfa && (pathname === browserMfaVerifyPath || pathname === mfaEnrollmentPath || pathname === mfaEnrollmentVerifyPath));
   if (pathname === sessionPath) return method === 'DELETE' || method === 'GET';
   return (method === 'GET' || method === 'HEAD') && (pathname === '/' || pathname === '/sign-in' || pathname === '/recover' || pathname === '/account-recovery');
 }
@@ -111,7 +132,7 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
     // The transport boundary alone handles health, immutable assets, and the exact staged enrollment paths.
     if (request.plannerAccess?.kind !== 'ready') return;
     const pathname = requestPath(request);
-    if (isPublicBrowserRoute(request.method, pathname)) return;
+    if (isPublicBrowserRoute(request.method, pathname, !!auth.mfa)) return;
     reply.header('Cache-Control', 'no-store');
 
     const read = request.method === 'GET' || request.method === 'HEAD';
@@ -169,9 +190,11 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
       if (!allowLogin(normalizeIdentifier(input.data.identifier), request.plannerConnection!.clientAddress!)) {
         return authError(reply, request, 'limited');
       }
-      const result = await auth.login(input.data);
+      const result = await auth.login(input.data, readTrustedDeviceCookie(request.headers.cookie));
       if (result.status === 'invalid') return authError(reply, request, 'credentials');
-      if (result.status === 'enrollment-required') return loginOutputSchema.parse(result);
+      if (result.status !== 'authenticated') {
+        return auth.mfa ? loginWithMfaOutputSchema.parse(result) : loginOutputSchema.parse(result);
+      }
       if (result.status === 'authenticated') {
         const session = loginOutputSchema.parse(result.session);
         reply.header('Set-Cookie', sessionCookie(result.token));

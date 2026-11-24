@@ -16,6 +16,10 @@ export const router = createBrowserRouter([
       lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).AccountRecoveryPage }),
     },
     {
+      path: 'enroll-mfa',
+      lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).StagedMfaPage }),
+    },
+    {
       path: 'sign-in',
       lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).SignInPage }),
     },
@@ -57,6 +61,13 @@ export const router = createBrowserRouter([
             lazy: async () => {
               const { AccountSettingsPage, loadAccountSettings } = await import('../features/accounts/account-settings.js');
               return { Component: AccountSettingsPage, loader: loadAccountSettings };
+            },
+          },
+          {
+            path: 'settings/security',
+            lazy: async () => {
+              const { MfaSettingsPage, loadMfaSettings } = await import('../features/auth/mfa-settings.js');
+              return { Component: MfaSettingsPage, loader: loadMfaSettings };
             },
           },
           {

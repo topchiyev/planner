@@ -1,4 +1,5 @@
 import type { NativeInstallationConfig } from '@planner/contracts/native';
+import { readStagedMfaEnrollment } from '../application/auth/mfa-account.js';
 import { firstAdminBinding, hasFirstAdminGrant } from '../application/auth/first-admin.js';
 import { StorageSchemaError, verifyStorageSchema } from '../storage/schema.js';
 import { checkDirectory } from './mongo-host.js';
@@ -45,7 +46,12 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
       const database = client.db(databaseName);
       const installation = await verifyStorageSchema(database, config.installationId);
       if (installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
-      if (config.mode === 'import') return { kind: 'unavailable', reason: 'migration' };
+      if (config.mode === 'import') {
+        const staged = await readStagedMfaEnrollment(database, config.installationId, new Date());
+        return staged
+          ? { kind: 'enrollment', step: 'mfa' }
+          : { kind: 'unavailable', reason: 'migration' };
+      }
       const binding = firstAdminBinding(installation);
       if (binding?.published) return { kind: 'ready' };
       if (installation.activeGenerationId !== null) return { kind: 'unavailable', reason: 'schema-or-recovery' };

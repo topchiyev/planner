@@ -22,12 +22,19 @@ export interface InstallationDocument {
   installationId: string;
   activeGenerationId: string | null;
   schemaVersion: number;
+  mfaKeyDigest?: string;
   schemaMigration?: MigrationProgress;
   setup?: {
     mode: 'fresh' | 'import';
     pendingAction: 'first-admin-enrollment' | 'migration-preflight' | 'complete';
     enrollmentGenerationId: string | null;
     firstAdminGrantIssuedAt?: Date;
+    stagedMfaEnrollment?: {
+      userId: string;
+      recoveryId: string;
+      accountRevision: number;
+      credentialsVersion: number;
+    };
   };
 }
 
