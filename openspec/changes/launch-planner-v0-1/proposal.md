@@ -7,7 +7,7 @@ Teams using PLANKA 2.3.x need a way to move their work into a self-hosted kanban
 ## What Changes
 
 - Build Planner under its own name, version and visual identity. Use PLANKA 2.3.x Community as the workflow and data-compatibility reference. Cover the board, collaboration and administration workflows defined in the specs.
-- Ship one feature set under ordinary account and project permissions, with no paid tiers, purchase prompts, upgrade gates or license activation.
+- Ship one free feature set under ordinary account and project permissions, with no paid tiers, purchase prompts, upgrade gates or license activation. Release Planner’s original code and documentation under the MIT License.
 - Offer fresh install and an optional PLANKA 2.3.x import during setup. Preserve supported records, relationships and files, report exclusions and provide a verification and cutover path that preserves the source installation.
 - Expose a standards-based Streamable HTTP MCP endpoint compatible with Codex CLI and desktop, Claude Code, and Claude custom connectors. Each authorized client acts as the Planner user who connected it and inherits that user's current permissions.
 - Provide a native Linux installation with a dedicated, authenticated MongoDB instance, private port, service identity and data directory. Native Linux is the release support target. Container packaging falls outside the release.
