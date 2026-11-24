@@ -18,8 +18,9 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "typecheck": "npm run typecheck --workspaces",
-    "verify": "npm run typecheck && npm run build",
-    "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify"
+    "verify": "npm run typecheck && npm run build && npm run test:health",
+    "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify",
+    "test:health": "node --import tsx --test tests/health.test.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",
