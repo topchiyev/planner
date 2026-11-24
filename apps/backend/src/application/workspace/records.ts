@@ -58,6 +58,8 @@ export type WorkspaceRow<K extends WorkspaceRecordName> = Entity & Records[K];
 
 export const rankSort = { rank: 1, id: 1 } as const;
 
+export const directBoardRole = { $in: ['$role', ['editor', 'viewer']] };
+
 export async function together<T extends readonly unknown[] | []>(values: T) {
   const results = await Promise.allSettled(values);
   const failure = results.find((result) => result.status === 'rejected');

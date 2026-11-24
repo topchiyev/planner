@@ -4,7 +4,7 @@ import { MongoServerError, type Document } from 'mongodb';
 import { encodeRank } from '../../storage/identity.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import type { BoardAccessContext } from './authorization.js';
-import type { WorkspaceRecords } from './records.js';
+import { directBoardRole, type WorkspaceRecords } from './records.js';
 
 export const escapeSearch = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 function searchFields(pattern: string, fields: string[]) {
@@ -69,7 +69,7 @@ export async function cardFilters(records: WorkspaceRecords, board: BoardAccessC
     }
   }
   if (query.members.length) {
-    const members = await records.find('boardMembers', { boardId, userId: { $in: query.members }, role: { $in: ['editor', 'viewer'] } });
+    const members = await records.find('boardMembers', { boardId, userId: { $in: query.members }, $expr: directBoardRole });
     const users = members.map(({ userId }) => userId);
     stages.push(
       records.lookup('cardAssignees', 'matchedAssignees', { cardId: '$id' }, {

@@ -8,7 +8,7 @@ import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type Ca
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
-import { createWorkspaceRecords, rankSort, together, type WorkspaceRow } from './records.js';
+import { createWorkspaceRecords, directBoardRole, rankSort, together, type WorkspaceRow } from './records.js';
 
 const nameAnchor = (name: string) => createHash('sha256').update(name, 'utf8').digest('hex');
 const iso = (value?: Date | null) => value?.toISOString() ?? null;
@@ -107,7 +107,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   }
 
   async function publicAssignee(id: string | null | undefined, boardId: string) {
-    if (!id || !await records.first('boardMembers', { boardId, userId: id, role: { $in: ['editor', 'viewer'] } })) return null;
+    if (!id || !await records.first('boardMembers', { boardId, userId: id, $expr: directBoardRole })) return null;
     const user = await records.get('users', id);
     return user ? person(user) : null;
   }
@@ -285,7 +285,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       ]);
       const labels = await records.find('labels', { boardId, id: { $in: links.map(({ labelId }) => labelId) } }, rankSort);
       const members = await records.find('boardMembers', { boardId, userId: { $in: assignments.map(({ userId }) => userId) },
-        role: { $in: ['editor', 'viewer'] } });
+        $expr: directBoardRole });
       const coverAttachmentId = attachments.some((item) => item.id === card.coverAttachmentId && item.kind === 'file') ? card.coverAttachmentId! : null;
       return { data: { ...cardDto(card, board, list), description: card.description ?? null, previousListId, labels: labels.map(labelDto),
         assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: await together(attachments.map(attachment)),
