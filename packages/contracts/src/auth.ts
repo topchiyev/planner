@@ -26,6 +26,8 @@ export const sessionActorSchema = z.strictObject({
   name: accountNameSchema,
   role: siteRoleSchema,
 });
+export const passiveSessionHeader = 'x-planner-passive';
+
 export const sessionSchema = z.strictObject({
   status: z.literal('authenticated'),
   account: sessionActorSchema,

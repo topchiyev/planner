@@ -153,7 +153,9 @@ export function registerMediaRoutes(app: FastifyInstance, access: MediaAccess) {
       } });
     }
     for (const operation of reads) {
-      routes.route({ method: ['GET', 'HEAD'], url: mediaOperations[operation].path, exposeHeadRoute: false, async handler(request, reply) {
+      const passive = operation !== 'attachmentDownload' && operation !== 'backgroundDownload';
+      routes.route({ method: ['GET', 'HEAD'], url: mediaOperations[operation].path, exposeHeadRoute: false,
+        config: { ...(passive && { plannerPassiveRead: true }) }, async handler(request, reply) {
         let opened: Awaited<ReturnType<MediaService['openForRead']>> | undefined;
         try {
           const token = browserToken(request);

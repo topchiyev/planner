@@ -40,7 +40,7 @@ export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardI
   return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion, ...(destinationBoardId && { destinationBoardId }) };
 }
 
-function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
+export function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
   const query = new URLSearchParams({ context: 'board', listIds: listId, limit: '100' });
   if (cursor) query.set('cursor', cursor);
   return readWorkspace('boardCards', boardId, query, signal);

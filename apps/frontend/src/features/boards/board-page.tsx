@@ -9,7 +9,7 @@ import { BoardManagement } from './board-management.js';
 import { BoardFieldGroups } from '../fields/workspace-fields.js';
 import { ActivityFeed } from '../discussions/feed.js';
 import { BoardFilters } from './board-filters.js';
-import { BoardCards } from '../cards/board-cards.js';
+import { BoardCards, type BoardView } from '../cards/board-cards.js';
 
 const contexts = [
   { id: 'board', name: 'Board', emptyTitle: 'No cards to show' },
@@ -23,7 +23,7 @@ const views = [
   { id: 'list', name: 'List' },
 ] as const;
 
-type View = (typeof views)[number]['id'];
+
 
 export function BoardPage() {
   const board = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
@@ -39,7 +39,7 @@ export function BoardPage() {
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
   const view = availableViews.find(({ id }) => id === params.get('view'))?.id ?? defaultView;
 
-  function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: View) {
+  function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: BoardView) {
     const nextParams = new URLSearchParams(params);
     nextParams.set('context', nextContext);
     if (nextContext !== context.id) {
@@ -87,7 +87,7 @@ export function BoardPage() {
               void revalidator.revalidate();
             }} />
           <div hidden={pending}>
-            <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} />
+            <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} view={view} />
           </div>
         </> : !board && <EmptyState title={context.emptyTitle} />}
         {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.board.revision} />}
