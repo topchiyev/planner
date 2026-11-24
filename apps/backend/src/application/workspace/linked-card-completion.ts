@@ -1,4 +1,5 @@
 import type { PlannedEffect } from '../command-journal/operation.js';
+import { liveTaskMarker } from './checklist-state.js';
 import { requireRevision, touchRevision } from './relationship-policy.js';
 import { canonicalRow, equal, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
@@ -9,8 +10,8 @@ export async function planLinkedCardCompletion(records: WorkspaceRecords, genera
   const canonical = canonicalRow(generationId);
   type Match = WorkspaceRow<'tasks'> & { owner: WorkspaceRow<'checklists'>; ownerCard: WorkspaceRow<'cards'> };
   const rows = await records.aggregate<Match>('tasks', {
-    linkedCardId: target.id, linkedUnavailable: { $ne: true },
-    $expr: { $and: [canonical, equal('linkedCardId', target.id)] },
+    linkedCardId: target.id,
+    $expr: { $and: [canonical, equal('linkedCardId', target.id), liveTaskMarker] },
   }, [
     records.lookup('checklists', 'owner', { checklistId: '$checklistId' }, {
       $expr: { $and: [canonical, { $eq: ['$id', '$$checklistId'] }] },
@@ -21,13 +22,18 @@ export async function planLinkedCardCompletion(records: WorkspaceRecords, genera
     }),
     { $unwind: '$ownerCard' },
     records.lookup('lists', 'ownerList', { listId: '$ownerCard.listId', boardId: '$ownerCard.boardId', kind: '$ownerCard.kind' }, {
-      $expr: { $and: [canonical, { $eq: ['$id', '$$listId'] }, { $eq: ['$boardId', '$$boardId'] }, {
-        $eq: ['$$kind', { $cond: [{ $in: ['$kind', ['active', 'closed']] }, 'board', '$kind'] }],
-      }] },
+      $expr: { $and: [canonical, { $eq: ['$id', '$$listId'] }, { $eq: ['$boardId', '$$boardId'] }, { $or: [
+        { $and: [{ $in: ['$kind', ['active', 'closed']] }, { $eq: ['$$kind', 'board'] }] },
+        { $and: [{ $in: ['$kind', ['archive', 'trash']] }, { $eq: ['$$kind', '$kind'] }] },
+      ] }] },
     }, [{ $project: { _id: 1 } }, { $limit: 1 }]),
     records.lookup('boards', 'ownerBoard', { boardId: '$ownerCard.boardId' }, {
       $expr: { $and: [canonical, { $eq: ['$id', '$$boardId'] }] },
-    }, [{ $project: { _id: 1 } }, { $limit: 1 }]),
+    }, [
+      records.lookup('projects', 'project', { projectId: '$projectId' },
+        { $expr: { $and: [canonical, { $eq: ['$id', '$$projectId'] }] } }, [{ $project: { _id: 1 } }, { $limit: 1 }]),
+      { $match: { 'project.0': { $exists: true } } }, { $project: { _id: 1 } }, { $limit: 1 },
+    ]),
     { $match: { 'ownerList.0': { $exists: true }, 'ownerBoard.0': { $exists: true } } },
     { $sort: { id: 1 } },
   ]);

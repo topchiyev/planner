@@ -139,6 +139,14 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     const referencingTask = await f.insert('tasks', fixtureId(19018), {
       checklistId: referencingGroup, linkedCardId: sourceCard, completed: false, rank: '1',
     });
+    const malformedTask = await f.insert('tasks', fixtureId(19019), {
+      checklistId: referencingGroup, linkedCardId: sourceCard, linkedUnavailable: 'legacy', completed: false, rank: '2',
+    });
+    const corruptList = await f.insert('lists', fixtureId(19020), { boardId: ids.hiddenBoard, name: 'Unknown placement', kind: 'mystery', rank: '1' });
+    const corruptCard = await f.insert('cards', fixtureId(19021), { boardId: ids.hiddenBoard, listId: corruptList,
+      name: 'Unknown context', kind: 'mystery', type: 'project', rank: '1' });
+    const corruptGroup = await f.insert('checklists', fixtureId(19022), { cardId: corruptCard, name: 'Private unknown fields', rank: '1' });
+    const corruptTask = await f.insert('tasks', fixtureId(19023), { checklistId: corruptGroup, linkedCardId: sourceCard, completed: false, rank: '1' });
     const otherScope = await data(f.call(board(ids.privateBoard) + '/transfer-destinations', editor));
     assert.deepEqual(otherScope.map(({ id }) => id), [ids.sharedBoard]);
     assert.deepEqual(await data(f.call(board(ids.privateBoard) + '/transfer-destinations', sourceEditor)), []);
@@ -174,6 +182,8 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     assert.equal((await stored(f, 'fieldGroups', ids.fieldGroup)).scopeId, ids.privateBoard);
     assert.equal((await stored(f, 'tasks', ids.linkedTask)).assigneeId, null);
     assert.equal((await stored(f, 'tasks', referencingTask)).completed, true);
+    assert.deepEqual([(await stored(f, 'tasks', malformedTask)).revision,
+      (await stored(f, 'tasks', corruptTask)).revision, (await stored(f, 'cards', corruptCard)).revision], [1, 1, 1]);
     assert.deepEqual([(await stored(f, 'comments', comment)).boardId, (await stored(f, 'comments', comment)).authorId], [ids.sharedBoard, ids.secondEditor]);
     assert.equal((await stored(f, 'activities', fixtureId(19010))).boardId, ids.privateBoard);
     const sourceToken = readSessionCookie(sourceEditor);
@@ -194,6 +204,7 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     const sourceEvents = await workspaceRows(f, 'events', { commandId: command.id, boardId: ids.privateBoard });
     assert.deepEqual(sourceEvents.find(({ kind }) => kind === 'card.removed').payload, { id: sourceCard });
     assert.ok(!JSON.stringify(sourceEvents).includes(ids.sharedBoard));
+    assert.equal(await f.db.collection('events').countDocuments({ ...f.scope, commandId: command.id, boardId: ids.hiddenBoard }), 0);
     assert.equal(await f.db.collection('notifications').countDocuments({ ...f.scope, cardId: sourceCard }), 0);
 
     await f.gate.runCommand(() => f.db.collection('boardMembers').deleteOne({ ...f.scope, boardId: ids.privateBoard, userId: ids.firstEditor }));
@@ -383,6 +394,13 @@ test('historical transfer reserves the destination sequence and preserves an exa
     });
     const local = await f.insert('fieldDefinitions', fixtureId(27009), { name: 'Local earlier field', fieldGroupId: source, rank: '-1' });
     await f.insert('fieldValues', fixtureId(27010), { cardId: sourceCard, fieldGroupId: source, fieldDefinitionId: local, value: '00' });
+    const tiedGroup = await f.insert('fieldGroups', fixtureId(27011), {
+      name: 'Tied field order', scopeType: 'board', scopeId: ids.privateBoard, templateGroupId: template, rank: '3072',
+    });
+    const tiedDefinition = await f.insert('fieldDefinitions', fixtureId(27012), { name: 'Tied local field', fieldGroupId: tiedGroup, rank: '1' });
+    const tiedValue = await f.insert('fieldValues', fixtureId(27013), {
+      cardId: sourceCard, fieldGroupId: tiedGroup, fieldDefinitionId: tiedDefinition, value: '  tied  ',
+    });
     const key = randomUUID();
     await expected(change(f, actor, 'POST', card() + '/move', 1, destination(archive, ids.activeCard)), 422, 'INVALID_CARD_TRANSITION');
     const moved = await data(change(f, actor, 'POST', card() + '/move', 1, destination(archive), key));
@@ -399,6 +417,10 @@ test('historical transfer reserves the destination sequence and preserves an exa
     const detail = await data(f.call(card(), actor));
     assert.deepEqual(detail.fields.find(({ id }) => id === instance.id).definitions.map(({ name, rank, inherited }) =>
       [name, rank, inherited]), [['Local earlier field', '-1', false], ['Exact blank value', '1', true]]);
+    const tied = await stored(f, 'fieldValues', tiedValue);
+    const detached = detail.fields.find(({ id }) => id === tied.fieldGroupId);
+    assert.deepEqual([detached.linked, detached.definitions.map(({ name }) => name), tied.value],
+      [false, ['Exact blank value', 'Tied local field'], '  tied  ']);
     await expected(change(f, actor, 'POST', card() + '/restore', moved.card.revision, { sourceOrderVersion: 2 }), 422, 'RESTORE_TARGET_REQUIRED');
     const restored = await data(change(f, actor, 'POST', card() + '/restore', moved.card.revision, destination(finite, null, 2, 1)));
     assert.equal(restored.card.listId, finite);
