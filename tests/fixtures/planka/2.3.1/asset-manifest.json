@@ -1,0 +1,50 @@
+{
+  "formatVersion": 1,
+  "files": [
+    {
+      "key": "private/attachments/9007199254741220/Réseau Tile.png",
+      "size": 73,
+      "sha256": "3a4c6fa37b3ad023069137e6c329d878fbcfcd38ba4ecc19fb28598860849782"
+    },
+    {
+      "key": "private/attachments/9007199254741220/thumbnails/outside-360.png",
+      "size": 73,
+      "sha256": "3a4c6fa37b3ad023069137e6c329d878fbcfcd38ba4ecc19fb28598860849782"
+    },
+    {
+      "key": "private/attachments/9007199254741220/thumbnails/outside-720.png",
+      "size": 73,
+      "sha256": "3a4c6fa37b3ad023069137e6c329d878fbcfcd38ba4ecc19fb28598860849782"
+    },
+    {
+      "key": "private/attachments/9007199254741221/Fixture Deck.txt",
+      "size": 26,
+      "sha256": "c80a75f009eb6c0709fd6ed5d729a501909e95b541f1380dc26af42a6ebab2d2"
+    },
+    {
+      "key": "private/attachments/9007199254741222/Alternate Deck.txt",
+      "size": 26,
+      "sha256": "c80a75f009eb6c0709fd6ed5d729a501909e95b541f1380dc26af42a6ebab2d2"
+    },
+    {
+      "key": "protected/background-images/03000000-0000-4000-8000-000000000002/original.png",
+      "size": 73,
+      "sha256": "ea244054306c9c5907bb005dcc7b776d50e5c1281d9f0a09705476dc785dde14"
+    },
+    {
+      "key": "protected/background-images/03000000-0000-4000-8000-000000000002/outside-360.png",
+      "size": 73,
+      "sha256": "ea244054306c9c5907bb005dcc7b776d50e5c1281d9f0a09705476dc785dde14"
+    },
+    {
+      "key": "protected/user-avatars/03000000-0000-4000-8000-000000000001/cover-180.png",
+      "size": 73,
+      "sha256": "5a474980bf57d327dd8ea903f6b6a2dba59f7e5d2035e637846c4cd397548477"
+    },
+    {
+      "key": "protected/user-avatars/03000000-0000-4000-8000-000000000001/original.png",
+      "size": 73,
+      "sha256": "56b101688d9931b108eb200a85b704bd84e925a17b91e17387a7a4d59577d389"
+    }
+  ]
+}
