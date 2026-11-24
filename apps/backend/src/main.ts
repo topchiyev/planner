@@ -65,24 +65,25 @@ try {
     const mediaStore = await createPrivateMediaStore('/var/lib/planner/staging', '/var/lib/planner/blobs');
     closeMedia = mediaStore.close;
     const mediaDecoder = createMediaDecoder(fileURLToPath(new URL('../../../lib/decode-media.py', import.meta.url)));
-    boardEvents = startNativeBoardEvents(config, gate, mfaKey.key);
-    const auth = createNativeBrowserAuth(config, gate, mfaKey.key, boardEvents.streams);
+    const events = startNativeBoardEvents(config, gate, mfaKey.key);
+    boardEvents = events;
+    const auth = createNativeBrowserAuth(config, gate, mfaKey.key, events.streams);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth,
-      workspace: createNativeWorkspaceReader(config, gate, boardEvents.cursors),
-      relationships: createNativeWorkspaceRelationships(config, gate, boardEvents.wake),
-      boardEvents: boardEvents.streams,
+      workspace: createNativeWorkspaceReader(config, gate, events.cursors),
+      relationships: createNativeWorkspaceRelationships(config, gate, events.wake, events.streams.revalidateBoards),
+      boardEvents: events.streams,
       media: createNativeMedia(config, gate, mediaStore, mediaDecoder),
     } };
     port = config.appPort;
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
       await recoverFirstAdmin(db, installationId);
-      await recoverAccountChanges(db, installationId);
+      await recoverAccountChanges(db, installationId, events.streams.revalidateActor);
       await recoverFactorChanges(db, installationId);
       await verifyActiveMedia(db, installationId, mediaStore);
       await sweepPrivateMedia(db, mediaStore);
-    }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey));
+    }, (db, installationId) => assertNativeMfaKey(db, installationId, mfaKey), events.streams.revalidateBoards);
     stopMediaCleanup = startMediaCleanup(gate, () => withNativeMediaDatabase(config, (db) =>
       gate.runCommand(() => sweepPrivateMedia(db, mediaStore))));
   } else {

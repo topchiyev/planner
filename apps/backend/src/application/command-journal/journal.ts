@@ -36,11 +36,15 @@ export interface OutboxSignal {
   sequence: string;
 }
 
+export type AfterCommandCommit = (database: Db, generationId: string, boardIds: ReadonlySet<string>) => void | Promise<void>;
+
 interface JournalOptions {
   operations?: Readonly<Record<string, JournalOperation>>;
   // Only process composition can bind the verified enrollment generation. Input never supplies a generation.
   scope?: 'active' | 'enrollment';
   checkpoint?: (point: Checkpoint, index?: number) => void | Promise<void>;
+  // Observers run under the writer after durability and before a queued writer can supersede authorization.
+  afterCommit?: AfterCommandCommit;
   // Synchronously enqueue the trusted signal. Any receipt settles outside the gate.
   // Recipient authorization and transport work are implemented by the subscriber.
   publish?: (signal: OutboxSignal) => void | Promise<void>;
@@ -316,10 +320,14 @@ export class CommandJournal {
     const cursor = command.applied!;
     const collection = commands(this.database);
     let index = 0;
+    const affectedBoards = this.options.afterCommit && new Set<string>();
     let lastAppliedEffectId = command.lastAppliedEffectId ?? null;
     for await (const batch of readBatches(this.database, command)) {
       for (const effect of batch) {
         const step = index++;
+        if (affectedBoards && effect.kind === 'insert' && effect.collection === 'events' && typeof effect.fields.boardId === 'string') {
+          affectedBoards.add(effect.fields.boardId);
+        }
         if (step < cursor) continue;
         const position = { _id: command._id, status: 'prepared', applied: step, lastAppliedEffectId } as const;
         await applyCommandEffect(this.database, command.generationId, effect, step === cursor && command.pendingDelete !== undefined,
@@ -338,6 +346,7 @@ export class CommandJournal {
     const committed = await collection.updateOne({ _id: command._id, status: 'prepared', applied: index, lastAppliedEffectId, pendingDelete: { $exists: false } },
       { $set: { status: 'committed', committedAt: new Date() } }, durable);
     assertChanged(committed.matchedCount);
+    if (affectedBoards?.size) await this.options.afterCommit?.(this.database, command.generationId, affectedBoards);
     await this.options.checkpoint?.('committed');
     return readJournalResult(command);
   }

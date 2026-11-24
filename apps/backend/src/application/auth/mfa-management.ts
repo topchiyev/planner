@@ -31,7 +31,7 @@ interface EnrollmentAccess {
 
 export function createMfaManagement(
   database: Db, installationId: string, gate: CommandGate, key: KeyObject, hasher: PasswordHasher,
-  now = () => new Date(), onAccessChanged?: (actorId: string) => void,
+  now = () => new Date(), onAccessChanged?: (database: Db, actorId: string) => void | Promise<void>,
 ) {
   const currentSession = (token: string, time: Date) => loadCurrentBrowserSession(database, installationId, token, time);
   async function enrollment({ enrollmentId, sessionToken }: EnrollmentAccess, time: Date) {
@@ -81,7 +81,7 @@ export function createMfaManagement(
       await applyFactorChange(database, installationId, session.stored, action,
         issued ? { ...factor, greatestCounter: accepted.counter ?? factor.greatestCounter, recoveryDigests: issued.digests } : null,
         time, accepted);
-      if (action === 'disabled') onAccessChanged?.(session.account.actor.id);
+      if (action === 'disabled') await onAccessChanged?.(database, session.account.actor.id);
       return issued?.recoveryCodes ?? [];
     });
   }
@@ -128,7 +128,7 @@ export function createMfaManagement(
         await applyFactorChange(database, installationId, user, 'enabled', {
           id: proof.id, encrypted, greatestCounter, recoveryDigests: codes.digests,
         }, time);
-        onAccessChanged?.(user.id);
+        await onAccessChanged?.(database, user.id);
         return { recoveryCodes: codes.recoveryCodes };
       });
     },

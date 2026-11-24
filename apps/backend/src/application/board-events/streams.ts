@@ -32,7 +32,6 @@ interface Subscriber {
   running: boolean;
   closed: boolean;
   heartbeat: boolean;
-  recheck: boolean;
   last: bigint;
   target: bigint;
   validated: bigint;
@@ -98,11 +97,10 @@ export function createBoardEventStreams(
       const database = await getDatabase();
       const { scope } = subscriber;
       const store = createBoardEventStore(database, scope.generationId, scope.boardId);
-      while (!subscriber.closed && (subscriber.heartbeat || subscriber.recheck || subscriber.last < subscriber.target)) {
+      while (!subscriber.closed && (subscriber.heartbeat || subscriber.last < subscriber.target)) {
         await gate.readSnapshot(async () => {
           if (subscriber.closed) return;
           const access = await authorize(database, subscriber.token, scope.boardId, scope);
-          subscriber.recheck = false;
           if (subscriber.heartbeat) {
             subscriber.heartbeat = false;
             send(subscriber, () => subscriber.transport.heartbeat());
@@ -126,6 +124,14 @@ export function createBoardEventStreams(
     } finally { subscriber.running = false; }
   }
 
+  // The caller holds the writer through reauthorization so a queued regrant cannot hide a revocation.
+  async function revalidate(database: Db, applies: (scope: BoardEventScope) => boolean) {
+    await Promise.all([...subscribers].filter(({ scope }) => applies(scope)).map(async (subscriber) => {
+      try { await authorize(database, subscriber.token, subscriber.scope.boardId, subscriber.scope); }
+      catch { close(subscriber); }
+    }));
+  }
+
   return {
     async subscribe(token: string, boardId: string, after: unknown, transport: BoardStreamTransport, abort: AbortSignal) {
       if (stopped || abort.aborted) throw new BoardStreamUnavailable();
@@ -144,7 +150,7 @@ export function createBoardEventStreams(
         if (!gate.ready || stopped || abort.aborted) throw new BoardStreamUnavailable();
         const subscriber: Subscriber = {
           scope, token, transport, abort, disconnect: () => close(subscriber), running: false, closed: false,
-          heartbeat: false, recheck: false, last: start ?? high, target: high, validated: high,
+          heartbeat: false, last: start ?? high, target: high, validated: high,
         };
         // Register synchronously before leaving the same snapshot used for the high water and initial replay.
         subscribers.add(subscriber);
@@ -172,20 +178,18 @@ export function createBoardEventStreams(
       }
     },
 
-    recheckToken(token: string) {
+    disconnectToken(token: string) {
       for (const subscriber of subscribers) {
-        if (subscriber.token !== token) continue;
-        subscriber.recheck = true;
-        schedule(subscriber);
+        if (subscriber.token === token) close(subscriber);
       }
     },
 
-    recheckActor(actorId: string) {
-      for (const subscriber of subscribers) {
-        if (subscriber.scope.actorId !== actorId) continue;
-        subscriber.recheck = true;
-        schedule(subscriber);
-      }
+    revalidateActor(database: Db, actorId: string) {
+      return revalidate(database, (scope) => scope.actorId === actorId);
+    },
+
+    revalidateBoards(database: Db, generationId: string, boards: ReadonlySet<string>) {
+      return revalidate(database, (scope) => scope.generationId === generationId && boards.has(scope.boardId));
     },
 
     disconnectAll() {

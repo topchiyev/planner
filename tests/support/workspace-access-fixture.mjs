@@ -102,11 +102,11 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   const app = buildApp({
     native: { origin, proxyToken, readAccess: async () => gate.ready ? ({ kind: 'ready' }) : ({ kind: 'unavailable' }), workspace: reader,
       media, boardEvents: streams,
-      relationships: createWorkspaceRelationships(db, installationId, gate, now), auth: {
+      relationships: createWorkspaceRelationships(db, installationId, gate, now, undefined, streams.revalidateBoards), auth: {
       confirm: async () => false, login: sessions.login,
       async revoke(token) {
         const revoked = await sessions.revoke(token);
-        if (revoked) streams.recheckToken(token);
+        if (revoked) streams.disconnectToken(token);
         return revoked;
       },
       async read(token) {

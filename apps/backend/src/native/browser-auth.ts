@@ -39,7 +39,7 @@ export interface BrowserAuth extends Pick<BrowserSessions, 'login' | 'read' | 'r
 
 export function createNativeBrowserAuth(
   config: NativeInstallationConfig, gate: CommandGate, mfaKey: KeyObject,
-  streams?: Pick<BoardEventStreams, 'recheckActor' | 'recheckToken'>,
+  streams?: Pick<BoardEventStreams, 'revalidateActor' | 'disconnectToken'>,
 ): BrowserAuth & { accountManagement: NativeAccountManagement; mfa: NativeMfa } {
   const hasher = createPasswordHasher();
   const allowFactorOwner = createLoginRateLimit();
@@ -49,10 +49,10 @@ export function createNativeBrowserAuth(
     finally { await client.close(); }
   }
   const sessions = (database: Db) => createBrowserSessions(database, config.installationId, gate, hasher, undefined, mfaKey);
-  const factors = (database: Db) => createMfaManagement(database, config.installationId, gate, mfaKey, hasher, undefined, streams?.recheckActor);
+  const factors = (database: Db) => createMfaManagement(database, config.installationId, gate, mfaKey, hasher, undefined, streams?.revalidateActor);
 
   const directory = (database: Db) => createAccountDirectory(database, config.installationId, gate, hasher);
-  const credentials = (database: Db) => createAccountCredentials(database, config.installationId, gate, hasher, undefined, undefined, streams?.recheckActor);
+  const credentials = (database: Db) => createAccountCredentials(database, config.installationId, gate, hasher, undefined, undefined, streams?.revalidateActor);
 
   return {
     mfa: {
@@ -84,7 +84,7 @@ export function createNativeBrowserAuth(
     read: (token) => withDatabase((database) => sessions(database).read(token)),
     async revoke(token) {
       const revoked = await withDatabase((database) => sessions(database).revoke(token));
-      if (revoked) streams?.recheckToken(token);
+      if (revoked) streams?.disconnectToken(token);
       return revoked;
     },
   };

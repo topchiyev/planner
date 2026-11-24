@@ -186,9 +186,14 @@ test('outbox acknowledgement and concurrent live access changes do not duplicate
         await dispatch();
         assert.equal((await stream.next()).id, cursor(f, ids.viewer, ids.privateBoard, 2n));
         assert.equal((await mutate(f, owner, viewerMember, 'DELETE', 3)).status, 204);
+        assert.equal((await f.call(eventPath(ids.privateBoard), viewer)).status, 404);
+        // Regrant before any outbox pass. The original socket must already be terminal.
+        assert.equal((await mutate(f, owner, boardPath(ids.privateBoard) + '/members', 'POST', 4,
+          { userId: ids.viewer, role: 'viewer' })).status, 201);
         await dispatch();
         assert.equal(await stream.next(), null);
-        assert.equal((await f.call(eventPath(ids.privateBoard), viewer)).status, 404);
+        const regranted = await open(f, ids.privateBoard, viewer);
+        try { assert.deepEqual(await regranted.next({ heartbeat: true }), { heartbeat: true }); } finally { regranted.close(); }
       } finally { stream.close(); }
 
       const manager = await open(f, ids.privateBoard, owner);
@@ -210,8 +215,10 @@ test('outbox acknowledgement and concurrent live access changes do not duplicate
         assert.equal((await mutate(f, admin, boardPath(ids.sharedBoard) + '/members/' + ids.admin, 'DELETE', 1)).status, 204);
         await dispatch();
         assert.equal((await inherited.next()).event, 'board.access-changed');
-        await f.gate.runCommand(() => f.db.collection('users').updateOne({ ...f.scope, id: ids.admin }, { $set: { role: 'boardUser' } }));
-        f.streams.recheckActor(ids.admin);
+        await f.gate.runCommand(async () => {
+          await f.db.collection('users').updateOne({ ...f.scope, id: ids.admin }, { $set: { role: 'boardUser' } });
+          await f.streams.revalidateActor(f.db, ids.admin);
+        });
         assert.equal(await inherited.next(), null);
       } finally { inherited.close(); }
     } finally { await f.close(); }
