@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { MongoWriteConcernError } from 'mongodb';
 import { assertOwnedMongoEnvironment } from '../support/mongo-environment.ts';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
 
@@ -169,11 +170,13 @@ test('active workspace materialization and generation changes share one gate', {
     const bindingChecked = deferred();
     const materialize = deferred();
     let pause = true;
+    let injectedInsertError;
     const collection = db.collection.bind(db);
     const observedDatabase = new Proxy(db, { get(target, key) {
       if (key === 'collection') return (name, ...options) => {
         const source = collection(name, ...options);
         if (name === 'projects') {
+          if (injectedInsertError) source.insertOne = async () => { throw injectedInsertError; };
           const findOne = source.findOne.bind(source);
           source.findOne = async (...query) => {
             if (pause) {
@@ -214,16 +217,34 @@ test('active workspace materialization and generation changes share one gate', {
 
       const clean = new CleanCommandRejection('stale fixture revision');
       await assert.rejects(workspace.runCommand(async (view) => {
+        try { await view.insert('projects', projectId, { name: 'duplicate' }); }
+        catch (error) {
+          assert.equal(error.code, 11_000);
+          throw clean;
+        }
+      }), clean);
+      assert.equal(gate.ready, true);
+      await assert.rejects(workspace.runCommand(async (view) => {
         assert.equal(await view.update('projects', projectId, { name: 'rejected' }, 99), false);
         throw clean;
       }), clean);
       assert.equal(gate.ready, true);
       await assert.rejects(workspace.runCommand(async (view) => {
         assert.equal(await view.update('projects', projectId, { name: 'applied' }, 1), true);
-        throw clean;
+        try { await view.insert('projects', projectId, { name: 'duplicate after success' }); }
+        catch { throw clean; }
       }), /applied effects before it failed/u);
       assert.equal(gate.state, 'maintenance');
       await assert.rejects(workspace.readSnapshot((view) => view.read('projects', projectId)), GateUnavailableError);
+
+      await gate.recover(() => {});
+      injectedInsertError = new MongoWriteConcernError({ code: 11_000,
+        writeConcernError: { code: 64, errmsg: 'fixture write concern was unconfirmed' } });
+      await assert.rejects(workspace.runCommand(async (view) => {
+        try { await view.insert('projects', projectId, { name: 'unknown' }); }
+        catch { throw clean; }
+      }), injectedInsertError);
+      assert.equal(gate.state, 'maintenance');
     } finally {
       materialize.resolve();
       await Promise.allSettled([snapshot, change, later]);
@@ -321,4 +342,32 @@ test('maintenance rejects a racing snapshot and holds the lease through an inter
   await Promise.all([recovering, closing]);
   assert.equal(gate.state, 'closed');
   acquireWriterDirectory(directory, owner, owner).release();
+});
+
+test('uncertainty invalidates an in-flight snapshot before and during shutdown', async (t) => {
+  const { directory } = await scratch(t);
+  for (const timing of ['before', 'during']) {
+    const gate = new CommandGate(acquireWriterDirectory(directory, owner, owner));
+    await gate.recover(() => {});
+    const first = deferred();
+    const second = deferred();
+    const uncertain = new Error('test failed snapshot during drain');
+    const failed = assert.rejects(gate.readSnapshot(() => first.promise), uncertain);
+    const concurrent = assert.rejects(gate.readSnapshot(() => second.promise), GateUnavailableError);
+    let closing;
+    try {
+      if (timing === 'during') closing = gate.closeAndDrain();
+      first.reject(uncertain);
+      await failed;
+      closing ??= gate.closeAndDrain();
+      assert.throws(() => acquireWriterDirectory(directory, owner, owner), /already owns/u);
+      second.resolve('must not leave the invalidated snapshot');
+      await Promise.all([concurrent, closing]);
+      assert.equal(gate.state, 'closed');
+    } finally {
+      first.reject(uncertain);
+      second.resolve();
+      await Promise.allSettled([failed, concurrent, gate.closeAndDrain()]);
+    }
+  }
 });

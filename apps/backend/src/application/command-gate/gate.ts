@@ -22,6 +22,7 @@ export class CommandGate {
   #queue: QueuedOperation[] = [];
   #readers = 0;
   #writer = false;
+  #uncertain = false;
   #closing?: Promise<void>;
   #finishClose?: () => void;
 
@@ -49,8 +50,12 @@ export class CommandGate {
     this.#state = 'recovering';
     try {
       await replay();
-      if (this.state === 'recovering') this.#state = 'open';
+      if (this.state === 'recovering') {
+        this.#uncertain = false;
+        this.#state = 'open';
+      }
     } catch (error) {
+      this.#uncertain = true;
       if (this.state === 'recovering') this.#state = 'maintenance';
       throw error;
     } finally {
@@ -90,12 +95,15 @@ export class CommandGate {
       // A caller disconnect has no bearing on the lifetime of the storage operation.
       this.#lease.assertHeld();
       const value = await Promise.resolve().then(operation);
-      if (this.#state === 'maintenance') throw new GateUnavailableError();
+      if (this.#uncertain) throw new GateUnavailableError();
       resolve(value);
     } catch (error) {
-      if (this.ready && !(error instanceof CleanCommandRejection)) {
-        this.#state = 'maintenance';
-        this.#rejectQueue();
+      if (!(error instanceof CleanCommandRejection)) {
+        this.#uncertain = true;
+        if (this.#state === 'open') {
+          this.#state = 'maintenance';
+          this.#rejectQueue();
+        }
       }
       reject(error);
     } finally {
