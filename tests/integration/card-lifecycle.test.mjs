@@ -116,24 +116,34 @@ test('card updates preserve hidden fields and exact imported text and synchroniz
     assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id })).coverAttachmentId, fixtureId(9500));
 
     const second = fixtureId(9100);
+    const sameBoardCard = fixtureId(9101);
+    const sameBoardChecklist = fixtureId(9102);
+    const sameBoardTask = fixtureId(9103);
     await f.insert('tasks', second, { checklistId: ids.checklist, linkedCardId: id, completed: true });
+    await f.insert('cards', sameBoardCard, { boardId: ids.sharedBoard, listId: ids.sharedActiveList,
+      type: 'project', kind: 'board', name: 'Same board owning card', rank: '2048' });
+    await f.insert('checklists', sameBoardChecklist, { cardId: sameBoardCard, name: 'Same board owner', rank: '1' });
+    await f.insert('tasks', sameBoardTask, { checklistId: sameBoardChecklist, linkedCardId: id, completed: false });
     assert.equal((await f.db.collection('tasks').findOne({ ...f.scope, id: ids.linkedTask })).completed, false);
     const key = randomUUID();
     const reopen = { type: 'project', closed: false };
     const saved = (await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 2, reopen, key), 200)).data;
     assert.deepEqual((await expectResponse(mutate(f, editor, 'PATCH', cardPath(id), 2, reopen, key), 200)).data, saved);
     assert.deepEqual([saved.card.closed, saved.card.dueDateCompleted, saved.card.listId, saved.card.rank], [false, true, ids.sharedActiveList, '1024']);
-    for (const taskId of [ids.linkedTask, second]) {
+    for (const taskId of [ids.linkedTask, second, sameBoardTask]) {
       const row = await f.db.collection('tasks').findOne({ ...f.scope, id: taskId });
       assert.deepEqual([row.completed, row.revision], [false, 2]);
     }
     assert.equal((await f.db.collection('checklists').findOne({ ...f.scope, id: ids.checklist })).revision, 2);
     assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: ids.activeCard })).revision, 2);
+    assert.equal((await f.db.collection('checklists').findOne({ ...f.scope, id: sameBoardChecklist })).revision, 2);
+    assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: sameBoardCard })).revision, 2);
     assert.equal((await f.db.collection('tasks').findOne({ generationId: f.stagedGenerationId, id: ids.linkedTask })).revision, 1);
     const receipt = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey: key });
     const events = await f.db.collection('events').find({ ...f.scope, commandId: receipt.id }).sort({ ordinal: 1 }).toArray();
     assert.deepEqual(events.map(({ boardId, kind, payload }) => [boardId, kind, payload]), [
       [ids.sharedBoard, 'card.changed', { id, revision: 3 }], [ids.privateBoard, 'board.invalidated', {}],
+      [ids.sharedBoard, 'board.invalidated', {}],
     ]);
     const visibleLink = (await expectResponse(f.call(cardPath(ids.activeCard) + '/checklists', viewer), 200)).data[0].tasks[0];
     assert.equal(visibleLink.kind, 'unavailable');

@@ -42,7 +42,7 @@ export async function planLinkedCardCompletion(records: WorkspaceRecords, genera
       fields: { completed, updatedAt: timestamp } });
     checklists.set(owner.id, owner);
     if (ownerCard.id !== target.id) cards.set(ownerCard.id, ownerCard);
-    if (ownerCard.boardId !== target.boardId) boards.add(ownerCard.boardId);
+    if (ownerCard.id !== target.id || ownerCard.boardId !== target.boardId) boards.add(ownerCard.boardId);
   }
   for (const id of [...checklists.keys()].sort()) effects.push(touchRevision('checklists', checklists.get(id)!, timestamp));
   for (const id of [...cards.keys()].sort()) effects.push(touchRevision('cards', cards.get(id)!, timestamp));

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
+import { useLocation, useRevalidator } from 'react-router';
 import { Node } from '@tiptap/core';
 import { Markdown, MarkdownManager } from '@tiptap/markdown';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import { cardMentionToken, maximumCardDescriptionLength, type RelationshipReadOutput } from '@planner/contracts';
+import { cardMentionToken, maximumCardDescriptionLength, workspaceSignInPath, type RelationshipReadOutput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { readAffiliation } from '../projects/project-api.js';
+import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import './card-editor.css';
 
 type Mention = RelationshipReadOutput<'boards.mentionMembers'>['data'][number];
@@ -142,34 +144,63 @@ function RichInput({ value, boardId, onChange }: { value: string; boardId: strin
 }
 
 function MemberPicker({ boardId, select }: { boardId: string; select: (person: Mention) => void }) {
+  const { pathname, search } = useLocation();
+  const revalidator = useRevalidator();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<{ query: string; data?: Mention[] }>();
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const binding = JSON.stringify([boardId, query, cursor, attempt]);
+  const [selected, setSelected] = useState<{ binding: string; page?: RelationshipReadOutput<'boards.mentionMembers'> }>();
 
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    void readAffiliation('boards.mentionMembers', boardId, new URLSearchParams({ q: query, limit: '10' }), controller.signal)
-      .then(({ data }) => { if (!controller.signal.aborted) setSelected({ query, data }); })
-      .catch(() => { if (!controller.signal.aborted) setSelected({ query }); });
+    const params = new URLSearchParams({ q: query, limit: '10' });
+    if (cursor) params.set('cursor', cursor);
+    void readAffiliation('boards.mentionMembers', boardId, params, controller.signal)
+      .then((page) => { if (!controller.signal.aborted) setSelected({ binding, page }); })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof WorkspaceRequestError && error.status === 401) {
+          window.location.replace(workspaceSignInPath(pathname + search));
+        } else if (error instanceof WorkspaceRequestError && [403, 404].includes(error.status)) {
+          setOpen(false);
+          void revalidator.revalidate();
+        } else setSelected({ binding });
+      });
     return () => controller.abort();
-  }, [open, boardId, query]);
+  }, [open, boardId, query, cursor, binding, pathname, search]);
 
-  const result = selected?.query === query ? selected : undefined;
+  function submit() {
+    setQuery(draft.trim());
+    setCursor(null);
+    setAttempt((value) => value + 1);
+  }
+
+  const result = selected?.binding === binding ? selected : undefined;
+  const next = result?.page?.page.nextCursor;
   return <div className="card-mention-picker">
-    <button className="workspace-button" type="button" aria-expanded={open} onClick={() => setOpen(!open)}>Mention a board member</button>
+    <button className="workspace-button" type="button" aria-expanded={open} onClick={() => {
+      if (!open) { setCursor(null); setAttempt((value) => value + 1); }
+      setOpen(!open);
+    }}>Mention a board member</button>
     {open && <div>
       <label>Find a board member<input type="search" value={draft} maxLength={120} onChange={(event) => setDraft(event.target.value)}
-        onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); setQuery(draft.trim()); } }} /></label>
-      <button type="button" className="workspace-button" onClick={() => setQuery(draft.trim())}>Find members</button>
-      {!result ? <p role="status">Loading board members…</p> : !result.data ? <p>Board members couldn’t load.</p> :
-        !result.data.length ? <p>No matching board members.</p> : <ul>
-          {result.data.map((person) => <li key={person.id}>
+        onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); submit(); } }} /></label>
+      <button type="button" className="workspace-button" onClick={submit}>Find members</button>
+      {!result ? <p role="status">Loading board members…</p> : !result.page ? <p>Board members couldn’t load.</p> :
+        !result.page.data.length ? <p>No matching board members.</p> : <ul>
+          {result.page.data.map((person) => <li key={person.id}>
             <button type="button" className="workspace-button" aria-label={'Mention ' + person.name}
               onClick={() => { select(person); setOpen(false); }}>{person.name}{person.username ? ' · @' + person.username : ''}</button>
           </li>)}
         </ul>}
+      {(cursor || next) && <nav aria-label="Mention results pages" className="project-actions">
+        {cursor && <button type="button" className="workspace-button" onClick={() => setCursor(null)}>First members page</button>}
+        {next && <button type="button" className="workspace-button" onClick={() => setCursor(next)}>Next members page</button>}
+      </nav>}
     </div>}
   </div>;
 }
