@@ -6,8 +6,12 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createWorkspaceFixture, workspaceIds } from '../fixtures/planner-workspace.ts';
-import { mongoFixtureDirectoryPrefix, withFixtureMongo } from '../support/fixture-mongo.ts';
+import { assertOwnedMongoEnvironment } from '../support/mongo-environment.ts';
+
+assertOwnedMongoEnvironment(process.env);
+
+const { createWorkspaceFixture, workspaceIds } = await import('../fixtures/planner-workspace.ts');
+const { mongoFixtureDirectoryPrefix, withFixtureMongo } = await import('../support/fixture-mongo.ts');
 
 async function checkPrivateSocket({ directory, socketPath, pid }) {
   assert.equal((await lstat(directory)).mode & 0o777, 0o700);
@@ -93,7 +97,7 @@ test('a failed mongod startup removes the private bootstrap directory', { timeou
   await assert.rejects(() => lstat(directory), { code: 'ENOENT' });
 });
 
-test('public health, shell and integration entries reject external settings before startup', { timeout: 25_000 }, async (t) => {
+test('public and direct suite entries reject external settings before startup', { timeout: 25_000 }, async (t) => {
   let accepted = 0;
   const canary = createServer((socket) => {
     accepted++;
@@ -123,7 +127,7 @@ test('public health, shell and integration entries reject external settings befo
     };
     if (entry.endsWith('/apps/backend/dist/main.js') ||
         (basename(entry) === 'npm-cli.js' && process.argv[2] === 'run' && process.argv[3] === 'build')) fail();
-    if (['run-suite.ts', 'health.test.mjs', 'shell.test.mjs'].includes(basename(entry))) {
+    if (['run-suite.ts', 'health.test.mjs', 'shell.test.mjs', 'planner-mongo.test.mjs'].includes(basename(entry))) {
       for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
         childProcess[name] = fail;
       }
@@ -139,6 +143,7 @@ test('public health, shell and integration entries reject external settings befo
     ['npm', ['run', 'verify:clean']],
     [process.execPath, ['--test', 'tests/health.test.mjs']],
     [process.execPath, ['--test', 'tests/shell.test.mjs']],
+    [process.execPath, ['--test', 'tests/integration/planner-mongo.test.mjs']],
   ];
   // Each invocation starts an independent runner outside this test worker.
   const childEnv = { ...process.env };
