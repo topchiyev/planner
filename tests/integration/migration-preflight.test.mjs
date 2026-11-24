@@ -196,6 +196,9 @@ test('both synthetic restored tags match the native-source preflight through a t
     }
 
     if (release !== '2.3.1') continue;
+    const alias = await inspectMigration({ ...request, sourceService: 'fixture-alias' }, owner,
+      config.replace('[fixture]', '[fixture-alias]'));
+    assert.deepEqual(alias.fingerprint, accepted.fingerprint);
     const noAdmission = () => assert.fail('Changed source admitted its old run');
     const before = accepted.fingerprint.sha256;
     const concurrent = await withMigrationSnapshot(request, owner, config, undefined,
