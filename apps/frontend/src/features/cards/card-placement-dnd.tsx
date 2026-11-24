@@ -35,9 +35,9 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     setFocus(undefined);
   }, [focus, action.busy, cards]);
 
-  function place(state: CardPlacement, { listId, beforeCardId }: Target, destinationVersion?: number) {
+  function place(state: CardPlacement, { listId, beforeCardId }: Target, destinationVersion?: number, destinationBoardId = state.card.boardId) {
     setDialog(undefined);
-    const body = cardMoveBody(state, listId, beforeCardId, destinationVersion);
+    const body = cardMoveBody(state, listId, beforeCardId, destinationVersion, destinationBoardId);
     if (!body) return;
     const { card } = state;
     setMessage('');
@@ -91,7 +91,7 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     {dialog && <CardPlacementDialog state={dialog} mode="move" onClose={() => {
       setDialog(undefined);
       setFocus({ id: dialog.card.id });
-    }} onPlace={(listId, beforeCardId, version) => place(dialog, { listId, beforeCardId }, version)} />}
+    }} onPlace={(listId, beforeCardId, version, boardId) => place(dialog, { listId, beforeCardId }, version, boardId)} />}
   </Placement.Provider>;
 }
 

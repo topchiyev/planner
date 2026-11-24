@@ -31,7 +31,9 @@ export async function authorizeCardTransfer(scope: WorkspaceAuthorization, input
     if (error instanceof WorkspaceAccessError && error.statusCode === 404) throw new RelationshipError('cardOrder');
     throw error;
   }
-  if (!destination.board.permissions.canEdit) throw new RelationshipError('cardOrder');
+  if (!destination.board.permissions.canEdit || (input.destinationBoardId !== undefined && input.destinationBoardId !== destination.board.board.id)) {
+    throw new RelationshipError('cardOrder');
+  }
   if (!finiteList(destination.list) && (duplicate || destination.list.rank !== null || input.beforeCardId !== null)) {
     throw new RelationshipError('cardTransition');
   }

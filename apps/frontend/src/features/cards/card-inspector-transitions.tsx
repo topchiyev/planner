@@ -73,8 +73,8 @@ export function CardInspectorTransitions({ card, workspace }: { card: Card; work
     {dialog && <CardPlacementDialog {...dialog} onClose={() => {
       setDialog(undefined);
       setRestoreFocus(true);
-    }} onPlace={(listId, before, version) => {
-      const body = cardMoveBody(dialog.state, listId, before, version);
+    }} onPlace={(listId, before, version, boardId) => {
+      const body = cardMoveBody(dialog.state, listId, before, version, dialog.mode === 'restore' ? undefined : boardId);
       if (body) run(dialog.mode === 'restore' ? 'cards.restore' : dialog.mode === 'duplicate' ? 'cards.duplicate' : 'cards.move', dialog.state, body);
     }} />}
   </section>;

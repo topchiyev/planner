@@ -3,6 +3,7 @@ import { useLocation } from 'react-router';
 import { workspaceSignInPath, type RelationshipReadOutput, type WorkspaceReadOutput } from '@planner/contracts';
 import { readAffiliation } from '../projects/project-api.js';
 import { readWorkspace, WorkspaceRequestError } from '../workspace/workspace-api.js';
+import './transfers.css';
 
 type DestinationPage = RelationshipReadOutput<'boards.transferDestinations'>;
 type BoardWorkspace = WorkspaceReadOutput<'boardWorkspace'>['data'];
@@ -78,7 +79,7 @@ export function TransferBoardPicker({ sourceBoardId, onPick, onUnavailable }: {
   }
   return <details onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="workspace-button">Choose another board</summary>
-    {open && <div className="project-form">
+    {open && <div className="project-form transfer-board-options">
       <label>Find destination board<input type="search" value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={120}
         onKeyDown={(event) => { if (event.key === 'Enter') applySearch(event); }} /></label>
       <button type="button" className="workspace-button" onClick={applySearch}>Search boards</button>
