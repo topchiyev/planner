@@ -130,6 +130,17 @@ export const commentSchema = entity.extend({
   permissions: z.strictObject({ canEdit: z.boolean(), canDelete: z.boolean() }),
 });
 
+export const workspaceActivityKind = z.enum(['createCard', 'moveCard', 'assignCard', 'unassignCard', 'completeTask', 'uncompleteTask']);
+export const workspaceNotificationKind = z.enum(['moveCard', 'assignCard', 'commentCard', 'mentionInComment']);
+const feedCard = z.strictObject({ id: publicIdSchema, boardId: publicIdSchema, kind: workspaceCardContext, name: z.string() });
+const activityItem = entity.omit({ revision: true }).extend({
+  kind: workspaceActivityKind, card: feedCard, actor: workspacePersonSchema.nullable(),
+});
+const notificationItem = entity.extend({
+  revision: revisionSchema.nullable(), kind: workspaceNotificationKind, card: feedCard,
+  actor: workspacePersonSchema.nullable(), readAt: nullableUtcInstantSchema,
+});
+
 const identifier = z.strictObject({ id: publicIdSchema });
 function read<ID extends string, Route extends string, I extends z.ZodType, O extends z.ZodType>(
   id: ID, path: Route, input: I, output: O,
@@ -159,7 +170,12 @@ export const workspaceOperations = {
   cardGet: read('cards.get', '/api/v1/cards/:id', identifier.extend({ boardId: publicIdSchema.optional() }), data(cardDetailSchema)),
   boardLabels: read('labels.list', '/api/v1/boards/:id/labels', identifier, data(z.array(boardLabelSchema))),
   cardChecklists: read('checklists.list', '/api/v1/cards/:id/checklists', identifier.extend({ boardId: publicIdSchema.optional() }), data(z.array(checklistSchema))),
-  cardComments: read('comments.list', '/api/v1/cards/:id/comments', identifier.extend(pageQuery), page(commentSchema)),
+  cardComments: read('comments.list', '/api/v1/cards/:id/comments', identifier.extend({ ...pageQuery, boardId: publicIdSchema.optional() }), page(commentSchema)),
+  boardActivity: read('activity.board', '/api/v1/boards/:id/activity', identifier.extend(pageQuery), page(activityItem)),
+  cardActivity: read('activity.card', '/api/v1/cards/:id/activity', identifier.extend({ ...pageQuery, boardId: publicIdSchema.optional() }), page(activityItem)),
+  notificationsList: read('notifications.list', '/api/v1/notifications', z.strictObject({
+    ...pageQuery, unread: queryBoolean.default(false),
+  }), page(notificationItem).extend({ unreadCount: nonnegative })),
 } as const;
 
 export type WorkspaceReadOperation = keyof typeof workspaceOperations;

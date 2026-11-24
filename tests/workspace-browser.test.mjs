@@ -1620,3 +1620,93 @@ test('keyboard destination picker duplicates and transfers cards and a populated
     assert.ok(await editor.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
   });
 });
+
+test('native comments and inbox honor commenter, recipient and moderation roles on desktop and narrow screens', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
+      ...fixture.scope, boardId: ids.privateBoard, userId: ids.privateOwner,
+    }));
+    await fixture.insert('boardFollows', fixtureId(20151), { boardId: ids.privateBoard, userId: ids.secondEditor });
+    await fixture.insert('cardFollows', fixtureId(20152), { cardId: ids.activeCard, userId: ids.secondEditor, isPermanent: true });
+    await fixture.insert('activities', fixtureId(20153), {
+      boardId: ids.privateBoard, cardId: ids.activeCard, actorId: ids.firstEditor, kind: 'createCard',
+    });
+    const author = await page({ width: 1440, height: 900 });
+    const recipient = await page({ width: 390, height: 844 });
+    const manager = await page({ width: 1440, height: 900 });
+    const path = origin + board(ids.privateBoard) + '/cards/' + ids.activeCard;
+    await signIn(author, origin, 'commenting-viewer');
+    await signIn(manager, origin, 'private-owner');
+    await recipient.goto(origin + '/inbox?unread=true');
+    await expect(recipient).toHaveURL(/\/sign-in\?returnTo=/u);
+    await submitSignIn(recipient, 'second-editor');
+    await expect(recipient.getByRole('heading', { name: 'Inbox', exact: true })).toBeVisible();
+    await expect(recipient.getByText('No unread notifications.')).toBeVisible();
+
+    await author.goto(path);
+    const comments = author.getByRole('region', { name: 'Comments', exact: true });
+    await comments.getByLabel('Write a comment').fill('Recheck <strong>this measurement</strong> ');
+    await comments.getByRole('button', { name: 'Mention a board member' }).click();
+    await comments.getByLabel('Find a board member').fill('second-editor');
+    await comments.getByRole('button', { name: 'Find members' }).click();
+    await comments.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
+    const submitted = Promise.withResolvers();
+    const acknowledgment = Promise.withResolvers();
+    await author.route('**/api/v1/cards/' + ids.activeCard + '/comments', async (route) => {
+      if (route.request().method() === 'POST') { submitted.resolve(); await acknowledgment.promise; }
+      await route.continue();
+    });
+    await comments.getByRole('button', { name: 'Post comment' }).click();
+    await submitted.promise;
+    try {
+      await expect(comments.getByLabel('Write a comment')).toBeDisabled();
+      await expect(comments.getByRole('button', { name: 'Mention a board member' })).toBeDisabled();
+    } finally { acknowledgment.resolve(); }
+    const posted = comments.getByRole('listitem').filter({ hasText: 'Recheck <strong>this measurement</strong>' });
+    await expect(posted.getByText('@Fixture second-editor', { exact: true })).toBeVisible();
+    await expect(posted.locator('.comment-body strong')).toHaveCount(0);
+
+    await recipient.reload();
+    await expect(recipient.getByText('mentioned you in a comment.')).toBeVisible();
+    await recipient.getByRole('button', { name: 'Menu' }).click();
+    await expect(recipient.getByRole('link', { name: 'Inbox, 1 unread' })).toBeVisible();
+    await recipient.getByRole('link', { name: 'Inbox, 1 unread' }).click();
+    await recipient.getByRole('link', { name: /Unread/u }).click();
+    await recipient.getByRole('button', { name: 'Mark read', exact: true }).click();
+    await expect(recipient.getByText('No unread notifications.')).toBeVisible();
+    await recipient.getByRole('link', { name: 'All', exact: true }).click();
+    await recipient.getByRole('button', { name: 'Mark unread', exact: true }).click();
+    await expect(recipient.getByRole('button', { name: 'Mark all read', exact: true })).toBeVisible();
+    await recipient.getByRole('button', { name: 'Mark card read' }).click();
+    await expect(recipient.getByRole('button', { name: 'Mark unread', exact: true })).toBeVisible();
+
+    await posted.getByRole('button', { name: 'Edit comment' }).click();
+    const edit = author.getByRole('dialog', { name: 'Edit comment' });
+    await expect(edit).toBeVisible();
+    const editableComment = edit.getByRole('textbox', { name: 'Comment', exact: true });
+    await expect(editableComment).toHaveValue(/Recheck/u);
+    await editableComment.fill('Edited without another notice');
+    await edit.getByRole('button', { name: 'Save comment' }).click();
+    await expect(comments.getByText('Edited without another notice')).toBeVisible();
+    await recipient.reload();
+    await expect(recipient.getByText('mentioned you in a comment.')).toHaveCount(1);
+
+    await author.getByText('Card activity', { exact: true }).click();
+    await expect(author.getByText('created this card.')).toBeVisible();
+    await author.getByRole('link', { name: 'Close card' }).click();
+    await author.getByText('Board activity', { exact: true }).click();
+    const boardActivity = author.locator('details[aria-label="Board activity"]');
+    await expect(boardActivity.getByRole('link', { name: 'Moving an assigned card' })).toBeVisible();
+
+    await manager.goto(path);
+    const moderation = manager.getByRole('region', { name: 'Comments', exact: true });
+    await expect(moderation.getByLabel('Write a comment')).toHaveCount(0);
+    await expect(moderation.getByRole('button', { name: 'Edit comment' })).toHaveCount(0);
+    await moderation.getByRole('button', { name: 'Delete comment' }).click();
+    await manager.getByRole('dialog', { name: 'Delete comment' }).getByRole('button', { name: 'Confirm deletion' }).click();
+    await expect(moderation.getByText('No comments.')).toBeVisible();
+    await recipient.reload();
+    await expect(recipient.getByText('No notifications.')).toBeVisible();
+    assert.ok(await recipient.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+  });
+});

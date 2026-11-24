@@ -118,7 +118,7 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
 }
 
 export function touchRevision(
-  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels' | 'tasks' | 'fieldGroups' | 'fieldDefinitions', row: Parameters<typeof rowRevision>[0] & { revision: number },
+  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels' | 'tasks' | 'fieldGroups' | 'fieldDefinitions' | 'comments', row: Parameters<typeof rowRevision>[0] & { revision: number },
   timestamp: string, expected = row.revision,
 ): Extract<PlannedEffect, { kind: 'update' }> & { revision: number } {
   const revision = requireRevision(row, expected, true)!;

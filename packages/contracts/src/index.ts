@@ -24,3 +24,4 @@ export * from './checklists.js';
 export * from './card-transitions.js';
 export * from './affiliations.js';
 export * from './custom-fields.js';
+export * from './discussions.js';

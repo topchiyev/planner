@@ -24,7 +24,7 @@ const protectedCollections = new Set<WorkspaceCollection>([
 const identityFields = new Set(['_id', 'id', 'generationId', 'revision', 'commandEffectId']);
 const versionedCollections = new Set<WorkspaceCollection>([
   'users', 'projects', 'boards', 'boardPreferences', 'lists', 'cards', 'labels', 'checklists', 'tasks',
-  'fieldGroups', 'fieldDefinitions', 'fieldValues', 'comments', 'attachments', 'projectBackgrounds',
+  'fieldGroups', 'fieldDefinitions', 'fieldValues', 'comments', 'attachments', 'projectBackgrounds', 'notifications',
 ]);
 const integer64Fields = new Set<string>(signedLongFields);
 const sizeFields = new Set(['byteLength', 'batch']);

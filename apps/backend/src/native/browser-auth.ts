@@ -119,7 +119,7 @@ function requestPath(request: FastifyRequest) {
 }
 
 function isShellPage(pathname: string) {
-  return /^\/(?:workspace\/?|settings(?:\/security)?\/?|admin\/accounts\/?|projects\/[^/]+\/?|boards\/[^/]+(?:\/cards\/[^/]+)?\/?)$/u.test(pathname);
+  return /^\/(?:(?:workspace|inbox)\/?|settings(?:\/security)?\/?|admin\/accounts\/?|projects\/[^/]+\/?|boards\/[^/]+(?:\/cards\/[^/]+)?\/?)$/u.test(pathname);
 }
 
 function isPublicBrowserRoute(method: string, pathname: string, mfa: boolean) {

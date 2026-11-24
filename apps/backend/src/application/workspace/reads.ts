@@ -12,6 +12,8 @@ import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
 import { attachmentFiles, cardAttachmentRows, coverForCard, cardCovers } from './card-media.js';
 import { cardDto, cardStopwatch } from './card-state.js';
 import { createChecklistReads } from './checklist-reads.js';
+import { commentPermissions } from './comment-commands.js';
+import { createFeedReads } from './feed-reads.js';
 import { checklistOrderVersion } from './checklist-state.js';
 import { fieldGroupOrder, fieldGroupRows, fieldValueRows, projectFieldGroup, type FieldGroup } from './field-state.js';
 import { personalFollow } from './affiliation-edges.js';
@@ -148,6 +150,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   }
 
   return {
+    ...createFeedReads(records, access, cursorScope),
     async projectsList(input: WorkspaceReadInput<'projectsList'>) {
       const search = textQuery(input.q, ['name', 'description']);
       const alphabetical = input.order === 'alphabetically';
@@ -305,18 +308,20 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       return { data: await checklistReads.list(card.id, board.board.id) };
     },
 
-    async cardComments({ id, limit, cursor }: WorkspaceReadInput<'cardComments'>) {
-      const context = await access.requireCard(id);
-      const scope = cursorScope('comments.list', 'time-id-desc', [id, String(limit)]);
+    async cardComments({ id, boardId, limit, cursor }: WorkspaceReadInput<'cardComments'>) {
+      const context = await access.requireCard(id, boardId);
+      const currentBoard = context.board.board.id;
+      const scope = cursorScope('comments.list', 'time-id-desc', [id, currentBoard, String(limit)]);
       const pagination = readPage(datedOrder, scope, limit, cursor);
-      const rows = await records.aggregate<WorkspaceRow<'comments'>>('comments', { cardId: id, boardId: context.board.board.id }, pagination.stages);
+      const rows = await records.aggregate<WorkspaceRow<'comments'>>('comments', { cardId: id, boardId: currentBoard,
+        $expr: { $and: [canonical, equal('cardId', id), equal('boardId', currentBoard)] },
+      }, pagination.stages);
       const { selected, page } = pagination.result(rows, (row) => ({ createdAt: iso(row.createdAt), id: row.id }));
       const authors = await visiblePeople(selected.flatMap(({ authorId }) => authorId ? [authorId] : []));
       const people = new Map(authors.map((author) => [author.id, author]));
       return { data: selected.map((row) => {
-        const own = row.authorId === actor.id && context.permissions.canComment;
         return { ...entity(row), cardId: id, text: row.text, author: row.authorId ? people.get(row.authorId) ?? null : null,
-          permissions: { canEdit: own, canDelete: own || context.board.permissions.canManage } };
+          permissions: commentPermissions(context, row.authorId === actor.id) };
       }), page };
     },
   };

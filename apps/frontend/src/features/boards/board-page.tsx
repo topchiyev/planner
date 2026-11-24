@@ -6,6 +6,7 @@ import { projectHref } from '../workspace/workspace-navigation.js';
 import { BoardAffiliations } from '../affiliations/board-affiliations.js';
 import { BoardManagement } from './board-management.js';
 import { BoardFieldGroups } from '../fields/workspace-fields.js';
+import { ActivityFeed } from '../discussions/feed.js';
 import { BoardCards } from '../cards/board-cards.js';
 
 const contexts = [
@@ -71,6 +72,7 @@ export function BoardPage() {
         </div>
         {board && lists ? <BoardCards key={board.board.id + ':' + context.id} workspace={board} lists={lists} context={context.id} />
           : <EmptyState title={context.emptyTitle} />}
+        {board && <ActivityFeed key={board.board.id} id={board.board.id} revision={board.board.revision} />}
       </section>
       <Outlet />
     </div>

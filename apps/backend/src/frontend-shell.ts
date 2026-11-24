@@ -53,7 +53,7 @@ export function registerFrontendShell(app: FastifyInstance, frontendRoot: string
       reply.header('Referrer-Policy', 'no-referrer');
       return sendShell(reply);
     });
-    const accounts = browserAuth ? ['/settings', '/settings/security', '/admin/accounts'] : [];
+    const accounts = browserAuth ? ['/inbox', '/settings', '/settings/security', '/admin/accounts'] : [];
     for (const route of [...shellRoutes, ...accounts].flatMap((path) => [path, `${path}/`])) {
       frontend.get<{ Params: Record<string, string> }>(route, (request, reply) => {
         if (Object.values(request.params).some((id) => id.length === 0)) {

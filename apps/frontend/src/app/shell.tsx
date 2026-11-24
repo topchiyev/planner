@@ -2,6 +2,7 @@ import { PLANNER_VERSION } from '@planner/contracts';
 import { useRef, useState } from 'react';
 import { NavLink, Outlet, useLoaderData, useLocation, useNavigation } from 'react-router';
 
+import { InboxLink } from '../features/discussions/inbox-link.js';
 import { WorkspaceSidebar } from '../features/workspace/workspace-navigation.js';
 import { sessionPath, type loadBrowserSession } from '../features/auth/browser-session.js';
 
@@ -75,6 +76,7 @@ export function AppShell() {
             <span className="projects-icon" aria-hidden="true" />
             Projects
           </NavLink>
+          {session && <InboxLink key={actorScope} actorId={session.account.id} follow={() => setSidebarOpen(false)} />}
           {session && !changingNativePage && <WorkspaceSidebar key={actorScope} onFollow={() => setSidebarOpen(false)} />}
         </nav>
         {session && (
