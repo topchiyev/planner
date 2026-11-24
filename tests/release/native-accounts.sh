@@ -113,6 +113,11 @@ if runuser -u nobody -- curl -fsS --noproxy '*' --unix-socket "$admin" "http://l
     echo 'Unprivileged guest user reached the operator socket.' >&2
     exit 1
 fi
+if runuser -u nobody -- plannerctl accounts inspect "$approval" > /dev/null 2>&1; then
+    echo 'Unprivileged guest user reached the installed account operator command.' >&2
+    exit 1
+fi
+expect_code 401 GET /api/v1/admin/accounts
 expect_code 404 POST "/accounts/approvals/$approval/confirm" "${auth[@]}"
 if plannerctl accounts confirm "$approval" > /dev/null 2>&1; then
     echo 'Operator CLI accepted confirmation without --yes.' >&2
