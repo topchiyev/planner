@@ -107,14 +107,45 @@ test('Chromium manages accounts, completes local recovery, changes credentials a
       await other.getByLabel('Full name').fill('Retried edit');
       await other.getByRole('button', { name: 'Save profile' }).click();
       await expect(other.getByRole('status')).toContainText('Profile saved');
-      await member.reload();
+      let letProfileRead;
+      let letOldPreferencesReturn;
+      let capturedPreferences;
+      const profileRead = new Promise((resolve) => { letProfileRead = resolve; });
+      const oldPreferencesReturn = new Promise((resolve) => { letOldPreferencesReturn = resolve; });
+      const captured = new Promise((resolve) => { capturedPreferences = resolve; });
+      await member.route('**/api/v1/me/profile', async (route) => {
+        await profileRead;
+        await route.continue();
+      });
+      await member.route('**/api/v1/me/preferences', async (route) => {
+        const response = await route.fetch();
+        capturedPreferences();
+        await oldPreferencesReturn;
+        await route.fulfill({ response });
+      });
+      const refreshed = member.reload();
+      try {
+        await captured;
+        await other.getByLabel('Editor').selectOption('markup');
+        await other.getByRole('button', { name: 'Save preferences' }).click();
+        await expect(other.getByRole('status')).toContainText('Preferences saved');
+      } finally { letProfileRead(); letOldPreferencesReturn(); }
+      await refreshed;
       await expect(member.getByLabel('Full name')).toHaveValue('Retried edit');
+      await expect(member.getByLabel('Editor')).toHaveValue('wysiwyg');
+      await member.unroute('**/api/v1/me/profile');
+      await member.unroute('**/api/v1/me/preferences');
+      await member.getByLabel('Projects view').selectOption('gridProjects');
+      await member.getByRole('button', { name: 'Save preferences' }).click();
+      await expect(member.getByRole('alert')).toContainText('The current settings have been loaded');
+      await expect(member.getByLabel('Editor')).toHaveValue('markup');
       await member.getByLabel('Projects view').selectOption('gridProjects');
       await member.getByRole('button', { name: 'Save preferences' }).click();
       await expect(member.getByRole('status')).toContainText('Preferences saved');
+      await expect(member.getByLabel('Editor')).toHaveValue('markup');
       const security = member.getByRole('heading', { name: 'Change password' }).locator('..');
       await security.getByLabel('Current password').fill(password);
-      await security.getByLabel('New password').fill(changedPassword);
+      await security.getByLabel('New password', { exact: true }).fill(changedPassword);
       await security.getByLabel('Confirm new password').fill(changedPassword);
       await security.getByRole('button', { name: 'Change password and sign out' }).click();
       await expect(member).toHaveURL(web.origin + '/sign-in');
