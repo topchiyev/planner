@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync } from 'node:fs';
 import { get, request as localRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,9 @@ import {
 } from '@planner/contracts/native';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { MongoClient } from 'mongodb';
+import { BackupError, digestPattern } from '../application/backup/archive.js';
+import { activateRestore, inspectBackup, readActivatedRestore, stageRestore } from '../application/backup/restore.js';
+import { openRestoreMedia } from '../application/backup/restore-media.js';
 import { firstAdminBinding } from '../application/auth/first-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
@@ -20,7 +23,9 @@ import {
   stopNativeMongoBootstrap,
 } from './mongo-host.js';
 import { adminRuntimeDirectory } from './admin-socket.js';
-import { assertNativeMfaKey, ensureNativeMfaKey, readNativeMfaKey } from './mfa-key.js';
+import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
+  parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
+import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
 import type { RuntimeAccess } from './runtime-access.js';
@@ -80,7 +85,7 @@ function listeners(port: number) {
   return entries ? entries.split('\n').map((entry) => entry.trim().split(/\s+/u)) : [];
 }
 
-function validateNativePorts({ appPort, dbPort }: NativeSetupOptions) {
+function validateNativePorts({ appPort, dbPort }: Pick<NativeSetupOptions, 'appPort' | 'dbPort'>) {
   const result = spawnSync(preflight, ['ports', String(appPort), String(dbPort)], { encoding: 'utf8', timeout: 15_000 });
   if (result.status !== 0) {
     throw new NativeMongoError(result.stderr?.trim() || 'The selected Planner ports could not be verified.');
@@ -144,12 +149,14 @@ function stopDatabase() {
 }
 
 function verifySetupFiles(
-  config: NativeInstallationConfig | undefined, intent: ReturnType<typeof readSetupIntent>,
+  config: NativeInstallationConfig | undefined, intent: ReturnType<typeof readSetupIntent>, restore?: RestoreIntent,
 ) {
-  if (config && (!intent || !sameSetup(config, intent.options))) {
+  const options = restore?.config ?? intent?.options;
+  if (restore && intent) throw new BackupError('Planner has conflicting setup and restore intents.');
+  if (config && (!options || !sameSetup(config, options) || (restore && config.installationId !== restore.config.installationId))) {
     throw new NativeMongoError('The Planner configuration has no matching setup intent.');
   }
-  checkPackagePorts(intent?.options, !!config);
+  checkPackagePorts(options, !!config);
 }
 
 function protectedAdminSocket(owner: ReturnType<typeof verifyOwnership>) {
@@ -212,7 +219,8 @@ async function storedPendingAction(config: NativeInstallationConfig, appGroup: n
 async function status(owner: ReturnType<typeof verifyOwnership>, confirmed?: boolean) {
   const config = readInstallationConfig(owner.appGroup);
   const intent = readSetupIntent(owner.receipt);
-  verifySetupFiles(config, intent);
+  const restore = readRestoreIntent(owner.receipt);
+  verifySetupFiles(config, intent, restore);
   const serviceState = (unit: string) => {
     const state = systemctl('show', '--property=ActiveState', '--value', unit);
     return ['active', 'inactive', 'activating', 'deactivating', 'failed'].includes(state) ? state : 'unknown';
@@ -221,15 +229,15 @@ async function status(owner: ReturnType<typeof verifyOwnership>, confirmed?: boo
   const access = config && services.application === 'active' ? await appAccess(owner) : undefined;
   const ready = access?.kind === 'ready';
   let action: string;
-  if (!config) action = intent ? 'resume-setup' : 'setup';
+  if (!config) action = restore ? 'resume-restore' : intent ? 'resume-setup' : 'setup';
   else if (ready || confirmed) action = 'complete';
   else if (confirmed === false || access?.kind === 'enrollment'
       || (access?.kind === 'unavailable' && access.reason === 'migration')) action = pendingAction(config.mode);
   else action = (services.database === 'active' ? await storedPendingAction(config, owner.appGroup) : undefined) ?? 'unknown';
   return {
     version: PLANNER_VERSION,
-    configuration: config ? 'configured' : intent ? 'configuring' : 'unconfigured',
-    mode: intent?.options.mode ?? null,
+    configuration: config ? 'configured' : intent || restore ? 'configuring' : 'unconfigured',
+    mode: restore?.config.mode ?? intent?.options.mode ?? null,
     pendingAction: action,
     readiness: ready ? 'ready' : 'unavailable',
     services,
@@ -240,6 +248,7 @@ async function setup(options: NativeSetupOptions) {
   validateNativePorts(options);
   return withInstallationLock(async (owner) => {
     const existing = readInstallationConfig(owner.appGroup);
+    if (readRestoreIntent(owner.receipt)) throw new BackupError('Use the existing Planner backup restore workflow.');
     let intent = readSetupIntent(owner.receipt);
     verifySetupFiles(existing, intent);
     if (intent && !sameSetup(intent.options, options)) {
@@ -296,7 +305,7 @@ async function control(action: 'start' | 'stop' | 'restart') {
       return status(owner);
     }
     const config = readInstallationConfig(owner.appGroup);
-    verifySetupFiles(config, readSetupIntent(owner.receipt));
+    verifySetupFiles(config, readSetupIntent(owner.receipt), readRestoreIntent(owner.receipt));
     if (!config) throw new NativeMongoError('Complete Planner setup before starting its services.');
     validateNativePorts(config);
     const listening = appListening(config.appPort, true);
@@ -330,7 +339,7 @@ async function control(action: 'start' | 'stop' | 'restart') {
 async function verifyInstalledStorage() {
   const owner = verifyOwnership();
   const config = readInstallationConfig(owner.appGroup);
-  verifySetupFiles(config, readSetupIntent(owner.receipt));
+  verifySetupFiles(config, readSetupIntent(owner.receipt), readRestoreIntent(owner.receipt));
   if (!config) throw new NativeMongoError('Complete Planner setup before verifying its storage.');
   const client = await connectOwnedDatabase(config, owner.appGroup);
   try {
@@ -339,6 +348,122 @@ async function verifyInstalledStorage() {
   } finally {
     await client.close();
   }
+}
+
+async function localBackupRequest(owner: ReturnType<typeof verifyOwnership>) {
+  const socketPath = protectedAdminSocket(owner);
+  const data = await new Promise<unknown>((resolve, reject) => {
+    const request = localRequest({ socketPath, method: 'POST', path: backupCreateEndpoint,
+      headers: { 'Content-Length': 0 } }, (response) => {
+      void (async () => {
+        let body = '';
+        response.setEncoding('utf8');
+        for await (const chunk of response) {
+          body += chunk;
+          if (body.length > 1024) throw new BackupError();
+        }
+        if (response.statusCode !== 200) throw new BackupError('The verified Planner backup could not be captured.');
+        return JSON.parse(body);
+      })().then(resolve, reject);
+    });
+    request.once('error', reject).end();
+  });
+  if (!data || typeof data !== 'object' || Object.keys(data).length !== 2 || !('backupId' in data) || !('manifestSha256' in data)
+    || typeof data.manifestSha256 !== 'string' || !digestPattern.test(data.manifestSha256)) throw new BackupError();
+  const backupId = publicIdSchema.parse(data.backupId);
+  return { backupId, manifestSha256: data.manifestSha256, directory: `${backupRoot}/${backupId}` };
+}
+
+async function restoreBackup(options: ReturnType<typeof parseRestoreOptions>) {
+  return withInstallationLock(async (owner) => {
+    const { destination, fingerprint } = options;
+    if (readInstallationConfig(owner.appGroup) || readSetupIntent(owner.receipt)) {
+      throw new BackupError('Restore requires a clean Planner installation with no active setup.');
+    }
+    let intent = readRestoreIntent(owner.receipt);
+    validateNativePorts(destination);
+    appListening(destination.appPort, false);
+    return withStoppedWriter(async (writer) => {
+      const verified = await inspectBackup(options.archive, { uid: 0, gid: 0 }, fingerprint);
+      try {
+        if (intent) {
+          if (intent.fingerprint !== fingerprint || intent.proof !== verified.proof || intent.config.installationId !== verified.config.installationId
+            || intent.generationId !== verified.archive.manifest.activeGenerationId
+            || !sameSetup(intent.config, { ...verified.config, ...destination })) {
+            throw new BackupError('Repeat restore with the original backup, origin and ports.');
+          }
+        } else {
+          checkPackagePorts(undefined, false);
+          if (inspectNativeMongo(destination.dbPort).journal || readdirSync(backupBlobs).length || readdirSync(backupStaging).length
+            || readProtectedFile('/etc/planner/mfa-key.json', owner.appGroup, 0o640) !== undefined) {
+            throw new BackupError('Restore requires a clean Planner database and media installation.');
+          }
+          checkRestoreCapacity(verified);
+          intent = createRestoreIntent(owner.receipt, verified, destination);
+        }
+        const { config } = intent;
+        await ensureNativeMongo(destination.dbPort, config.installationId);
+        const client = await connectOwnedDatabase(config, owner.appGroup);
+        try {
+          const media = await openRestoreMedia({ staging: backupStaging, blobs: backupBlobs,
+            owner: { uid: owner.appUid, gid: owner.appGroup }, fingerprint });
+          try {
+            const result = await stageRestore(client.db(databaseName), writer, media, verified);
+            installRestoredMfaKey(config.installationId, owner.appGroup, writer, verified.key, verified.source.mfaKeyDigest);
+            return result;
+          } finally { await media.close(); }
+        } finally { await client.close(); }
+      } finally { await verified.close(); }
+    });
+  });
+}
+
+async function waitForRestoredReadiness(owner: ReturnType<typeof verifyOwnership>) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if ((await appAccess(owner))?.kind === 'ready') return;
+    await delay(250);
+  }
+  throw new BackupError('The activated Planner application has not passed readiness.');
+}
+
+async function activateBackup(fingerprint: string) {
+  if (!digestPattern.test(fingerprint)) throw new BackupError('A verified backup manifest SHA-256 is required.');
+  return withInstallationLock(async (owner) => {
+    const installed = readInstallationConfig(owner.appGroup);
+    const intent = readRestoreIntent(owner.receipt);
+    verifySetupFiles(installed, readSetupIntent(owner.receipt), intent);
+    if (!intent || intent.fingerprint !== fingerprint) throw new BackupError('A matching verified staged backup is required.');
+    const { config } = intent;
+    validateNativePorts(config);
+    const verifyKey = (digest: string | undefined) => {
+      if (readNativeMfaKey(config.installationId, owner.appGroup).digest !== digest) {
+        throw new BackupError('The staged Planner key does not match the restored database.');
+      }
+    };
+    if (installed && appListening(config.appPort, true)) {
+      const client = await connectOwnedDatabase(config, owner.appGroup);
+      try {
+        const result = await readActivatedRestore(client.db(databaseName), config.installationId, fingerprint, intent.proof, verifyKey);
+        await waitForRestoredReadiness(owner);
+        return result;
+      } finally { await client.close(); }
+    }
+    appListening(config.appPort, !!installed);
+    const result = await withStoppedWriter(async (writer) => {
+      await ensureNativeMongo(config.dbPort, config.installationId);
+      const client = await connectOwnedDatabase(config, owner.appGroup);
+      try {
+        const media = await openRestoreMedia({ staging: backupStaging, blobs: backupBlobs,
+          owner: { uid: owner.appUid, gid: owner.appGroup }, fingerprint });
+        try { return await activateRestore(client.db(databaseName), writer, media, config.installationId, fingerprint, intent.proof, verifyKey, undefined, !installed); }
+        finally { await media.close(); }
+      } finally { await client.close(); }
+    });
+    publishInstallationConfig(config, owner.appGroup);
+    await startApplication(config.appPort);
+    await waitForRestoredReadiness(owner);
+    return result;
+  });
 }
 
 async function handleAccountApproval(operation: 'inspect' | 'confirm', id: string, format: string) {
@@ -394,6 +519,15 @@ try {
     });
   } else if ((action === 'account-inspect' || action === 'account-confirm') && args.length === 2) {
     await handleAccountApproval(action === 'account-inspect' ? 'inspect' : 'confirm', publicIdSchema.parse(args[0]), args[1]);
+  } else if (action === 'backup-create' && args.length === 1) {
+    const result = await withInstallationLock(localBackupRequest);
+    console.log(args[0] === 'json' ? JSON.stringify(result) : `Backup ${result.directory} verified with manifest ${result.manifestSha256}.`);
+  } else if (action === 'backup-restore' && args.length === 2) {
+    const result = await restoreBackup(parseRestoreOptions(JSON.parse(args[0])));
+    console.log(args[1] === 'json' ? JSON.stringify(result) : `Backup ${result.manifestSha256} staged and verified.`);
+  } else if (action === 'backup-activate' && args.length === 3 && args[1] === '--yes') {
+    const result = await activateBackup(args[0]);
+    console.log(args[2] === 'json' ? JSON.stringify(result) : `Restored generation ${result.generationId} activated. Sign in again.`);
   } else if (action === 'verify-storage' && args.length === 1) {
     const result = await verifyInstalledStorage();
     console.log(args[0] === 'json' ? JSON.stringify(result) : `Planner storage schema ${result.schemaVersion} verified.`);
@@ -422,7 +556,7 @@ try {
     }
   }
 } catch (error) {
-  console.error(error instanceof NativeMongoError || error instanceof StorageSchemaError || error instanceof WriterOwnershipError
+  console.error(error instanceof NativeMongoError || error instanceof BackupError || error instanceof StorageSchemaError || error instanceof WriterOwnershipError
     ? error.message : 'The Planner operator command could not be completed.');
   process.exitCode = 1;
 }

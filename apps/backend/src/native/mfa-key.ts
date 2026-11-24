@@ -77,3 +77,15 @@ export async function ensureNativeMfaKey(
   );
   assertChanged(bound.matchedCount);
 }
+
+// Only the stopped native restore operator may publish a verified backup encryption key.
+export function installRestoredMfaKey(installationId: string, group: number, lease: WriterLease, raw: Buffer, expected: string) {
+  lease.assertHeld();
+  if (raw.length !== 32 || createHash('sha256').update(raw).digest('hex') !== expected) {
+    throw new NativeMongoError('The restored Planner multifactor key does not match the backup.');
+  }
+  const existing = readKey(installationId, group);
+  if (existing ? existing.digest !== expected : false) throw new NativeMongoError('Refusing to replace a different Planner multifactor key.');
+  if (!existing) writeProtectedFile(path, fileJson({ version: 1, installationId, key: raw.toString('hex') }), group, 0o640);
+  if (readNativeMfaKey(installationId, group).digest !== expected) throw new NativeMongoError('The restored multifactor key could not be verified.');
+}

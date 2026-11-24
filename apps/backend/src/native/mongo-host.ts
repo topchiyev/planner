@@ -234,7 +234,7 @@ export function checkReceipt() {
   return receipt.trim().slice(prefix.length);
 }
 
-export async function ensureNativeMongo(port: number) {
+export async function ensureNativeMongo(port: number, restoreInstallationId?: string) {
   if (process.getuid?.() !== 0 || !validMongoPort(port)) {
     throw new NativeMongoError('Database initialization requires root and a valid private MongoDB port.');
   }
@@ -251,7 +251,7 @@ export async function ensureNativeMongo(port: number) {
     if (info.ino !== state.config.ino || info.dev !== state.config.dev) {
       throw new NativeMongoError('The Planner configuration directory changed during initialization.');
     }
-    return await provisionLocked(port, state);
+    return await provisionLocked(port, state, restoreInstallationId);
   } finally {
     closeSync(lock);
   }
@@ -309,14 +309,17 @@ export function inspectNativeMongo(port: number) {
   return { config, uid, gid, appGid, receipt, dataIdentity, unit, journal, permanent, existingConfig, permanentPid };
 }
 
-async function provisionLocked(port: number, state: ReturnType<typeof inspectNativeMongo>) {
+async function provisionLocked(port: number, state: ReturnType<typeof inspectNativeMongo>, restoreInstallationId?: string) {
   const { uid, gid, appGid, receipt, dataIdentity, unit, permanent, existingConfig, permanentPid } = state;
   let { journal } = state;
+  if (restoreInstallationId && journal && journal.credentials.installationId !== restoreInstallationId) {
+    throw new NativeMongoError('The Planner database belongs to a different restore installation.');
+  }
   if (!journal) {
     journal = {
       receipt, dataIdentity,
       credentials: {
-        installationId: randomUUID(), port, dbUid: uid, dbGid: gid, password: randomBytes(32).toString('hex'),
+        installationId: restoreInstallationId ?? randomUUID(), port, dbUid: uid, dbGid: gid, password: randomBytes(32).toString('hex'),
       },
       phase: 'initial', adminPassword: randomBytes(32).toString('hex'),
     };

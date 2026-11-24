@@ -185,3 +185,17 @@ The shared `boardEventFrameSchema` defines the delivered payload. Emit `card.rem
 The native workspace uses separate actor-scoped project and favorite queries. Search, visibility, favorites filtering, paging and the expanded group use the workspace URL. Group expansion fetches the authorized boards for that project. Display, sort and sidebar favorites settings save individual fields against the current account preference revision.
 
 Project favorites use the relationship registry at `PUT /api/v1/projects/:id/favorite` and `DELETE /api/v1/projects/:id/favorite`. Send the current quoted project revision, an idempotency key and the browser CSRF token. A favorite changes the actor's edge and keeps the shared project revision. Board, project and nested card links reload their own authorized data. Only workspace destinations and supported query fields survive password sign-in and MFA.
+
+### Native backup and staged restore
+
+Run `plannerctl backup create --json` as root on a running, ready Planner installation. It returns the private backup directory and the manifest SHA-256. Keep a trusted record of the hash separate from the copy. The archive contains ordered BSON for every Planner generation, matched private media, and a restricted source configuration and MFA key bundle. Keep the directory and its copies under operator control. The archive permissions are `0700` for directories and `0600` for files.
+
+Copy the complete archive to a private, root-owned directory at the clean destination while preserving those modes. Never use an existing Planner workspace as a restore destination. Stage and verify the copy, then activate it explicitly with the same trusted manifest hash.
+
+```sh
+plannerctl backup restore --archive /root/planner-backup --expect-manifest SHA256 \
+  --public-url https://restored.example.test --app-port 27430 --db-port 27431 --json
+plannerctl backup activate --expect-manifest SHA256 --yes --json
+```
+
+A staged restore stays unavailable to browser clients. After interruption, repeat the same command with the original archive, manifest, origin, and ports. Activation can also be repeated with that manifest. The source remains available separately. The destination uses its own proxy token, service receipts and MongoDB credentials. Users sign in again using their retained passwords and enrolled factors. Browser sessions, device trust, pending login and recovery grants, and linked access credentials expire at restore. Establish fresh linked consent where required.

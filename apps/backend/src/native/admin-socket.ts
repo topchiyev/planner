@@ -3,6 +3,7 @@ import { PLANNER_VERSION } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { accountErrors, AccountActionError } from '../application/auth/account-policy.js';
 import type { AccountCredentials } from '../application/auth/account-credentials.js';
+import { backupCreateEndpoint } from './backup-state.js';
 import type { RuntimeAccess } from './runtime-access.js';
 import { listenProtectedUnixHttp } from './unix-http.js';
 
@@ -11,6 +12,7 @@ export const adminRuntimeDirectory = '/run/planner';
 export async function startAdminSocket(
   directory: string, readAccess: () => Promise<RuntimeAccess>,
   accounts?: Pick<AccountCredentials, 'inspectApproval' | 'confirmApproval'>,
+  createBackup?: () => Promise<{ backupId: string; manifestSha256: string }>,
 ) {
   const server = createServer({ headersTimeout: 2_000, requestTimeout: 2_000, maxHeaderSize: 2_048 }, async (request, reply) => {
     reply.setHeader('Connection', 'close');
@@ -25,6 +27,12 @@ export async function startAdminSocket(
       let access: RuntimeAccess;
       try { access = await readAccess(); } catch { access = { kind: 'unavailable', reason: 'probe' }; }
       reply.end(JSON.stringify({ version: PLANNER_VERSION, access }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === backupCreateEndpoint && createBackup) {
+      request.socket.setTimeout(0);
+      try { reply.end(JSON.stringify(await createBackup())); }
+      catch { reply.writeHead(503).end(JSON.stringify({ code: 'UNAVAILABLE', message: 'Planner backup could not be captured.' })); }
       return;
     }
     const match = /^\/accounts\/approvals\/([0-9a-f-]+)(\/confirm)?$/u.exec(request.url ?? '');

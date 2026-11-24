@@ -11,6 +11,7 @@ import { createPrivateMediaStore } from './storage/blobs/private-store.js';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
 import { startNativeBoardEvents, type NativeBoardEvents } from './native/board-event-runtime.js';
+import { createNativeBackup } from './native/backup-capture.js';
 import { createNativeBrowserAuth } from './native/browser-auth.js';
 import { startNativeCommandRecovery } from './native/command-recovery.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
@@ -68,7 +69,7 @@ try {
     const events = startNativeBoardEvents(config, gate, mfaKey.key);
     boardEvents = events;
     const auth = createNativeBrowserAuth(config, gate, mfaKey.key, events.streams);
-    closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
+    closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement, createNativeBackup(config, gate, mfaKey, mediaStore));
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth,
       workspace: createNativeWorkspaceReader(config, gate, events.cursors),
