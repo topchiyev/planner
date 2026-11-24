@@ -84,7 +84,7 @@ export async function readNativeBoard(boardId: string, url: URL, signal: AbortSi
       return { ...base, cardsPage, recipeCursor: null };
     }
     if (error.status === 403 || error.status === 404) return null;
-    if (error.status === 401 || live) throw error;
+    if (error.status === 401 || (live && error.status < 500)) throw error;
     return { ...base, cardsPage: null };
   }
 }
