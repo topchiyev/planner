@@ -13,7 +13,7 @@ export function transferNotice(action: string, remaps?: Remaps) {
   const counts = [
     [remaps.labelsRemapped, 'labels remapped'], [remaps.labelsCreated, 'labels created'],
     [remaps.removedAssignees, 'assignments removed'], [remaps.removedFollows, 'follows removed'],
-    [remaps.clearedTaskAssignees, 'task assignments cleared'], [remaps.fieldGroupsMaterialized, 'field groups copied'],
+    [remaps.clearedTaskAssignees, 'task assignments cleared'], [remaps.fieldGroupsMaterialized, 'field groups remapped'],
   ] as const;
   const changes = counts.filter(([count]) => count > 0).map(([count, label]) => count + ' ' + label);
   return changes.length ? action + ' ' + changes.join(', ') + '.' : action;

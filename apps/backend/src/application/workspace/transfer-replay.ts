@@ -117,11 +117,19 @@ export async function authorizeTransferReplay(scope: WorkspaceAuthorization, ope
     const placement = operation.startsWith('cards.') || operation.startsWith('lists.');
     const ids = [data?.boardId, object(data?.card)?.boardId, object(data?.list)?.boardId]
       .filter((id): id is string => placement && publicIdSchema.safeParse(id).success);
-    if (!ids.length && await transferredLegacySubject(scope, operation, object(request), data)) throw new WorkspaceAccessError('missing');
     bindings = [...new Set(ids)].map((boardId) => ({ boardId, capability: 'edit' }));
-    const positions = [object(data?.source)?.listId, object(data?.destination)?.listId]
+    const destinationListId = object(data?.destination)?.listId;
+    const positions = [object(data?.source)?.listId, destinationListId]
       .filter((id): id is string => placement && publicIdSchema.safeParse(id).success);
-    for (const id of new Set(positions)) add(bindings, (await scope.requireList(id)).board.board);
+    let knownOriginal = ids.length > 0;
+    for (const id of new Set(positions)) {
+      const current = await scope.requireList(id);
+      add(bindings, current.board.board);
+      // The archive cannot move. A matching archived batch receipt proves its original board.
+      if (operation === 'lists.archiveCards' && id === destinationListId
+          && id === object(request)?.archiveListId && current.list.kind === 'archive') knownOriginal = true;
+    }
+    if (!knownOriginal && await transferredLegacySubject(scope, operation, object(request), data)) throw new WorkspaceAccessError('missing');
   }
   await together(bindings.map(async ({ boardId, capability }) => {
     const { permissions } = await scope.requireBoard(boardId);
