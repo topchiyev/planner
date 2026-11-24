@@ -71,6 +71,13 @@ export const router = createBrowserRouter([
         }] : workspaceRoutes),
         ...(nativeBrowserAuth ? [
           {
+            path: 'inbox',
+            lazy: async () => {
+              const { InboxPage, loadInbox } = await import('../features/discussions/inbox.js');
+              return { Component: InboxPage, loader: loadInbox };
+            },
+          },
+          {
             path: 'settings',
             lazy: async () => {
               const { AccountSettingsPage, loadAccountSettings } = await import('../features/accounts/account-settings.js');

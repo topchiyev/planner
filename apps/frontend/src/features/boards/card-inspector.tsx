@@ -6,6 +6,8 @@ import { CardInspectorTransitions } from '../cards/card-inspector-transitions.js
 import { CardFields } from '../fields/workspace-fields.js';
 import { CardChecklists } from '../checklists/card-checklists.js';
 import { CardAttachments } from '../media/card-attachments.js';
+import { CardComments } from '../discussions/comments.js';
+import { ActivityFeed } from '../discussions/feed.js';
 import { CardEditing } from '../cards/card-editing.js';
 import { PageHeading } from '../../app/page-state.js';
 
@@ -29,6 +31,9 @@ export function CardInspector() {
       {card && <CardAttachments key={`attachments:${session?.account.id}:${card.boardId}:${card.id}`} card={card} />}
       {card && <CardChecklists key={`checklists:${session?.account.id}:${card.boardId}:${card.id}`}
         card={card} groups={card.checklists} expand={workspace?.preferences.expandChecklists ?? false} />}
+      {card && <CardComments key={`comments:${session?.account.id}:${card.boardId}:${card.id}`} card={card} />}
+      {card && <ActivityFeed key={`activity:${session?.account.id}:${card.boardId}:${card.id}`}
+        id={card.id} revision={card.revision} boardId={card.boardId} />}
       {card && <CardFields key={`fields:${session?.account.id}:${card.boardId}:${card.id}`} card={card} project={workspace?.project} />}
     </aside>
   );

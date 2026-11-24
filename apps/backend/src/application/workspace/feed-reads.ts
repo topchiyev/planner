@@ -74,7 +74,7 @@ export function visibleNoticeStages(records: WorkspaceRecords, access: Workspace
           ],
         }] } }, [{ $limit: 1 }, { $project: { _id: 1 } }]),
     { $match: { $or: [{ 'liveComment.0': { $exists: true } }, { 'liveActivity.0': { $exists: true } }] } },
-    { $project: { id: 1, revision: 1, createdAt: 1, updatedAt: 1, actorId: 1, kind: 1, readAt: 1, currentCard: 1 } },
+    { $project: { id: 1, generationId: 1, revision: 1, createdAt: 1, updatedAt: 1, actorId: 1, kind: 1, readAt: 1, currentCard: 1 } },
   ];
 }
 

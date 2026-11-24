@@ -12,6 +12,10 @@ const workspaceParameters = {
   favoriteCursor: (value: string) => cursor.test(value),
   open: (value: string) => publicIdSchema.safeParse(value).success,
 };
+const inboxParameters = {
+  unread: (value: string) => value === 'true' || value === 'false',
+  cursor: (value: string) => cursor.test(value),
+};
 const boardParameters = {
   context: (value: string) => value === 'board' || value === 'archive' || value === 'trash',
   view: (value: string) => value === 'kanban' || value === 'grid' || value === 'list',
@@ -25,7 +29,7 @@ export function workspaceReturnPath(value: unknown) {
     const url = new URL(value, base);
     if (url.origin !== base) return null;
     const pathname = url.pathname.replace(/\/$/u, '');
-    const allowed = pathname === '/workspace' ? workspaceParameters : board.test(pathname) ? boardParameters : null;
+    const allowed = pathname === '/workspace' ? workspaceParameters : pathname === '/inbox' ? inboxParameters : board.test(pathname) ? boardParameters : null;
     if (!allowed && !project.test(pathname)) return null;
     const parameters = new URLSearchParams();
     for (const [field, valid] of Object.entries(allowed ?? {})) {

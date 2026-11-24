@@ -1,0 +1,19 @@
+.workspace-feed { display: grid; gap: .55rem; min-width: 0; border-top: 1px solid var(--line); padding-block: .85rem; }
+.workspace-feed h3, .feed-entries p { margin: 0; }
+.workspace-feed summary { cursor: pointer; font-weight: 650; padding-block: .35rem; }
+.workspace-feed summary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.activity-feed { margin-block-start: .8rem; }
+.comment-form { margin-block: .35rem; }
+.comment-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.feed-entries { display: grid; gap: .45rem; padding: 0; margin: 0; list-style: none; }
+.feed-entries > li { display: grid; gap: .35rem; min-width: 0; padding: .6rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.feed-entries time { color: var(--muted); font-size: .82rem; }
+.inbox-page { display: grid; gap: 1rem; }
+.inbox-toolbar, .inbox-group > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .55rem; }
+.inbox-groups { display: grid; gap: .8rem; }
+.inbox-group { border: 1px solid var(--line); border-radius: .6rem; padding: .65rem .8rem; }
+.inbox-group h2 { font-size: 1.04rem; overflow-wrap: anywhere; margin: 0 0 .45rem; }
+.inbox-group .inbox-notification { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: space-between; align-items: center; }
+.inbox-notification[data-unread='true'] { padding-inline-start: .55rem; border-inline-start: 3px solid #347862; }
+.inbox-link { justify-content: space-between; }
+.inbox-badge { border-radius: 999px; padding: .1rem .5rem; font-size: .82rem; background: #dcebe1; color: #233d32; }
