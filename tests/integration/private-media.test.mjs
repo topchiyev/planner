@@ -544,3 +544,102 @@ test('clearing trash retires only deleted logical attachment references while sh
     assert.equal(await f.db.collection('attachments').countDocuments({ ...f.scope, blobDigest: checksum(bytes) }), 1);
   });
 });
+
+test('card cover commands validate the exact logical image and keep imported unavailable associations',
+  { timeout: 125_000, skip: !decoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required' }, async () => {
+    const { readFile } = await import('node:fs/promises');
+    await withMedia(async (f) => {
+      const editor = await login(f, ids.firstEditor);
+      const viewer = await login(f, ids.viewer);
+      const outsider = await login(f, ids.admin);
+      const id = ids.activeCard;
+      const path = cardPath(id);
+      const files = path + '/attachment-files';
+      const detail = async () => (await f.call(path, viewer)).data.data;
+      const front = async () => (await f.call('/api/v1/boards/' + ids.privateBoard + '/cards', viewer)).data.data.find((card) => card.id === id).cover;
+      const patch = (cookie, revision, body, key) => f.call(path, cookie, { method: 'PATCH', headers: expected(cookie, revision, key), body });
+      const invalid = async (target, revision) => {
+        const response = await patch(editor, revision, { coverAttachmentId: target });
+        assert.equal(response.status, 422, JSON.stringify(response.data));
+        assert.equal(response.data.error.code, 'INVALID_CARD_COVER');
+      };
+      const stored = () => f.db.collection('cards').findOne({ ...f.scope, id });
+
+      const imported = fixtureId(5190);
+      const staged = fixtureId(5191);
+      const rawLink = fixtureId(5192);
+      await f.insert('attachments', imported, { cardId: id, name: 'Unavailable imported cover', kind: 'file', availability: 'unavailable' });
+      await f.insert('attachments', staged, { cardId: id, name: 'Staged image', kind: 'file', availability: 'unavailable' }, f.stagedGenerationId);
+      await f.insert('attachments', rawLink, { cardId: id, name: 'Unsafe legacy link', kind: 'link', url: 'javascript:example' });
+      await f.gate.runCommand(() => f.db.collection('cards').updateOne({ ...f.scope, id }, { $set: { coverAttachmentId: imported } }));
+      assert.deepEqual(await front(), { attachmentId: imported, hasThumbnail: false });
+      const before = await detail();
+      assert.equal(before.coverAttachmentId, imported);
+      assert.deepEqual(before.attachments.map(({ id, available, hasThumbnail, url }) => [id, available, hasThumbnail, url]),
+        [[imported, false, false, null], [rawLink, false, false, null]]);
+      await invalid(imported, 1);
+      await invalid(staged, 1);
+      await invalid(rawLink, 1);
+      assert.equal((await patch(viewer, 1, { coverAttachmentId: null })).status, 403);
+      assert.equal((await patch(outsider, 1, { coverAttachmentId: null })).status, 404);
+      const edited = await patch(editor, 1, { description: 'Unrelated content' });
+      assert.equal(edited.status, 200);
+      assert.equal(Object.hasOwn(edited.data.data, 'coverAttachmentId'), false);
+      assert.equal((await stored()).coverAttachmentId, imported);
+
+      const bytes = Buffer.from('A passive attachment');
+      const document = await upload(f, files, editor, 2, bytes, 'passive.dat');
+      assert.equal(document.status, 201);
+      const docId = document.data.data.reference.id;
+      const doc = (await detail()).attachments.find(({ id }) => id === docId);
+      assert.deepEqual([doc.available, doc.hasThumbnail, doc.byteLength], [true, false, bytes.length]);
+      await invalid(docId, 3);
+
+      const pngBytes = await readFile(new URL('sample.png', formats));
+      const first = await upload(f, files, editor, 3, pngBytes, 'first.png');
+      assert.equal(first.status, 201, JSON.stringify(first.data));
+      const firstId = first.data.data.reference.id;
+      assert.deepEqual(await front(), { attachmentId: imported, hasThumbnail: false });
+      assert.equal(first.data.data.parent.coverAttachmentId, imported);
+      const cleared = await patch(editor, 4, { coverAttachmentId: null });
+      assert.equal(cleared.status, 200);
+      assert.equal(cleared.data.data.coverAttachmentId, null);
+      assert.equal(await front(), null);
+
+      const second = await upload(f, files, editor, 5, await readFile(new URL('sample.jpeg', formats)), 'second.jpeg');
+      assert.equal(second.status, 201, JSON.stringify(second.data));
+      const secondId = second.data.data.reference.id;
+      assert.equal(second.data.data.parent.coverAttachmentId, secondId);
+      assert.deepEqual(await front(), { attachmentId: secondId, hasThumbnail: true });
+      const foreign = await upload(f, cardPath(ids.sharedTarget) + '/attachment-files', editor, 1, pngBytes, 'duplicate.png');
+      assert.equal(foreign.status, 201);
+      const duplicateId = foreign.data.data.reference.id;
+      assert.notEqual(duplicateId, firstId);
+      assert.equal(await f.db.collection('blobs').countDocuments({ ...f.scope, digest: checksum(pngBytes) }), 1);
+      await invalid(duplicateId, 6);
+      assert.equal((await socket(f, filePath(duplicateId) + '/thumbnail/small', viewer)).status, 404);
+      assert.equal((await patch(editor, 5, { coverAttachmentId: firstId })).data.error.code, 'REVISION_CONFLICT');
+      const selectKey = randomUUID();
+      const chosen = await patch(editor, 6, { coverAttachmentId: firstId }, selectKey);
+      assert.equal(chosen.status, 200);
+      assert.deepEqual([chosen.data.data.card.revision, chosen.data.data.coverAttachmentId], [7, firstId]);
+      assert.deepEqual((await patch(editor, 6, { coverAttachmentId: firstId }, selectKey)).data, chosen.data);
+      assert.deepEqual(await front(), { attachmentId: firstId, hasThumbnail: true });
+      const image = await socket(f, filePath(firstId) + '/thumbnail/large', viewer);
+      assert.equal(image.status, 200);
+      assert.equal(image.headers['content-type'], 'image/png');
+
+      const remove = (target, key) => f.call(filePath(target), editor, { method: 'DELETE', headers: expected(editor, 1, key) });
+      assert.equal((await remove(secondId)).headers['planner-parent-revision'], '8');
+      assert.equal((await detail()).coverAttachmentId, firstId);
+      const removalKey = randomUUID();
+      assert.equal((await remove(firstId, removalKey)).headers['planner-parent-revision'], '9');
+      assert.equal((await remove(firstId, removalKey)).headers['planner-parent-revision'], '9');
+      assert.equal(await front(), null);
+      assert.equal((await patch(editor, 6, { coverAttachmentId: firstId }, selectKey)).data.error.code, 'INVALID_CARD_COVER');
+      assert.equal((await socket(f, filePath(firstId) + '/download', viewer)).status, 404);
+      assert.deepEqual((await socket(f, filePath(duplicateId) + '/download', editor)).bytes, pngBytes);
+      assert.equal((await stored()).revision, 9);
+      assert.equal((await stored()).coverAttachmentId, null);
+    });
+  });

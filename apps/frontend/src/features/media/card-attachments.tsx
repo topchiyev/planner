@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from 'react';
+import { useRevalidator } from 'react-router';
 import { maximumMediaBytes, mediaNameSchema, safeMediaLink, type WorkspaceReadOutput } from '@planner/contracts';
 import { relationshipCommand } from '../projects/project-api.js';
 import { useWorkspaceMutation, WorkspaceDialog } from '../projects/project-controls.js';
+import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 import { attachmentDownload, attachmentFileForm, attachmentThumbnail, attachmentWrite } from './attachment-api.js';
 import './card-media.css';
 
@@ -19,6 +21,7 @@ const errors = new Map([
 
 export function CardAttachments({ card }: { card: Card }) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const revalidator = useRevalidator();
   const action = useWorkspaceMutation(errors, 'This card, attachment or your access changed. Review the current information and try again.',
     'Check the attachment name, file or link.');
   const editable = card.permissions.canEdit;
@@ -28,8 +31,14 @@ export function CardAttachments({ card }: { card: Card }) {
 
   function setCover(coverAttachmentId: string | null) {
     const body = { coverAttachmentId };
-    void action.run(['cards.update', card.id, card.revision, body], (csrf, key) =>
-      relationshipCommand('cards.update', csrf, key, { id: card.id, revision: card.revision, body }));
+    void action.run(['cards.update', card.id, card.revision, body], async (csrf, key) => {
+      try {
+        return await relationshipCommand('cards.update', csrf, key, { id: card.id, revision: card.revision, body });
+      } catch (error) {
+        if (error instanceof WorkspaceRequestError && error.code === 'INVALID_CARD_COVER') await revalidator.revalidate();
+        throw error;
+      }
+    });
   }
 
   return <section className="card-attachments" aria-label="Attachments">
