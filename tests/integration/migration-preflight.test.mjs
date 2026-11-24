@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -290,7 +290,7 @@ test('both synthetic restored tags match the native-source preflight through a t
     postgres.write(database, `DELETE FROM public.card WHERE id IN (-9223372036854775808,-9007199254740993,0,2,10,9223372036854775807)`);
 
     const current = await inspectMigration(request, owner, config);
-    await testBatchRecovery({ request, config, receipt: current, postgres, database });
+    await testBatchRecovery({ root, request, config, receipt: current, postgres, database });
 
     postgres.write(database, 'GRANT UPDATE(name) ON public.board TO fixture_reader');
     await assert.rejects(inspectMigration(request, owner, config), refuses('source-role'));
@@ -329,7 +329,7 @@ test('both synthetic restored tags match the native-source preflight through a t
   }
 });
 
-async function testBatchRecovery({ request, config, receipt, postgres, database }) {
+async function testBatchRecovery({ root, request, config, receipt, postgres, database }) {
   await withFixtureMongo(async ({ db, directory }) => {
     const installationId = randomUUID();
     const writerPath = join(directory, 'writer');
@@ -339,18 +339,18 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
     await install.insertOne({ _id: 'installation', installationId, schemaVersion: 0, activeGenerationId: null,
       setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: null } });
     await migrateStorageSchema(db, installationId);
-    const preflightPath = join(directory, 'migration');
+    const preflightPath = join(root, 'migration');
     await mkdir(preflightPath, { mode: 0o700 });
     const records = db.collection('importRuns');
     const capture = { mongoBytes: '1', blobBytes: '2', stagingBytes: '3' };
     let interrupted;
     let intentBytes;
-    async function publish(hook) {
+    async function publish(hook, current = receipt, capacity = capture) {
       const ownedDirectory = await anchoredDirectory(preflightPath, owner, 0o700);
       const publication = acquireWriterDirectory(writerPath, owner, owner);
       try {
         return await persistMigrationPreflight(publication, db, installationId, ownedDirectory, owner,
-          request, receipt, capture, hook);
+          request, current, capacity, hook);
       } finally { publication.release(); await ownedDirectory.close(); }
     }
     await assert.rejects(publish(async () => {
@@ -381,7 +381,7 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
     const key = importRunKey(identity);
     const staged = db.collection('cards');
     const cursorScope = { generationId, runId, fingerprint: receipt.fingerprint.sha256, pass: 'reserve', table: 'card' };
-    const cursors = migrationCursors(randomBytes(32));
+    const cursors = migrationCursors(Buffer.from(JSON.parse(intentBytes).checkpointKey, 'base64url'));
     const atStart = cursors.seal(cursorScope, null);
     assert.equal(cursors.open(cursorScope, atStart), null);
     assert.equal(cursors.open(cursorScope, cursors.seal(cursorScope, '-9223372036854775808')), '-9223372036854775808');
@@ -398,7 +398,8 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
     const run = (callback) => withMigrationSnapshot(request, owner, config, undefined,
       { batchSize: 1, expectedFingerprint: receipt.fingerprint.sha256 }, callback);
     let admitted = 0;
-    async function batch(proof, checkpoint, interrupt) {
+    async function batch(proof, checkpoint, interrupt, afterApply) {
+      assert.deepEqual(proof.capture, { capturedAt: receipt.capture.capturedAt, sourceInstanceId: receipt.capture.source.instanceId });
       expiredProof = proof;
       admitted += 1;
       const source = await proof.readBatch('card', checkpoint?.lastSourceId ?? null, 2);
@@ -413,6 +414,7 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
               { $setOnInsert: { name: row.name } }, { ...durable, upsert: true });
             if (interrupt) throw new MigrationError('target-write', 'Interrupted after durable effect.');
           }
+          await afterApply?.();
         });
     }
 
@@ -447,12 +449,50 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
       await assert.rejects(writeMigrationBatch(lease, db, identity, expiredProof, cursors, first,
         { pass: 'reserve', table: 'card', lastSourceId: '9007199254740995' }, async () => assert.fail('Expired proof admitted')),
       refuses('source-changed'));
-      const { value: second } = await run((proof) => batch(proof, first, false));
+      const originalFailure = new MigrationError('source-changed', 'Original snapshot callback error.');
+      let detached;
+      await assert.rejects(run(async (proof) => {
+        detached = writeMigrationBatch(lease, db, identity, proof, cursors, first,
+          { pass: 'reserve', table: 'card', lastSourceId: '9007199254740996' },
+          async () => assert.fail('Closing snapshot initiated target effects'));
+        void detached.catch(() => {});
+        throw originalFailure;
+      }), (error) => error === originalFailure);
+      await assert.rejects(detached, refuses('source-changed'));
+      assert.equal(await staged.countDocuments({ generationId }), 2);
+      assert.deepEqual((await records.findOne(key)).checkpoint, first);
+
+      const entered = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      let callbackClosed = false;
+      const closing = assert.rejects(run(async (proof) => {
+        const admitted = batch(proof, first, false, async () => {
+          entered.resolve();
+          await release.promise;
+        });
+        void admitted.catch(entered.reject);
+        await entered.promise;
+        throw originalFailure;
+      }), (error) => error === originalFailure).then(() => { callbackClosed = true; });
+      try {
+        await entered.promise;
+        await delay(25);
+        assert.equal(callbackClosed, false);
+        assert.deepEqual((await records.findOne(key)).checkpoint, first);
+      } finally { release.resolve(); }
+      await closing;
+      const { checkpoint: second, state } = await records.findOne(key);
       assert.equal(cursors.open(cursorScope, second.token), '9007199254740996');
       assert.equal(await staged.countDocuments({ generationId }), 4);
       assert.equal((await install.findOne({ _id: 'installation' })).activeGenerationId, null);
-      assert.equal((await records.findOne(key)).state, 'staging');
+      assert.equal(state, 'staging');
     } finally { lease.release(); }
+    const beforeReplay = await records.findOne(key);
+    const replay = await publish(undefined, { ...receipt, restoredPostgresVersion: '17.999' },
+      { ...capture, mongoBytes: '4000' });
+    assert.deepEqual(replay, completed);
+    assert.deepEqual(await records.findOne(key), beforeReplay);
+    assert.equal(await records.countDocuments(), 1);
   });
 }
 

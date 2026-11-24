@@ -8,7 +8,7 @@ import type { Db } from 'mongodb';
 import { anchoredDirectory, childPath, fdPath, fileChunks, type Owner } from '../application/backup/archive.js';
 import type { WriterLease } from '../application/command-gate/writer-lease.js';
 import { durable } from '../application/command-journal/records.js';
-import { importRunKey, type ImportRun } from '../application/migration/checkpoint.js';
+import { importRunKey, migrationCursors, type ImportRun } from '../application/migration/checkpoint.js';
 import { MigrationError, sha256 } from '../application/migration/manifest.js';
 import type { inspectMigration, MigrationInput } from '../application/migration/preflight.js';
 import { readInstallation, verifyStorageSchema } from '../storage/schema.js';
@@ -137,12 +137,23 @@ export async function persistMigrationPreflight(
     const runId = publicIdSchema.parse(saved.runId);
     const generationId = generationIdSchema.parse(saved.generationId);
     const createdAt = new Date(utcInstantSchema.parse(saved.createdAt));
-    if (runId === generationId || saved.formatVersion !== 1 || saved.installationId !== installationId
-      || saved.manifestSha256 !== receipt.manifestSha256 || saved.fingerprintSha256 !== receipt.fingerprint.sha256
-      || !isDeepStrictEqual(saved.fingerprint, receipt.fingerprint) || !isDeepStrictEqual(saved.capture, capture)
-      || !isDeepStrictEqual(saved.inputs, input) || typeof saved.checkpointKey !== 'string'
+    const storedCapacity = saved.capacity;
+    const capacityFields = ['mongoBytes', 'blobBytes', 'stagingBytes'] as const;
+    if (runId === generationId || typeof saved.checkpointKey !== 'string'
       || !/^[\w-]{43}$/u.test(saved.checkpointKey)
-      || Buffer.from(saved.checkpointKey, 'base64url').toString('base64url') !== saved.checkpointKey) throw publishFailure();
+      || Buffer.from(saved.checkpointKey, 'base64url').toString('base64url') !== saved.checkpointKey
+      || typeof saved.restoredPostgresVersion !== 'string' || !/^17(?:\.[0-9]+){0,2}$/u.test(saved.restoredPostgresVersion)
+      || !storedCapacity || !capacityFields.every((field) => typeof storedCapacity[field] === 'string'
+        && /^(?:0|[1-9][0-9]{0,40})$/u.test(storedCapacity[field]))) throw publishFailure();
+    const [mongoBytes, blobBytes, stagingBytes] = capacityFields.map((field) => storedCapacity[field] as string);
+    const output = {
+      ...publicReceipt(runId, receipt, { mongoBytes, blobBytes, stagingBytes }),
+      restoredPostgresVersion: saved.restoredPostgresVersion as string,
+    };
+    if (!isDeepStrictEqual(saved, {
+      formatVersion: 1, installationId, generationId, createdAt: createdAt.toISOString(),
+      checkpointKey: saved.checkpointKey, fingerprint: receipt.fingerprint, capture, inputs: input, ...output,
+    })) throw publishFailure();
     const name = runId + '.json';
     const published = await readRecord(directory, name, owner);
     if (published && !published.equals(bytes)) throw publishFailure();
@@ -155,14 +166,28 @@ export async function persistMigrationPreflight(
     };
     lease.assertHeld();
     await directory.sync();
+    lease.assertHeld();
     const runs = db.collection<ImportRun>('importRuns');
     await runs.updateOne(key, { $setOnInsert: row }, { ...durable, upsert: true });
-    if (!isDeepStrictEqual(await runs.findOne(key), row)) throw publishFailure();
+    const savedRun = await runs.findOne(key);
+    if (!savedRun) throw publishFailure();
+    const { state, checkpoint, updatedAt, ...original } = savedRun;
+    const { state: _state, checkpoint: _checkpoint, updatedAt: _updatedAt, ...expected } = row;
+    if (!isDeepStrictEqual(original, expected) || !(updatedAt instanceof Date) || !Number.isFinite(updatedAt.valueOf())) throw publishFailure();
+    if (state === 'preflighted') {
+      if (checkpoint !== null || updatedAt.valueOf() !== createdAt.valueOf()) throw publishFailure();
+    } else {
+      if (!published || state !== 'staging' || !checkpoint) throw publishFailure();
+      const lastSourceId = migrationCursors(Buffer.from(saved.checkpointKey, 'base64url')).open({
+        runId, generationId, fingerprint: receipt.fingerprint.sha256, pass: checkpoint.pass, table: checkpoint.table,
+      }, checkpoint.token);
+      if (lastSourceId !== checkpoint.lastSourceId) throw publishFailure();
+    }
     await afterMongo?.();
     lease.assertHeld();
     if (!published) await writeRecord(directory, name, bytes);
     await directory.sync();
-    return publicReceipt(runId, receipt, capacity);
+    return output;
   } catch { throw publishFailure(); }
 }
 

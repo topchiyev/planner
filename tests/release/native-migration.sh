@@ -201,6 +201,10 @@ JS
     PGHOST=/unused PGSERVICE=ignored PGDATABASE=postgres PGUSER=ignored PGOPTIONS='-c transaction_read_only=off' \
         preflight_directory "$prepared" "source-$suffix" >"$work/accepted-$suffix.json"
     check_receipt "$work/accepted-$suffix.json" "$release"
+    if [ "$release" = 2.3.1 ]; then
+        preflight_directory "$prepared" "source-$suffix" >"$work/replayed-$suffix.json"
+        cmp "$work/accepted-$suffix.json" "$work/replayed-$suffix.json"
+    fi
     [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
     test_readiness
     printf 'Packaged Community %s preflight verified.\n' "$release"

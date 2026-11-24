@@ -97,15 +97,30 @@ async function whileReadingAssets<T>(client: Client, verify: () => Promise<T>) {
   }
 }
 
-const admittedSnapshots = new WeakSet<VerifiedSourceSnapshot>();
+type SnapshotOperations = { accepting: boolean; pending: Set<Promise<unknown>>; failure?: unknown };
+const admittedSnapshots = new WeakMap<VerifiedSourceSnapshot, SnapshotOperations>();
 export type VerifiedSourceSnapshot = {
   readonly fingerprint: SourceFingerprint;
+  readonly capture: Readonly<{ capturedAt: string; sourceInstanceId: string }>;
   readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number): Promise<SourceBatch<T>>;
 };
 
-export function assertVerifiedSourceSnapshot(snapshot: VerifiedSourceSnapshot) {
-  if (!admittedSnapshots.has(snapshot))
-    throw new MigrationError('source-changed', 'Open and verify the source snapshot before writing a batch.');
+export function assertVerifiedSourceSnapshot(snapshot: VerifiedSourceSnapshot, accepting = false) {
+  const operations = admittedSnapshots.get(snapshot);
+  if (!operations || (accepting && !operations.accepting))
+    throw new MigrationError('source-changed', 'Open and verify the source snapshot before reading or writing a batch.');
+  return operations;
+}
+
+export function trackSourceOperation<T>(snapshot: VerifiedSourceSnapshot, run: () => Promise<T>) {
+  const operations = assertVerifiedSourceSnapshot(snapshot, true);
+  const started = run();
+  operations.pending.add(started);
+  void started.then(
+    () => operations.pending.delete(started),
+    (error: unknown) => { operations.failure ??= error; operations.pending.delete(started); },
+  );
+  return started;
 }
 
 export async function withMigrationSnapshot<T>(
@@ -138,29 +153,23 @@ export async function withMigrationSnapshot<T>(
         throw new MigrationError('source-changed', 'The source snapshot changed. Start a new import run.');
       const rows = Object.values(source.rows).reduce((sum, count) => sum + BigInt(count), 0n);
       Object.freeze(fingerprint.components);
-      const pendingReads = new Set<Promise<unknown>>();
-      let readFailure: unknown;
+      const operations: SnapshotOperations = { accepting: true, pending: new Set() };
       const snapshot: VerifiedSourceSnapshot = Object.freeze({
         fingerprint: Object.freeze(fingerprint),
+        capture: Object.freeze({ capturedAt: capture.capturedAt, sourceInstanceId: capture.source.instanceId }),
         readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number) {
-          assertVerifiedSourceSnapshot(snapshot);
-          const result = readSourceBatch(client, table, lastSourceId, limit);
-          pendingReads.add(result);
-          void result.then(
-            () => pendingReads.delete(result),
-            (error: unknown) => { readFailure ??= error; pendingReads.delete(result); },
-          );
-          return result;
+          return trackSourceOperation(snapshot, () => readSourceBatch(client, table, lastSourceId, limit));
         },
       });
-      admittedSnapshots.add(snapshot);
+      admittedSnapshots.set(snapshot, operations);
       let value: T;
       try { value = await read(snapshot); }
       finally {
+        operations.accepting = false;
+        await Promise.allSettled(operations.pending);
         admittedSnapshots.delete(snapshot);
-        await Promise.allSettled(pendingReads);
       }
-      if (readFailure !== undefined) throw readFailure;
+      if (operations.failure !== undefined) throw operations.failure;
       return {
         manifestSha256, capture, dump, fingerprint, rows: source.rows,
         estimates: { sourceBytes: source.dataBytes, sourceIndexes: source.indexBytes, sourceRows: rows, assetBytes: assetSummary.bytes },
