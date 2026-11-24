@@ -84,6 +84,17 @@ export async function findMfaProof(
   return proof.source === 'password' ? proof : null;
 }
 
+export async function hasConsumedStagedProof(database: Db, scope: ActorScope, recoveryId: string, factorId: string, time: Date) {
+  const proof = await proofs(database).findOne({
+    ...scope, _id: workspaceKey(scope.generationId, factorId), id: factorId, kind: 'mfa-enrollment', source: 'staged',
+    recoveryId, consumedAt: time, issuedAt: { $lte: time }, expiresAt: { $gt: time }, encrypted: { $exists: false },
+  });
+  return proof !== null && isStoredDate(proof.issuedAt) && isStoredDate(proof.expiresAt)
+    && proof.expiresAt.getTime() === proof.issuedAt.getTime() + proofLifetime
+    && Number.isSafeInteger(proof.attempts) && proof.attempts >= 0 && proof.attempts < attemptLimit
+    && typeof proof.tokenDigest === 'string' && digestPattern.test(proof.tokenDigest);
+}
+
 function proofMatch(proof: MfaProof, time: Date) {
   return {
     _id: proof._id, installationId: proof.installationId, generationId: proof.generationId, userId: proof.userId,

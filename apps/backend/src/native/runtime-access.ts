@@ -1,5 +1,4 @@
 import type { NativeInstallationConfig } from '@planner/contracts/native';
-import { getLocalAccount } from '../application/auth/accounts.js';
 import { readStagedMfaEnrollment } from '../application/auth/mfa-account.js';
 import { firstAdminBinding, hasFirstAdminGrant } from '../application/auth/first-admin.js';
 import { StorageSchemaError, verifyStorageSchema } from '../storage/schema.js';
@@ -49,7 +48,7 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
       if (installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
       if (config.mode === 'import') {
         const staged = await readStagedMfaEnrollment(database, config.installationId, new Date());
-        return staged && getLocalAccount(staged.account)
+        return staged
           ? { kind: 'enrollment', step: 'mfa' }
           : { kind: 'unavailable', reason: 'migration' };
       }

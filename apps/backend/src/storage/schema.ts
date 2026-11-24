@@ -32,6 +32,7 @@ export interface InstallationDocument {
     stagedMfaEnrollment?: {
       userId: string;
       recoveryId: string;
+      accountRevision: number;
       credentialsVersion: number;
     };
   };

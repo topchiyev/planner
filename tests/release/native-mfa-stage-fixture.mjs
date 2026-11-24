@@ -33,18 +33,19 @@ try {
     const time = new Date();
     const verifier = await createPasswordHasher().encode('Synthetic staged password with space');
     await db.collection('users').insertOne({
-      _id: workspaceKey(generationId, userId), id: userId, generationId, revision: 1, normalizedEmail: 'staged@example.test',
+      _id: workspaceKey(generationId, userId), id: userId, generationId, revision: 3, normalizedEmail: 'staged@example.test',
       email: 'staged@example.test', name: 'Staged Admin', username: null, normalizedUsername: null, role: 'admin',
       disabledAt: null, createdAt: time, preferences: defaultPreferences, requiresMfaEnrollment: true,
       localAuth: { passwordVerifier: verifier, credentialsVersion: 2, mfa: 'enrollment-required' },
     }, durable);
     await db.collection('recoveryGrants').insertOne({
       _id: workspaceKey(generationId, recoveryId), id: recoveryId, userId, generationId, installationId,
-      kind: 'account-recovery', targetEpoch: 1, tokenDigest: tokenDigest(newToken()), actorId: userId, actorEpoch: 1,
+      kind: 'account-recovery', targetEpoch: 1, targetRevision: 2,
+      tokenDigest: tokenDigest(newToken()), actorId: userId, actorEpoch: 0,
       issuedAt: new Date(time - 10_000), expiresAt: new Date(Number(time) + 30 * 60_000 - 10_000), consumedAt: time, revokedAt: null,
     }, durable);
     const saved = await installation.updateOne({ _id: 'installation', installationId, activeGenerationId: { $type: 'null' } },
-      { $set: { 'setup.enrollmentGenerationId': generationId, 'setup.stagedMfaEnrollment': { userId, recoveryId, credentialsVersion: 2 } } }, durable);
+      { $set: { 'setup.enrollmentGenerationId': generationId, 'setup.stagedMfaEnrollment': { userId, recoveryId, accountRevision: 3, credentialsVersion: 2 } } }, durable);
     assert.equal(saved.matchedCount, 1);
     const ticket = await issueStagedMfaTicket(db, installationId, new Date());
     assert.match(ticket, /^[A-Za-z0-9_-]{43}$/u);
@@ -57,6 +58,7 @@ try {
     assert.equal(user.role, 'admin');
     assert.equal(user.requiresMfaEnrollment, false);
     assert.equal(user.localAuth.credentialsVersion, 3);
+    assert.equal(user.revision, 4);
     assert.equal(user.localAuth.mfa, 'totp');
     assert.ok(getFactor(user));
     assert.equal(await db.collection('sessions').countDocuments({}), 0);

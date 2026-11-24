@@ -36,12 +36,16 @@ export function keepCommandRecovery(gate: CommandGate, recover: (running: () => 
 }
 
 export function startNativeCommandRecovery(
-  config: NativeInstallationConfig, gate: CommandGate, recoverPrivate?: (database: Db, installationId: string) => Promise<void>,
+  config: NativeInstallationConfig, gate: CommandGate,
+  recoverPrivate?: (database: Db, installationId: string) => Promise<void>,
+  verifyBeforeReplay?: (database: Db, installationId: string) => Promise<void>,
 ) {
   return keepCommandRecovery(gate, async (running) => {
     const client = await connectConfiguredNativeMongo(config);
     try {
+      if (!running()) return;
       const database = client.db(databaseName);
+      await verifyBeforeReplay?.(database, config.installationId);
       if (running()) await new CommandJournal(gate, database, config.installationId).recover(
         recoverPrivate && (() => recoverPrivate(database, config.installationId)),
       );

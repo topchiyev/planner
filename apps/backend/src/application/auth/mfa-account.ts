@@ -7,10 +7,11 @@ import { assertChanged, durable } from '../command-journal/records.js';
 import { applyCommandEffect } from '../../storage/command-effects.js';
 import { isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { readInstallation, requireCurrentSchema, type InstallationDocument } from '../../storage/schema.js';
-import { type AccountRecord } from './accounts.js';
+import { isRecoveryGrant, type RecoveryGrant } from './account-grant.js';
+import { getLocalAccount, type AccountRecord } from './accounts.js';
 import { tokenDigest } from './credentials.js';
 import { matchTotpCounter } from './mfa-crypto.js';
-import { isFactorState, type FactorState } from './mfa-records.js';
+import { hasConsumedStagedProof, isFactorState, type FactorState } from './mfa-records.js';
 
 type MfaAction = 'enabled' | 'disabled' | 'recovery-codes-renewed';
 
@@ -30,6 +31,17 @@ export type MfaAccount = Omit<AccountRecord, 'localAuth'> & {
 };
 export const mfaAccounts = (db: Db) => db.collection<MfaAccount>('users');
 
+export function hasPasswordOnlyAuth(account: AccountRecord) {
+  const local = (account as MfaAccount).localAuth;
+  return !account.requiresMfaEnrollment && local?.mfa === 'none' && local.factor === undefined;
+}
+
+export function hasPendingFactorEnrollment(account: AccountRecord) {
+  const local = (account as MfaAccount).localAuth;
+  return local?.factor === undefined && (local?.mfa === 'enrollment-required'
+    || (account.requiresMfaEnrollment === true && local?.mfa === 'none'));
+}
+
 export function getFactor(account: AccountRecord) {
   const localAuth = (account as MfaAccount).localAuth;
   if (localAuth?.mfa !== 'totp' || account.requiresMfaEnrollment || !isFactorState(localAuth.factor)) return null;
@@ -42,6 +54,12 @@ export function mfaActorScope(installationId: string, account: AccountRecord) {
     throw new CommandRecoveryError('The account has an invalid credential version.');
   }
   return { installationId, generationId: account.generationId, userId: account.id, credentialsVersion: credentialsVersion! };
+}
+
+export function canChangeFactor(account: AccountRecord, advanceEpoch: boolean) {
+  const version = account.localAuth?.credentialsVersion ?? -1;
+  return version > 0 && Number.isSafeInteger(version) && Number.isSafeInteger(version + Number(advanceEpoch))
+    && revisionSchema.safeParse(account.revision).success && revisionSchema.safeParse(account.revision + 1).success;
 }
 
 function accountMatch(account: AccountRecord) {
@@ -86,7 +104,7 @@ export async function applyFactorChange(
   const version = mfaActorScope(installationId, account).credentialsVersion;
   const credentialsVersion = action === 'recovery-codes-renewed' ? version : version + 1;
   const revision = account.revision + 1;
-  if (!revisionSchema.safeParse(revision).success || !Number.isSafeInteger(credentialsVersion)) {
+  if (!canChangeFactor(account, action !== 'recovery-codes-renewed')) {
     throw new CommandRecoveryError('The account multifactor version cannot advance.');
   }
   const audit: FactorAudit = { id: randomUUID(), action, time, revision, credentialsVersion };
@@ -112,8 +130,12 @@ export async function applyFactorChange(
 
 async function finishFactorChange(database: Db, installationId: string, account: MfaAccount) {
   const audit = account.localAuth?.factorAudit;
-  if (!audit || !publicIdSchema.safeParse(audit.id).success || !isStoredDate(audit.time)
+  if (!generationIdSchema.safeParse(account.generationId).success || !publicIdSchema.safeParse(account.id).success
+      || account._id !== workspaceKey(account.generationId, account.id) || account.disabledAt !== null
+      || account.requiresMfaEnrollment !== false || !getLocalAccount(account)
+      || !audit || !publicIdSchema.safeParse(audit.id).success || !isStoredDate(audit.time)
       || !revisionSchema.safeParse(audit.revision).success || audit.revision !== account.revision
+      || !Number.isSafeInteger(audit.credentialsVersion) || audit.credentialsVersion < 1
       || audit.credentialsVersion !== account.localAuth!.credentialsVersion
       || !['enabled', 'disabled', 'recovery-codes-renewed'].includes(audit.action)
       || (audit.action === 'disabled' ? account.localAuth?.mfa !== 'none' || account.localAuth.factor !== undefined : !getFactor(account))) {
@@ -151,38 +173,59 @@ function stagedBinding(installation: InstallationDocument) {
   if (installation.activeGenerationId !== null || setup?.mode !== 'import' || setup.pendingAction !== 'migration-preflight'
       || !generationIdSchema.safeParse(setup.enrollmentGenerationId).success || !descriptor
       || !publicIdSchema.safeParse(descriptor.userId).success || !publicIdSchema.safeParse(descriptor.recoveryId).success
+      || !revisionSchema.safeParse(descriptor.accountRevision).success || descriptor.accountRevision < 2
       || !Number.isSafeInteger(descriptor.credentialsVersion) || descriptor.credentialsVersion < 1) return null;
   return { ...descriptor, generationId: setup.enrollmentGenerationId! };
+}
+
+type StagedBinding = NonNullable<ReturnType<typeof stagedBinding>>;
+
+async function hasStagedRecovery(database: Db, installationId: string, scope: StagedBinding, time: Date) {
+  const grant = await database.collection<RecoveryGrant>('recoveryGrants').findOne({
+    _id: workspaceKey(scope.generationId, scope.recoveryId), id: scope.recoveryId, installationId,
+    generationId: scope.generationId, userId: scope.userId, actorId: scope.userId, kind: 'account-recovery',
+    targetEpoch: scope.credentialsVersion - 1, targetRevision: scope.accountRevision - 1, revokedAt: { $type: 'null' },
+    consumedAt: { $type: 'date', $lte: time }, expiresAt: { $gt: time },
+  });
+  return grant !== null && isRecoveryGrant(grant) && isStoredDate(grant.consumedAt)
+    && grant.issuedAt <= grant.consumedAt && grant.consumedAt < grant.expiresAt;
 }
 
 export async function readStagedMfaEnrollment(database: Db, installationId: string, time: Date) {
   const installation = await readInstallation(database, installationId);
   requireCurrentSchema(installation);
   const scope = stagedBinding(installation);
-  if (!scope) return null;
-  const grant = await database.collection<{ _id: string; issuedAt: Date; expiresAt: Date; consumedAt: Date }>('recoveryGrants').findOne({
-    _id: workspaceKey(scope.generationId, scope.recoveryId), id: scope.recoveryId, installationId,
-    generationId: scope.generationId, userId: scope.userId, kind: 'account-recovery',
-    targetEpoch: scope.credentialsVersion - 1, revokedAt: { $type: 'null' },
-    consumedAt: { $type: 'date', $lte: time }, expiresAt: { $gt: time },
-  });
-  if (!grant || !isStoredDate(grant.issuedAt) || !isStoredDate(grant.expiresAt) || !isStoredDate(grant.consumedAt)
-      || grant.issuedAt > grant.consumedAt || grant.consumedAt >= grant.expiresAt
-      || grant.expiresAt.getTime() !== grant.issuedAt.getTime() + 30 * 60_000) return null;
+  if (!scope || !await hasStagedRecovery(database, installationId, scope, time)) return null;
   const account = await mfaAccounts(database).findOne({
     _id: workspaceKey(scope.generationId, scope.userId), generationId: scope.generationId, id: scope.userId,
-    disabledAt: { $type: 'null' }, 'localAuth.credentialsVersion': scope.credentialsVersion,
+    revision: scope.accountRevision, disabledAt: { $type: 'null' }, requiresMfaEnrollment: true,
+    'localAuth.credentialsVersion': scope.credentialsVersion, 'localAuth.mfa': 'enrollment-required',
+    'localAuth.factor': { $exists: false },
   });
-  return account?.role === 'admin' && account.requiresMfaEnrollment ? { scope, account } : null;
+  return account?.role === 'admin' && canChangeFactor(account, true) && getLocalAccount(account) ? { scope, account } : null;
 }
 
 // During native startup no ordinary operations are admitted while protected effects are replayed.
 export async function recoverFactorChanges(database: Db, installationId: string) {
   const installation = await readInstallation(database, installationId);
   requireCurrentSchema(installation);
-  const generationId = installation.activeGenerationId ?? stagedBinding(installation)?.generationId;
+  const stage = stagedBinding(installation);
+  const generationId = installation.activeGenerationId ?? stage?.generationId;
   if (!generationId) return;
   const pending = await mfaAccounts(database).find({ generationId, 'localAuth.factorAudit': { $exists: true } }, { limit: 2 }).toArray();
   if (pending.length > 1) throw new CommandRecoveryError('Multiple multifactor transitions are pending.');
-  if (pending[0]) await finishFactorChange(database, installationId, pending[0]);
+  const account = pending[0];
+  if (!account) return;
+  if (stage) {
+    const audit = account.localAuth?.factorAudit;
+    const factor = getFactor(account);
+    if (account.id !== stage.userId || account.role !== 'admin' || !factor || audit?.action !== 'enabled'
+        || audit.revision !== stage.accountRevision + 1 || audit.credentialsVersion !== stage.credentialsVersion + 1
+        || !isStoredDate(audit.time) || !await hasStagedRecovery(database, installationId, stage, audit.time)
+        || !await hasConsumedStagedProof(database, { installationId, generationId, userId: stage.userId,
+          credentialsVersion: stage.credentialsVersion }, stage.recoveryId, factor.id, audit.time)) {
+      throw new CommandRecoveryError('The staged multifactor transition does not match the authorized recovery.');
+    }
+  }
+  await finishFactorChange(database, installationId, account);
 }
