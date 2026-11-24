@@ -169,7 +169,15 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
   assert.equal(drift.dueDate, null);
   assert.equal(drift.dueDateCompleted, null);
   assert.equal(alignment.description, 'Ask @[Teal Fixture](104) and retain @[Past Observer](999).');
-  assert.equal((await get('boards', 'board', '301')).historySequence.toString(), '5');
+  const board = await get('boards', 'board', '301');
+  assert.equal(board.historySequence.toString(), '5');
+  assert.equal(board.rank.toString(), '1024');
+  assert.equal(board.orderVersion, 1);
+  assert.equal((await get('projects', 'project', '201')).rank.toString(), '1024');
+  assert.equal((await get('projects', 'project', '202')).rank.toString(), '2048');
+  assert.equal((await get('projects', 'project', '201')).boardOrderVersion, 1);
+  assert.equal((await get('lists', 'list', '401')).rank.toString(), '1024');
+  assert.equal((await get('lists', 'list', '402')).rank.toString(), '2048');
   assert.equal((await get('lists', 'list', '404')).name, 'Trash');
   assert.equal((await get('lists', 'list', '403')).name, 'Archive');
   const options = await db.collection('boardPreferences').findOne({ ...scoped, boardId: id('board', '302') });
@@ -212,6 +220,9 @@ test('both verified Community captures stage the exact inactive core graph with 
   postgres.write('postgres', 'ALTER ROLE fixture_reader NOINHERIT');
   await withFixtureMongo((fixture) => loadTarget(fixture, async (target) => {
     const { db, installationId, lease, cursors } = target;
+    const existingCard = randomUUID();
+    const active = await openActiveWorkspace(db, installationId);
+    await active.insert('cards', existingCard, { name: 'Existing active card' });
     const first = await configureSource(root, postgres, '2.3.0');
     const second = await configureSource(root, postgres, '2.3.1');
     first.update("UPDATE public.user_account SET password='synthetic-ineligible' WHERE id=101");
@@ -243,7 +254,8 @@ test('both verified Community captures stage the exact inactive core graph with 
     const otherPin = await createRun(db, installationId, secondReceipt);
     await runStage(second, otherPin, db, lease, cursors, 3);
     assert.notEqual(await assertGraph({ ...target, receipt: secondReceipt, generationId: otherPin.generationId }), firstId);
-    assert.equal(await (await openActiveWorkspace(db, installationId)).read('cards', firstId), null);
+    assert.equal(await active.read('cards', firstId), null);
+    assert.equal((await active.read('cards', existingCard)).name, 'Existing active card');
     assert.equal(first.query('SELECT count(*) FROM public.card'), '6');
     assert.equal(second.query('SELECT count(*) FROM public.card'), '6');
   }));
@@ -314,6 +326,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
 
     const badRows = [
       ["UPDATE public.project SET owner_project_manager_id=221 WHERE id=202", 'source-read', 'different workspace scope'],
+      ["DELETE FROM public.project_manager WHERE id=221", 'source-read', 'no project manager'],
       ["UPDATE public.board_membership SET project_id=202 WHERE id=313", 'source-read', 'different workspace scope'],
       ["UPDATE public.board_membership SET user_id=999 WHERE id=313", 'source-read', 'typed source reference'],
       ["UPDATE public.board_membership SET can_comment=NULL WHERE id=313", 'source-read', 'comment grant'],
@@ -325,6 +338,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
     ];
     const undo = [
       'UPDATE public.project SET owner_project_manager_id=222 WHERE id=202',
+      'INSERT INTO public.project_manager (id, project_id, user_id) VALUES (221,201,102)',
       'UPDATE public.board_membership SET project_id=201 WHERE id=313',
       'UPDATE public.board_membership SET user_id=103 WHERE id=313',
       'UPDATE public.board_membership SET can_comment=TRUE WHERE id=313',

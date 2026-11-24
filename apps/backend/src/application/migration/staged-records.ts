@@ -90,6 +90,16 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
     publicId,
     mapping,
     resolve,
+    async hasProjectManager(projectSourceId: string) {
+      lease.assertHeld();
+      const parent = sourceKey('project', projectSourceId);
+      const row = await ids.findOne({ generationId, sourceInstanceId, entity: 'project_manager', 'reference.parent': parent });
+      if (!row) return false;
+      if (row.reference?.parent !== parent || !await mapping('project_manager', row.sourceId)) {
+        throw new MigrationError('target-write', 'The protected project manager mapping has an invalid identity.');
+      }
+      return true;
+    },
     async require(entity: ImportedEntity, sourceId: string) {
       const id = await resolve(entity, sourceId);
       if (!id) throw new MigrationError('source-read', 'A required typed source reference is missing.');

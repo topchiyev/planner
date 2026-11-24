@@ -118,6 +118,7 @@ export function writeBaseRow(store: ImportRecords, fallback: string,
 
 async function writeProject(store: ImportRecords, id: string, row: SourceRow<'project'>, fields: WorkspaceFields) {
   const owner = row.owner_project_manager_id === null ? null : await scopedReference(store, 'project_manager', row.owner_project_manager_id, row.id);
+  if (!owner && !await store.hasProjectManager(row.id)) invalidBaseRow('A source project has no project manager.');
   if (row.background_type !== null && row.background_type !== 'gradient' && row.background_type !== 'image')
     invalidBaseRow('The source has an invalid project background type.');
   const image = await scopedOptionalReference(store, 'background_image', row.background_image_id, row.id);
