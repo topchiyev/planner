@@ -338,7 +338,6 @@ test('staging preserves exact gradient and history provenance and blocks malform
       UPDATE public.project SET background_type='gradient', background_gradient='ocean-dive' WHERE id=201;
       UPDATE public.project SET background_type='gradient', background_gradient='unrecognized-fixture-shade' WHERE id=202;
       UPDATE public.user_account SET default_editor_mode='unrecognized-fixture-editor', is_deactivated=true WHERE id=102;
-      UPDATE public.task SET assignee_user_id=101 WHERE id=553;
       UPDATE public.card SET list_id=403, list_changed_at='2026-02-14 08:09:10.000001' WHERE id=9007199254740997;
       UPDATE public.card SET stopwatch='{"startedAt":"2026-02-13T08:09:10.123456Z","total":42}' WHERE id=9007199254740993;
     `);
@@ -364,6 +363,12 @@ test('staging preserves exact gradient and history provenance and blocks malform
     assert.equal(retainedOwner.userId, user.id);
     const retainedAssignment = await db.collection('cardAssignees').findOne({ generationId, id: id('card_membership', '521') });
     assert.equal(retainedAssignment.userId, user.id);
+    const retainedTask = await db.collection('tasks').findOne({ generationId, id: id('task', '553') });
+    assert.equal(retainedTask.assigneeId, user.id);
+    const viewer = createWorkspaceAuthorization(db, generationId, { id: id('user_account', '103'), role: 'boardUser' });
+    const [readChecklist] = await createChecklistReads(createWorkspaceRecords(db, generationId), viewer)
+      .list(id('card', '9007199254740993'), id('board', '301'));
+    assert.equal(readChecklist.tasks.find(({ id: taskId }) => taskId === retainedTask.id).assignee, null);
     assert.deepEqual(await eligibleBoardPeople(createWorkspaceRecords(db, generationId), generationId, id('board', '301'), { id: user.id }), []);
     assert.deepEqual((await provenance('user_account', '102')).unsupportedPreferences, ['editorMode']);
     const card = await db.collection('cards').findOne({ generationId, id: id('card', '9007199254740993') });
@@ -453,6 +458,11 @@ test('staged relationship reconciliation preserves exact values and fails closed
       UPDATE public.custom_field_value SET content='' WHERE id=591;
       UPDATE public.custom_field_value SET content=repeat('λ',600) WHERE id=592;
       UPDATE public.card_subscription SET is_permanent=FALSE WHERE id=531;
+      UPDATE public.custom_field SET position=20 WHERE id=581;
+      INSERT INTO public.custom_field_group (id, board_id, position, name) VALUES (573, 301, 4096, 'Standalone');
+      INSERT INTO public.custom_field (id, base_custom_field_group_id, custom_field_group_id, position, name, show_on_front_of_card)
+        VALUES (580,561,NULL,10,'Earlier template field',TRUE),(9007199254741999,NULL,571,30,'Board local field',TRUE),
+          (2,NULL,572,20,'Card local tie',TRUE),(584,NULL,573,10,'Standalone field',TRUE);
     `);
     const { receipt, identity } = await runForCurrentSource();
     const id = publicIds(receipt.capture.source.instanceId);
@@ -464,6 +474,17 @@ test('staged relationship reconciliation preserves exact values and fails closed
     assert.equal((await get('fieldValues', 'custom_field_value', '591')).value, '');
     assert.equal((await get('fieldValues', 'custom_field_value', '592')).value, 'λ'.repeat(600));
     assert.equal((await get('cardFollows', 'card_subscription', '531')).isPermanent, false);
+    const records = createWorkspaceRecords(db, generationId);
+    for (const [sourceId, ids, ranks] of [
+      ['571', ['580', '581', '9007199254741999'], ['1024', '3072', '4096']],
+      ['572', ['580', '2', '581'], ['1024', '2048', '3072']],
+      ['573', ['584'], ['1024']],
+    ]) {
+      const group = await get('fieldGroups', 'custom_field_group', sourceId);
+      const projected = await projectFieldGroup(records, generationId, group, id('project', '201'));
+      assert.deepEqual(projected.definitions.map(({ id }) => id), ids.map((sourceId) => id('custom_field', sourceId)));
+      assert.deepEqual(projected.definitions.map(({ rank }) => rank), ranks);
+    }
     const marker = await get('tasks', 'task', '552');
     assert.deepEqual([marker.linkedUnavailable, marker.linkedCardId, marker.name, marker.completed], [true, null, null, null]);
     assert.deepEqual((await get('importIds', 'task', '552')).provenance.linkedTask, {
@@ -478,7 +499,8 @@ test('staged relationship reconciliation preserves exact values and fails closed
     const badRows = [
       ['UPDATE public.label SET board_id=302 WHERE id=501', 'UPDATE public.label SET board_id=301 WHERE id=501', 'card label'],
       ['UPDATE public.task SET task_list_id=999 WHERE id=553', 'UPDATE public.task SET task_list_id=541 WHERE id=553', 'source checklist'],
-      ['UPDATE public.task SET assignee_user_id=105 WHERE id=553', 'UPDATE public.task SET assignee_user_id=102 WHERE id=553', 'enabled direct member'],
+      ['UPDATE public.task SET assignee_user_id=105 WHERE id=553', 'UPDATE public.task SET assignee_user_id=102 WHERE id=553', 'no direct member'],
+      ['UPDATE public.task SET assignee_user_id=999 WHERE id=553', 'UPDATE public.task SET assignee_user_id=102 WHERE id=553', 'typed source reference'],
       ['UPDATE public.card_membership SET user_id=105 WHERE id=521', 'UPDATE public.card_membership SET user_id=102 WHERE id=521', 'no direct member'],
       ['UPDATE public.base_custom_field_group SET project_id=202 WHERE id=561',
         'UPDATE public.base_custom_field_group SET project_id=201 WHERE id=561', 'different project'],
@@ -511,7 +533,7 @@ test('staged relationship reconciliation preserves exact values and fails closed
     await assert.rejects(runStage(source, mismatched, interruptCheckpoint(db, 'base', 'board'), lease, cursors), refuses('target-write'));
     await db.collection('importIds').updateOne({ generationId: mismatched.generationId, entity: 'task_list', sourceId: '541' },
       { $set: { 'reference.parent': '9007199254740994' } });
-    await assert.rejects(stage(mismatched, 2), (error) => error?.fault === 'source-read' && error.message.includes('protected relationship parent'));
+    await assert.rejects(stage(mismatched, 2), (error) => error?.fault === 'target-write' && error.message.includes('protected relationship parent'));
     assert.equal(await db.collection('checklists').countDocuments({ generationId: mismatched.generationId }), 0);
 
     const { identity: occupied } = await runForCurrentSource();
