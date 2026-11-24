@@ -958,7 +958,7 @@ test('keyboard placement continues past the first anchor page and closes when pr
     assert.ok(saved.rank.toBigInt() > 101n * 1024n && saved.rank.toBigInt() < 102n * 1024n);
 
     await placement.getByRole('button', { name: 'Move card', exact: true }).click();
-    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Load more positions' })).toBeVisible();
     await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({ ...fixture.scope,
       boardId: ids.privateBoard, userId: ids.firstEditor }));
     const rejected = p.waitForResponse((response) => response.url().includes('/api/v1/boards/' + ids.privateBoard + '/cards')
