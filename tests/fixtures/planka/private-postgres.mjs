@@ -7,6 +7,7 @@ export async function startFixturePostgres(context) {
   const socketRoot = mkdtempSync('/tmp/planner-planka-');
   const data = join(socketRoot, 'db');
   const port = '5432';
+  const ownedDatabases = new Set(['postgres']);
   const env = {
     ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('PG'))),
     LC_ALL: 'C',
@@ -50,11 +51,27 @@ export async function startFixturePostgres(context) {
     return result.stdout.trim();
   }
 
-  function query(database, sql, user = 'fixture_reader') {
+  function queryAs(user, database, sql) {
+    // libpq interprets a dbname containing conninfo as a full connection target.
+    if (!ownedDatabases.has(database)) {
+      throw new Error('PostgreSQL database is outside the private fixture cluster registry');
+    }
     return run('psql', [
       '-XqAtw', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=verbose',
       '-h', socketRoot, '-p', port, '-U', user, '-d', database, '-f', '-',
     ], sql);
+  }
+
+  const write = (database, sql) => queryAs('fixture_owner', database, sql);
+  const query = (database, sql) => queryAs('fixture_reader', database, sql);
+
+  function createDatabase(database) {
+    if (typeof database !== 'string' || !/^planka_[a-z0-9_]{1,56}$/.test(database) ||
+        ownedDatabases.has(database)) {
+      throw new Error('Invalid or already registered PostgreSQL fixture database name');
+    }
+    write('postgres', `CREATE DATABASE "${database}";`);
+    ownedDatabases.add(database);
   }
 
   run('initdb', [
@@ -85,11 +102,10 @@ export async function startFixturePostgres(context) {
     throw new Error('Private PostgreSQL socket permissions do not match the fixture boundary');
   }
 
-  const write = (database, sql) => query(database, sql, 'fixture_owner');
   const version = write('postgres', 'SHOW server_version_num;');
   if (!/^17[0-9]{4}$/.test(version)) {
     throw new Error(`The fixture catalog requires PostgreSQL 17 tools. Server version number: ${version}`);
   }
   write('postgres', 'CREATE ROLE fixture_reader LOGIN;');
-  return { query, write };
+  return { createDatabase, query, write };
 }

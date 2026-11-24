@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
+  cpSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -196,6 +196,31 @@ test('PLANKA Community source fixtures', async (context) => {
   assert.equal(baseline.foreignKeys, 0);
 
   const pg = await startFixturePostgres(context);
+  await context.test('refuses unregistered targets before running a PostgreSQL client', () => {
+    const emptyBinDir = mkdtempSync('/tmp/planner-planka-empty-bin-');
+    const previousBinDir = process.env.PLANNER_TEST_PG_BIN_DIR;
+    process.env.PLANNER_TEST_PG_BIN_DIR = emptyBinDir;
+    try {
+      // The registry must reject each input before trying even the unavailable client.
+      const outsideRegistry = { message: 'PostgreSQL database is outside the private fixture cluster registry' };
+      for (const target of [
+        'postgresql://fixture-canary@127.0.0.1:1/postgres',
+        'host=127.0.0.1 port=1 user=fixture-canary dbname=postgres',
+        'planka_unregistered',
+        'template1',
+      ]) {
+        assert.throws(() => pg.query(target, 'SELECT 1;'), outsideRegistry);
+        assert.throws(() => pg.write(target, 'SELECT 1;'), outsideRegistry);
+      }
+      assert.throws(() => pg.createDatabase('dbname=postgres'), /Invalid or already registered/);
+      assert.throws(() => pg.write('postgres', 'SELECT 1;'), /Could not run .*psql/);
+    } finally {
+      if (previousBinDir === undefined) delete process.env.PLANNER_TEST_PG_BIN_DIR;
+      else process.env.PLANNER_TEST_PG_BIN_DIR = previousBinDir;
+      rmdirSync(emptyBinDir);
+    }
+  });
+
   const sourceResults = new Map();
   for (const release of Object.keys(releases)) {
     await context.test(`loads and verifies the complete ${release} snapshot`, () => {
@@ -216,7 +241,7 @@ test('PLANKA Community source fixtures', async (context) => {
       assert.match(manifest.asset.snapshotId, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
       assert.equal(manifest.asset.manifestSha256, sha256(assetManifestBytes));
 
-      pg.write('postgres', `CREATE DATABASE ${database};`);
+      pg.createDatabase(database);
       pg.write(database, dump);
       pg.write(database, 'GRANT USAGE ON SCHEMA public TO fixture_reader; GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader;');
       const readOnly = (sql) => pg.query(database, `
@@ -270,6 +295,24 @@ test('PLANKA Community source fixtures', async (context) => {
   assert.notEqual(first.asset.manifestSha256, second.asset.manifestSha256);
 
   const { database, assetManifest, assetRoot, sourceKeys } = sourceResults.get('2.3.1');
+  await context.test('exercises an unsupported link scheme independently of HTTP links', () => {
+    const links = pg.write(database, `
+      BEGIN;
+      ${read('unsupported-link.sql')}
+      SELECT data->>'url' FROM public.attachment WHERE type = 'link' ORDER BY id;
+      ROLLBACK;
+    `).split('\n');
+    const supportedProtocols = new Set(['https:', 'http:']);
+    const unsupported = links.filter((link) => !supportedProtocols.has(new URL(link).protocol));
+    assert.deepEqual(unsupported, ['urn:planner-fixture:unsupported-link']);
+    assert.equal(new URL(unsupported[0]).hostname, '');
+    assert.deepEqual(links.slice(0, 2), [
+      'https://handbook.fixture.invalid/optics',
+      'http://127.0.0.1/fixture-only',
+    ]);
+    assert.equal(pg.query(database, 'SELECT count(*) FROM public.attachment WHERE id = 607;'), '0');
+  });
+
   await context.test('detects database structure and ledger drift', () => {
     const readCatalog = () => JSON.parse(pg.query(database, catalog));
 
