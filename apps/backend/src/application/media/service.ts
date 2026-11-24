@@ -15,11 +15,12 @@ import {
   requireCapability, resolveBrowserWorkspace, WorkspaceAccessError, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization,
 } from '../workspace/authorization.js';
+import { attachmentFiles, cardCovers } from '../workspace/card-media.js';
 import { createWorkspaceRecords, directBoardRole } from '../workspace/records.js';
 import { detectImage, imageTypes, type MediaDecoder, type MediaVariants } from './decoder.js';
 import { MediaRejection, reserveSlots } from './errors.js';
 import { receiveMultipart } from './multipart.js';
-import { availableMedia, catalogVariants, mediaRecords, originalType, unavailableMedia, validBlobIdentity, type StoredAvatar, type StoredMediaReference } from './records.js';
+import { availableMedia, catalogVariants, mediaByteLength, mediaRecords, originalType, validBlobIdentity, type StoredAvatar, type StoredMediaReference } from './records.js';
 
 type Upload = 'uploadAttachment' | 'uploadBackground' | 'uploadAvatar';
 type Mutation = Upload | 'addLink' | 'renameAttachment' | 'removeAttachment' | 'removeBackground' | 'removeAvatar';
@@ -60,7 +61,7 @@ function referenceDto(row: {
   const url = row.kind === 'link' ? safeMediaLink(row.url) : null;
   return {
     id: row.id, parentId: id, revision: row.revision, name: row.name, kind: row.kind,
-    byteLength: row.byteLength ?? null, url, available: row.kind === 'link' ? !!url : row.availability === availableMedia,
+    byteLength: row.kind === 'file' ? mediaByteLength(row.byteLength) : null, url, available: row.kind === 'link' ? !!url : row.availability === availableMedia,
   };
 }
 
@@ -92,8 +93,8 @@ export function createMediaService(
       case 'renameAttachment':
       case 'removeAttachment': {
         const reference = await records.attachment(intent.id!);
-        if (!reference || !reference.cardId || !publicIdSchema.safeParse(reference.cardId).success
-            || (intent.operation === 'renameAttachment' && !live(reference))) throw missing();
+        if (!reference || (reference.kind !== 'file' && reference.kind !== 'link') || !reference.cardId
+            || !publicIdSchema.safeParse(reference.cardId).success || (intent.operation === 'renameAttachment' && !live(reference))) throw missing();
         const value = await scope.requireCard(reference.cardId);
         requireCapability(value.permissions.canEdit);
         return { type: 'card', value, reference };
@@ -166,7 +167,13 @@ export function createMediaService(
         name: media?.name ?? payload.name ?? null, url: payload.url ?? null, digest: media?.digest ?? null,
         byteLength: media?.byteLength ?? null,
       }),
-      authorize: async (context) => { await currentAdmission(token, admission, context.generationId); },
+      async authorize({ generationId }) {
+        await currentAdmission(token, admission, generationId);
+        if (media) {
+          const records = mediaRecords(database, generationId);
+          if (!await records.catalog(media.digest) && await records.occupiedCatalog(media.digest)) throw new MediaRejection('catalog');
+        }
+      },
       async plan({ generationId, timestamp }) {
         const parent = await currentAdmission(token, admission, generationId);
         const id = parentId(parent);
@@ -183,7 +190,10 @@ export function createMediaService(
           if (isChange && !live(previous)) throw missing();
           if ((isChange ? previous!.revision : card.revision) !== intent.expectedRevision) throw new MediaRejection('revision');
           parentRevision = revisionAfter(card.revision);
-          coverAttachmentId = card.coverAttachmentId ?? null;
+          let nextCover: string | null | undefined;
+          const records = createWorkspaceRecords(database, generationId);
+          const currentCover = (await cardCovers(records, generationId, [card])).get(id);
+          coverAttachmentId = currentCover?.attachmentId ?? null;
           if (media) effects.push(...await ensureCatalog(generationId, media, timestamp));
           if (intent.operation === 'renameAttachment') {
             const revision = revisionAfter(previous!.revision);
@@ -191,12 +201,14 @@ export function createMediaService(
             const kind = previous!.kind === 'link' ? 'link' : 'file';
             effects.push({ kind: 'update', collection: 'attachments', id: previous!.id, revision: previous!.revision,
               fields: { name, updatedAt: timestamp } });
-            reference = referenceDto({ ...previous!, name, revision, kind }, id);
+            const original = (await attachmentFiles(records, generationId, [previous!])).get(previous!.id);
+            reference = referenceDto({ ...previous!, name, revision, kind,
+              availability: original && availableMedia }, id);
           } else if (intent.operation === 'removeAttachment') {
             revisionAfter(previous!.revision);
             effects.push({ kind: 'update', collection: 'attachments', id: previous!.id, revision: previous!.revision,
               fields: { deletedAt: timestamp, blobDigest: null, url: null, updatedAt: timestamp } });
-            if (coverAttachmentId === previous!.id) coverAttachmentId = null;
+            if (card.coverAttachmentId === previous!.id) nextCover = null;
           } else {
             const mediaId = newPublicId();
             const name = media?.name ?? payload.name!;
@@ -206,20 +218,11 @@ export function createMediaService(
             } });
             reference = referenceDto({ id: mediaId, revision: 1, name, kind, url: payload.url, byteLength: media?.byteLength,
               availability: media && availableMedia }, id);
-            if (media?.variants) {
-              const records = mediaRecords(database, generationId);
-              const oldCover = coverAttachmentId ? await records.attachment(coverAttachmentId) : null;
-              const belongs = live(oldCover) && oldCover.cardId === id && oldCover.kind === 'file';
-              const catalog = belongs && oldCover.availability === availableMedia && oldCover.blobDigest
-                ? await records.catalog(oldCover.blobDigest) : null;
-              const approvedUnavailable = belongs && oldCover.availability === unavailableMedia;
-              if (!approvedUnavailable && (!catalog || catalog.lifecycleState !== availableMedia || !catalogVariants(catalog))) {
-                coverAttachmentId = mediaId;
-              }
-            }
+            if (media?.variants && !currentCover) nextCover = mediaId;
           }
+          if (nextCover !== undefined) coverAttachmentId = nextCover;
           effects.push({ kind: 'update', collection: 'cards', id, revision: card.revision,
-            fields: { coverAttachmentId, updatedAt: timestamp } });
+            fields: { ...(nextCover !== undefined && { coverAttachmentId: nextCover }), updatedAt: timestamp } });
         } else if (parent.type === 'project') {
           const { project } = parent.value;
           if (project.revision !== intent.expectedRevision) throw new MediaRejection('revision');

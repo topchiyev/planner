@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -1353,4 +1354,183 @@ test('project, board and card fields share templates and preserve exact values t
     await expect(viewer.locator('.card-front-fields').getByText('Deployment note', { exact: true })).toHaveCount(1);
     await expect(viewer.locator('.card-front-fields').getByText('Revised deployment note')).toHaveCount(0);
   });
+});
+
+test('native card media keeps files private, manages covers by revision and opens external links only on request', { timeout: 125_000 }, async () => {
+  const requests = [];
+  const sentinel = createServer((message, response) => {
+    requests.push({ path: message.url, referer: message.headers.referer });
+    response.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }).end('External test link');
+  });
+  await new Promise((resolve, reject) => {
+    sentinel.once('error', reject);
+    sentinel.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    await workspaceBrowser(async ({ fixture, origin, page }) => {
+      const editor = await page({ width: 1440, height: 900 });
+      const secondEditor = await page({ width: 390, height: 844 });
+      const viewer = await page({ width: 390, height: 844 });
+      const parent = origin + board(ids.privateBoard);
+      const path = parent + '/cards/' + ids.activeCard;
+      const panel = (browserPage) => browserPage.getByRole('region', { name: 'Attachments', exact: true });
+      const file = (browserPage, name) => panel(browserPage).getByRole('listitem').filter({ has: browserPage.getByText(name, { exact: true }) });
+      const uploadFile = async (target, item) => {
+        await panel(target).getByRole('button', { name: 'Add file', exact: true }).click();
+        const dialog = target.getByRole('dialog', { name: 'Add file' });
+        await dialog.getByLabel('File').setInputFiles(item);
+        await dialog.getByRole('button', { name: 'Upload file' }).click();
+        await expect(dialog).toHaveCount(0, { timeout: 15_000 });
+      };
+      const stored = () => fixture.db.collection('cards').findOne({ ...fixture.scope, id: ids.activeCard });
+      const renameFile = async (target, previous, next) => {
+        await file(target, previous).getByRole('button', { name: 'Rename ' + previous }).click();
+        const form = target.getByRole('dialog', { name: 'Rename attachment' });
+        await form.getByLabel('Name').fill(next);
+        await form.getByRole('button', { name: 'Save name' }).click();
+        await expect(file(target, next)).toBeVisible();
+      };
+
+      await signIn(editor, origin, 'first-editor');
+      await signIn(secondEditor, origin, 'second-editor');
+      await signIn(viewer, origin, 'viewer');
+      await editor.goto(path);
+      const bytes = Buffer.from('Private passive file');
+      await uploadFile(editor, { name: 'notes.dat', mimeType: 'application/octet-stream', buffer: bytes });
+      const originalLink = file(editor, 'notes.dat').getByRole('link', { name: 'Download notes.dat' });
+      await expect(originalLink).toBeVisible();
+      await expect(file(editor, 'notes.dat').locator('img')).toHaveCount(0);
+      assert.equal((await stored()).coverAttachmentId ?? null, null);
+      const downloadPath = await originalLink.getAttribute('href');
+      const [download] = await Promise.all([editor.waitForEvent('download'), originalLink.click()]);
+      assert.equal(download.suggestedFilename(), 'notes.dat');
+      assert.deepEqual(await readFile(await download.path()), bytes);
+      const head = await editor.request.head(origin + downloadPath);
+      assert.equal(head.status(), 200);
+      assert.equal(head.headers()['content-length'], String(bytes.length));
+      const range = await editor.request.get(origin + downloadPath, { headers: { Range: 'bytes=1-3' } });
+      assert.equal(range.status(), 206);
+      assert.deepEqual(await range.body(), bytes.subarray(1, 4));
+      assert.equal((await editor.request.get(origin + downloadPath, { headers: { 'If-None-Match': head.headers().etag } })).status(), 304);
+
+      await uploadFile(editor, fileURLToPath(new URL('./fixtures/media/sample.png', import.meta.url)));
+      const firstImage = file(editor, 'sample.png');
+      await expect(firstImage.getByText('Cover', { exact: true })).toBeVisible();
+      const firstImageId = (await stored()).coverAttachmentId;
+      await uploadFile(editor, fileURLToPath(new URL('./fixtures/media/sample.jpeg', import.meta.url)));
+      const otherImage = file(editor, 'sample.jpeg');
+      await expect(otherImage.getByRole('button', { name: 'Use sample.jpeg as cover' })).toBeVisible();
+      assert.equal((await stored()).coverAttachmentId, firstImageId);
+      await secondEditor.goto(path);
+      await expect(file(secondEditor, 'sample.png').getByText('Cover', { exact: true })).toBeVisible();
+
+      await otherImage.getByRole('button', { name: 'Use sample.jpeg as cover' }).click();
+      await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
+      const secondImageId = (await stored()).coverAttachmentId;
+      assert.notEqual(secondImageId, firstImageId);
+      const [stale] = await Promise.all([
+        secondEditor.waitForResponse((response) =>
+          response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard)),
+        panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click(),
+      ]);
+      assert.equal(stale.status(), 409);
+      await expect(panel(secondEditor).getByRole('alert')).toContainText('Review the current information');
+      await expect(file(secondEditor, 'sample.jpeg').getByText('Cover', { exact: true })).toBeVisible();
+      await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
+      await expect(panel(secondEditor).getByRole('button', { name: 'Clear cover' })).toHaveCount(0);
+      assert.equal((await stored()).coverAttachmentId, null);
+
+      await editor.reload();
+      await firstImage.getByRole('button', { name: 'Use sample.png as cover' }).click();
+      await expect(firstImage.getByText('Cover', { exact: true })).toBeVisible();
+      await viewer.goto(parent);
+      const front = viewer.locator('.card-front-cover');
+      await expect(front).toHaveAttribute('src', '/api/v1/attachments/' + firstImageId + '/thumbnail/small');
+      await expect.poll(() => front.evaluate((img) => img.complete && img.naturalWidth > 0)).toBe(true);
+      await viewer.goto(path);
+      await expect(file(viewer, 'sample.png').getByRole('link', { name: 'Download sample.png' })).toBeVisible();
+      await expect(panel(viewer).getByRole('button', { name: 'Add file' })).toHaveCount(0);
+      await expect(panel(viewer).getByRole('button', { name: 'Remove sample.png' })).toHaveCount(0);
+
+      await firstImage.getByRole('button', { name: 'Rename sample.png' }).click();
+      const rename = editor.getByRole('dialog', { name: 'Rename attachment' });
+      await rename.getByLabel('Name').fill('Current cover.png');
+      await secondEditor.reload();
+      await renameFile(secondEditor, 'sample.png', 'Coworker cover.png');
+      await rename.getByRole('button', { name: 'Save name' }).click();
+      await expect(rename.getByRole('alert')).toContainText('Coworker cover.png');
+      await expect(rename.getByLabel('Name')).toHaveValue('Current cover.png');
+      await expect(rename.getByRole('button', { name: 'Save name' })).toBeDisabled();
+      await rename.getByRole('button', { name: 'Close', exact: true }).click();
+      await renameFile(editor, 'Coworker cover.png', 'Current cover.png');
+      const cover = file(editor, 'Current cover.png');
+      await expect(cover.getByText('Cover', { exact: true })).toBeVisible();
+      assert.equal((await stored()).coverAttachmentId, firstImageId);
+
+      await cover.getByRole('button', { name: 'Remove Current cover.png' }).click();
+      const remove = editor.getByRole('dialog', { name: 'Remove attachment' });
+      await secondEditor.reload();
+      await renameFile(secondEditor, 'Current cover.png', 'Ready to remove.png');
+      await remove.getByRole('button', { name: 'Confirm removal' }).click();
+      await expect(remove.getByRole('alert')).toContainText('This attachment changed');
+      await expect(remove.getByText('Ready to remove.png', { exact: true })).toBeVisible();
+      await expect(remove.getByRole('button', { name: 'Confirm removal' })).toBeDisabled();
+      await remove.getByRole('button', { name: 'Close', exact: true }).click();
+      await file(editor, 'Ready to remove.png').getByRole('button', { name: 'Remove Ready to remove.png' }).click();
+      await remove.getByRole('button', { name: 'Confirm removal' }).click();
+      await expect(file(editor, 'Ready to remove.png')).toHaveCount(0);
+      assert.equal((await stored()).coverAttachmentId, null);
+      assert.equal((await viewer.request.head(origin + '/api/v1/attachments/' + firstImageId + '/download')).status(), 404);
+
+      const openLink = panel(editor).getByRole('button', { name: 'Add link', exact: true });
+      const linkDialog = editor.getByRole('dialog', { name: 'Add link' });
+      const validAddress = 'http://127.0.0.1:' + sentinel.address().port + '/guide';
+      await openLink.click();
+      await linkDialog.getByLabel('Name').fill('External guide');
+      await linkDialog.getByLabel('URL').fill('http://user:password@127.0.0.1:' + sentinel.address().port + '/guide');
+      await expect(linkDialog.getByRole('button', { name: 'Save link' })).toBeDisabled();
+      await linkDialog.getByLabel('URL').fill(validAddress);
+      await secondEditor.reload();
+      await renameFile(secondEditor, 'sample.jpeg', 'Other image.jpeg');
+      await linkDialog.getByRole('button', { name: 'Save link' }).click();
+      await expect(linkDialog.getByRole('alert')).toContainText('This card changed');
+      await expect(linkDialog.getByRole('button', { name: 'Save link' })).toBeDisabled();
+      await linkDialog.getByRole('button', { name: 'Close', exact: true }).click();
+      await openLink.click();
+      await linkDialog.getByLabel('Name').fill('External guide');
+      await linkDialog.getByLabel('URL').fill(validAddress);
+      await linkDialog.getByRole('button', { name: 'Save link' }).click();
+      await expect(linkDialog).toHaveCount(0);
+      const external = panel(editor).getByRole('link', { name: 'Open link External guide' });
+      await expect(external).toHaveAttribute('rel', 'noopener noreferrer');
+      await viewer.reload();
+      await expect(panel(viewer).getByRole('link', { name: 'Open link External guide' })).toBeVisible();
+      assert.deepEqual(requests, []);
+      const [opened] = await Promise.all([editor.context().waitForEvent('page'), external.click()]);
+      await expect(opened.getByText('External test link')).toBeVisible();
+      assert.deepEqual(requests.filter(({ path }) => path === '/guide'), [{ path: '/guide', referer: undefined }]);
+      assert.equal(await opened.evaluate(() => window.opener), null);
+      await opened.close();
+
+      const unavailable = fixtureId(5194);
+      await fixture.insert('attachments', unavailable, {
+        cardId: ids.archivedStory, name: 'Imported missing file', kind: 'file', availability: 'unavailable',
+      });
+      await editor.goto(parent + '/cards/' + ids.archivedStory + '?context=archive');
+      await expect(file(editor, 'Imported missing file').getByText('File unavailable')).toBeVisible();
+      await expect(panel(editor).getByRole('button', { name: 'Add file' })).toHaveCount(0);
+      await expect(panel(editor).getByRole('link', { name: 'Download Imported missing file' })).toHaveCount(0);
+
+      await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
+        ...fixture.scope, userId: ids.viewer, boardId: ids.privateBoard,
+      }));
+      assert.equal((await viewer.request.get(origin + downloadPath)).status(), 404);
+      await viewer.reload();
+      await expect(viewer.getByRole('heading', { name: 'Page not found' }).first()).toBeVisible();
+      await expect(panel(viewer)).toHaveCount(0);
+      assert.ok(await viewer.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+    }, true);
+  } finally {
+    await new Promise((resolve) => sentinel.close(resolve));
+  }
 });

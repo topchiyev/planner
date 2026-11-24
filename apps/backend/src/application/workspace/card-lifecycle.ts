@@ -1,16 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { type CardStopwatch, finiteListKindSchema, type RelationshipCommandInput } from '@planner/contracts';
 import { revisionSchema } from '@planner/contracts/storage';
+import type { Db } from 'mongodb';
 import { decodeRank, encodeRank } from '../../storage/identity.js';
 import type { CommandPlan, CommandPlanningContext, JournalFields, PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, type CardAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { boardPreferences, boardPreferencesRow } from './board-state.js';
+import { selectableCardCover } from './card-media.js';
 import { cardClosed, cardDto, cardDue, cardStopwatch } from './card-state.js';
 import { planLinkedCardCompletion } from './linked-card-completion.js';
 import { listCardOrderVersion } from './list-state.js';
 import { planRankChange, RankAnchorError } from './ordered-ranks.js';
 import { RelationshipError, requireRevision, touchRevision } from './relationship-policy.js';
-import { canonicalRow, equal, rankSort, type WorkspaceRecords, type WorkspaceRow } from './records.js';
+import { canonicalRow, createWorkspaceRecords, equal, rankSort, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 type ListAccess = Awaited<ReturnType<WorkspaceAuthorization['requireList']>>;
 type CardUpdate = RelationshipCommandInput<'cards.update'>;
@@ -23,9 +25,15 @@ export async function authorizeCardCreate(scope: WorkspaceAuthorization, id: str
   return access;
 }
 
-export async function authorizeCardUpdate(scope: WorkspaceAuthorization, id: string) {
-  const access = await scope.requireCard(id);
+export async function authorizeCardUpdate(database: Db, scope: WorkspaceAuthorization, input: CardUpdate) {
+  const access = await scope.requireCard(input.id);
   requireCapability(access.permissions.canEdit);
+  if (input.coverAttachmentId != null) {
+    const records = createWorkspaceRecords(database, scope.generationId);
+    if (!await selectableCardCover(records, scope.generationId, access.card.id, input.coverAttachmentId)) {
+      throw new RelationshipError('cardCover');
+    }
+  }
   return access;
 }
 
@@ -121,15 +129,19 @@ export async function planCardUpdate(records: WorkspaceRecords, access: CardAcce
   const currentWatch = cardStopwatch(card.stopwatch);
   const stopwatch = input.stopwatchAction ? transitionStopwatch(currentWatch, input.stopwatchAction, timestamp) : currentWatch;
   const name = input.name ?? card.name;
+  const coverAttachmentId = input.coverAttachmentId;
   const fields: JournalFields = {
     ...(name !== card.name && { name }),
     ...(type !== card.type && { type }),
     ...(input.description !== undefined && input.description !== (card.description ?? null) && { description: input.description }),
     ...(closed !== currentClosed && { closed }),
+    ...(coverAttachmentId !== undefined && coverAttachmentId !== (card.coverAttachmentId ?? null) && { coverAttachmentId }),
     ...((dueDate !== currentDue.dueDate || dueDateCompleted !== currentDue.dueDateCompleted) && { dueDate, dueDateCompleted }),
     ...(input.stopwatchAction && (stopwatch?.startedAt !== currentWatch?.startedAt || stopwatch?.total !== currentWatch?.total) && { stopwatch }),
   };
-  const makeResult = (next: Parameters<typeof cardDto>[0]) => ({ data: { card: cardDto(next, board, list), stopwatch } });
+  const makeResult = (next: Parameters<typeof cardDto>[0]) => ({ data: {
+    card: cardDto(next, board, list), stopwatch, ...(coverAttachmentId !== undefined && { coverAttachmentId }),
+  } });
   if (!Object.keys(fields).length) return { effects: [], result: makeResult(card), audit: audit('cards.update', id) };
   const parent = touchRevision('cards', card, timestamp, revision);
   const next = { ...card, revision: revision + 1, name, type, closed, dueDate, dueDateCompleted, updatedAt: new Date(timestamp) };

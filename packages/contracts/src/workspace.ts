@@ -105,7 +105,7 @@ export const cardSummarySchema = ordered.extend({
   closed: z.boolean(), dueDate: nullableUtcInstantSchema, dueDateCompleted: z.boolean().nullable(), permissions: cardAccessSchema,
 });
 const attachmentSchema = named.extend({
-  cardId: publicIdSchema, kind: z.enum(['file', 'link']), available: z.boolean(), byteLength: nonnegative.nullable(), url: maybeText,
+  cardId: publicIdSchema, kind: z.enum(['file', 'link']), available: z.boolean(), hasThumbnail: z.boolean(), byteLength: nonnegative.nullable(), url: maybeText,
 });
 export const cardDetailSchema = cardSummarySchema.extend({
   description: maybeText, stopwatch: cardStopwatchSchema, checklistOrderVersion: revisionSchema, previousListId: maybeId, labels: z.array(boardLabelSchema),
@@ -153,7 +153,7 @@ export const workspaceOperations = {
     context: workspaceCardContext.default('board'), q: z.string().trim().max(256).default(''),
     labelsAny: idList.default([]), labelsNone: idList.default([]), members: idList.default([]),
     listIds: idList.default([]), unassigned: queryBoolean.default(false), ...pageQuery,
-  }), page(cardSummarySchema.extend({ frontChecklists: z.array(frontChecklistSchema).max(3), frontFields: z.array(z.strictObject({
+  }), page(cardSummarySchema.extend({ cover: z.strictObject({ attachmentId: publicIdSchema, hasThumbnail: z.boolean() }).nullable(), frontChecklists: z.array(frontChecklistSchema).max(3), frontFields: z.array(z.strictObject({
     fieldGroupId: publicIdSchema, fieldDefinitionId: publicIdSchema, name: z.string(), value: z.string(),
   })) })).extend({ searchValidation: z.enum(['ok', 'invalid-pattern']) })),
   cardGet: read('cards.get', '/api/v1/cards/:id', identifier.extend({ boardId: publicIdSchema.optional() }), data(cardDetailSchema)),
