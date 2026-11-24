@@ -172,7 +172,7 @@ export class CommandJournal {
       await this.#finish(command);
     }
     const outbox = collection.find({ generationId, status: 'committed' }, {
-      projection: { _id: 1, delivered: 1, eventCount: 1, outboxPending: 1 },
+      projection: { _id: 1, id: 1, delivered: 1, lastDeliveredEventId: 1, eventCount: 1, outboxPending: 1 },
     });
     for await (const cursor of outbox) {
       checkOutboxCursor(cursor);
@@ -252,7 +252,7 @@ export class CommandJournal {
     }, 0n);
     const recoverySequence = encodeRank(last + 1n);
     const preparedFields = { status: 'prepared', recoverySequence, applied: 0, lastAppliedEffectId: null, manifest, result, resultHash: journalDigest(result),
-      eventCount, delivered: 0, outboxPending: eventCount > 0 } as const;
+      eventCount, delivered: 0, lastDeliveredEventId: null, outboxPending: eventCount > 0 } as const;
     const prepared = { ...command, ...preparedFields };
     const collection = batches(this.database);
     await collection.deleteMany({ generationId: command.generationId, commandId: command.id }, durable);
@@ -387,7 +387,7 @@ export class CommandJournal {
         requireCurrentSchema(installation);
         if (installation.activeGenerationId !== event.generationId) return null;
         const current = await commands(this.database).findOne({ _id: command._id, generationId: event.generationId, status: 'committed' },
-          { projection: { delivered: 1, eventCount: 1, outboxPending: 1 } });
+          { projection: { id: 1, delivered: 1, lastDeliveredEventId: 1, eventCount: 1, outboxPending: 1 } });
         if (!current) throw new CommandRecoveryError('A pending outbox command is missing.');
         checkOutboxCursor(current);
         if (current.delivered! > event.ordinal) return null;
@@ -414,10 +414,11 @@ export class CommandJournal {
         const collection = commands(this.database);
         const acknowledged = await collection.updateOne({
           _id: command._id, generationId: event.generationId, status: 'committed', delivered: event.ordinal, outboxPending: true,
-        }, { $set: { delivered, outboxPending: delivered < command.eventCount! } }, durable);
+          lastDeliveredEventId: command.lastDeliveredEventId,
+        }, { $set: { delivered, lastDeliveredEventId: event.id, outboxPending: delivered < command.eventCount! } }, durable);
         if (acknowledged.matchedCount === 0) {
           const current = await collection.findOne({ _id: command._id, generationId: event.generationId, status: 'committed' },
-            { projection: { delivered: 1, eventCount: 1, outboxPending: 1 } });
+            { projection: { id: 1, delivered: 1, lastDeliveredEventId: 1, eventCount: 1, outboxPending: 1 } });
           if (!current) throw new CommandRecoveryError('An acknowledged outbox command is missing.');
           checkOutboxCursor(current);
           if (current.delivered! < delivered || current.eventCount !== command.eventCount) assertChanged(0);

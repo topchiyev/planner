@@ -274,7 +274,7 @@ test('a concurrent reader never sees half of a transfer, and replay checks curre
 });
 
 for (const fault of ['batch digest', 'prepared event count', 'advanced applied cursor', 'wrong applied effect', 'missing deletion target', 'missing outbox event',
-  'false outbox marker', 'missing outbox marker']) {
+  'false outbox marker', 'missing outbox marker', 'advanced delivery cursor', 'wrong delivered event']) {
   test(`recovery closes the gate for a ${fault}`, { timeout: 45_000 }, async () => {
     await withFixtureMongo(async (fixture) => {
       const ownerDirectory = await seed(fixture);
@@ -293,6 +293,9 @@ for (const fault of ['batch digest', 'prepared event count', 'advanced applied c
         await db.collection('boardMembers').deleteOne(byGeneration);
       } else if (fault === 'missing outbox event') {
         await db.collection('events').deleteOne(byGeneration);
+      } else if (fault === 'advanced delivery cursor' || fault === 'wrong delivered event') {
+        await db.collection('commands').updateOne(byGeneration, { $set: { delivered: 1,
+          ...(fault === 'wrong delivered event' && { lastDeliveredEventId: actorId }) } });
       } else {
         await db.collection('commands').updateOne(byGeneration, fault === 'false outbox marker'
           ? { $set: { outboxPending: false } } : { $unset: { outboxPending: '' } });

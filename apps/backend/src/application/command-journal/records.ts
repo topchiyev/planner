@@ -39,6 +39,7 @@ export interface CommandRecord {
   resultHash?: string;
   eventCount?: number;
   delivered?: number;
+  lastDeliveredEventId?: string | null;
   outboxPending?: boolean;
   committedAt?: Date;
 }
@@ -70,7 +71,7 @@ export function checkCommand(command: CommandRecord) {
   }
   if (status === 'building') {
     if ([command.applied, command.lastAppliedEffectId, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
-      command.eventCount, command.delivered, command.outboxPending, command.recoverySequence]
+      command.eventCount, command.delivered, command.lastDeliveredEventId, command.outboxPending, command.recoverySequence]
       .some((value) => value !== undefined)) throw new CommandRecoveryError('A building command has active effects.');
     return;
   }
@@ -99,9 +100,10 @@ export function checkCommand(command: CommandRecord) {
   readJournalResult(command);
 }
 
-export function checkOutboxCursor(command: Pick<CommandRecord, 'eventCount' | 'delivered' | 'outboxPending'>) {
-  if (!Number.isSafeInteger(command.eventCount) || command.eventCount! < 0
+export function checkOutboxCursor(command: Pick<CommandRecord, 'id' | 'eventCount' | 'delivered' | 'lastDeliveredEventId' | 'outboxPending'>) {
+  if (!publicIdSchema.safeParse(command.id).success || !Number.isSafeInteger(command.eventCount) || command.eventCount! < 0
       || !Number.isSafeInteger(command.delivered) || command.delivered! < 0 || command.delivered! > command.eventCount!
+      || command.lastDeliveredEventId !== (command.delivered === 0 ? null : commandUuid(command.id, ['event', String(command.delivered! - 1)]))
       || command.outboxPending !== (command.delivered! < command.eventCount!)) {
     throw new CommandRecoveryError('The command outbox cursor is invalid.');
   }
