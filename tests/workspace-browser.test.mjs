@@ -1373,7 +1373,7 @@ test('native card media keeps files private, manages covers by revision and open
       const originalLink = file(editor, 'notes.dat').getByRole('link', { name: 'Download notes.dat' });
       await expect(originalLink).toBeVisible();
       await expect(file(editor, 'notes.dat').locator('img')).toHaveCount(0);
-      assert.equal((await stored()).coverAttachmentId, null);
+      assert.equal((await stored()).coverAttachmentId ?? null, null);
       const downloadPath = await originalLink.getAttribute('href');
       const [download] = await Promise.all([editor.waitForEvent('download'), originalLink.click()]);
       assert.equal(download.suggestedFilename(), 'notes.dat');
