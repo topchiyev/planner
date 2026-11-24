@@ -1401,8 +1401,13 @@ test('native card media keeps files private, manages covers by revision and open
       await expect(otherImage.getByText('Cover', { exact: true })).toBeVisible();
       const secondImageId = (await stored()).coverAttachmentId;
       assert.notEqual(secondImageId, firstImageId);
-      await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
-      await expect(panel(secondEditor).getByRole('alert')).toContainText('The card changed');
+      const [stale] = await Promise.all([
+        secondEditor.waitForResponse((response) =>
+          response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + ids.activeCard)),
+        panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click(),
+      ]);
+      assert.equal(stale.status(), 409);
+      await expect(panel(secondEditor).getByRole('alert')).toContainText('Review the current information');
       await expect(file(secondEditor, 'sample.jpeg').getByText('Cover', { exact: true })).toBeVisible();
       await panel(secondEditor).getByRole('button', { name: 'Clear cover' }).click();
       await expect(panel(secondEditor).getByRole('button', { name: 'Clear cover' })).toHaveCount(0);

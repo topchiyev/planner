@@ -618,6 +618,30 @@ test('card cover commands validate the exact logical image and keep imported una
       assert.equal(await f.db.collection('blobs').countDocuments({ ...f.scope, digest: checksum(pngBytes) }), 1);
       await invalid(duplicateId, 6);
       assert.equal((await socket(f, filePath(duplicateId) + '/thumbnail/small', viewer)).status, 404);
+      const cards = f.db.collection('cards');
+      const setCover = (coverAttachmentId) => f.gate.runCommand(() => cards.updateOne({ ...f.scope, id }, { $set: { coverAttachmentId } }));
+      await setCover(duplicateId);
+      assert.equal((await detail()).coverAttachmentId, null);
+      assert.equal(await front(), null);
+      await setCover(secondId);
+
+      const blobs = f.db.collection('blobs');
+      const row = await blobs.findOne({ ...f.scope, digest: checksum(pngBytes) });
+      const setSmallLength = (length) => f.gate.runCommand(() => blobs.updateOne({ _id: row._id }, { $set: { 'variants.small.byteLength': length } }));
+      await setSmallLength(0);
+      await invalid(firstId, 6);
+      const unavailableThumbnail = (await detail()).attachments.find(({ id }) => id === firstId);
+      assert.deepEqual([unavailableThumbnail.available, unavailableThumbnail.hasThumbnail], [true, false]);
+      await setSmallLength(row.variants.small.byteLength);
+
+      const attachments = f.db.collection('attachments');
+      const setOriginalLength = (byteLength) => f.gate.runCommand(() => attachments.updateOne({ ...f.scope, id: firstId }, { $set: { byteLength } }));
+      await setOriginalLength(pngBytes.length + 1);
+      await invalid(firstId, 6);
+      const unavailableOriginal = (await detail()).attachments.find(({ id }) => id === firstId);
+      assert.deepEqual([unavailableOriginal.available, unavailableOriginal.hasThumbnail], [false, false]);
+      await setOriginalLength(pngBytes.length);
+
       assert.equal((await patch(editor, 5, { coverAttachmentId: firstId })).data.error.code, 'REVISION_CONFLICT');
       const selectKey = randomUUID();
       const chosen = await patch(editor, 6, { coverAttachmentId: firstId }, selectKey);
