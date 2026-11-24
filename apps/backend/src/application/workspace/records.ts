@@ -1,5 +1,5 @@
 import type { AggregateOptions, Db, Document, Filter, Long, Sort } from 'mongodb';
-import type { SessionActor } from '@planner/contracts';
+import type { SessionActor, projectGradientSchema } from '@planner/contracts';
 import { publicIdPattern } from '@planner/contracts/storage';
 import { workspaceKey } from '../../storage/identity.js';
 
@@ -22,10 +22,10 @@ interface Entity {
 type Ordered = { name: string; rank?: Long | null };
 interface Records {
   users: { name: string; username?: string | null; role: SiteRole; disabledAt: Date | null };
-  projects: Ordered & { type: 'private' | 'shared'; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null };
+  projects: Ordered & { type: 'private' | 'shared'; ownerProjectManagerId: string | null; hidden: boolean; description?: string | null; backgroundId?: string | null; backgroundPreset?: typeof projectGradientSchema.options[number] | null };
   projectManagers: { projectId: string; userId: string };
   projectFavorites: { projectId: string; userId: string };
-  projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null; availability?: string | null };
+  projectBackgrounds: { projectId: string; name: string; kind: 'preset' | 'file'; blobDigest?: string | null; availability?: string | null; deletedAt?: Date | null };
   boards: Ordered & { projectId: string; defaultView?: BoardView; orderVersion?: number };
   boardMembers: { boardId: string; userId: string; role: 'editor' | 'viewer'; canComment: boolean | null };
   boardPreferences: {

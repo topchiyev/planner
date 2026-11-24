@@ -231,6 +231,29 @@ test('native Pillow derivatives are bounded and metadata-free with distinct avat
       assert.equal((await socket(f, preview, owner)).status, 200);
       assert.equal((await socket(f, preview, viewer)).status, 404);
       assert.equal((await socket(f, `/api/v1/projects/${ids.sharedProject}/backgrounds/${bgId}/thumbnail/small`, editor)).status, 404);
+      const available = (await f.call(project, owner)).data.data;
+      assert.deepEqual(available.backgrounds.map(({ id }) => id), [bgId]);
+      assert.equal(available.background, null);
+      const sharedManager = await login(f, ids.projectManager);
+      const crossProject = await f.call(`/api/v1/projects/${ids.sharedProject}`, sharedManager, {
+        method: 'PATCH', headers: expected(sharedManager, 1), body: { background: { kind: 'image', id: bgId } },
+      });
+      assert.equal(crossProject.status, 422);
+      assert.equal(crossProject.data.error.code, 'INVALID_PROJECT_BACKGROUND');
+      const choose = await f.call(project, owner, {
+        method: 'PATCH', headers: expected(owner, 2), body: { background: { kind: 'image', id: bgId } },
+      });
+      assert.equal(choose.status, 200);
+      const chosen = (await f.call(project, viewer)).data.data;
+      assert.deepEqual(chosen.background, { kind: 'image', id: bgId });
+      assert.equal(chosen.backgrounds, null);
+      assert.equal((await socket(f, preview, viewer)).status, 200);
+      const outsider = await login(f, ids.admin);
+      assert.equal((await socket(f, preview, outsider, { method: 'HEAD' })).status, 404);
+      assert.equal((await f.call(`${project}/backgrounds/${bgId}`, owner, { method: 'DELETE', headers: expected(owner, 3) })).status, 204);
+      assert.equal((await f.call(project, viewer)).data.data.background, null);
+      assert.equal((await socket(f, preview, viewer)).status, 404);
+
       const remove = await f.call(filePath(cover), editor, { method: 'DELETE', headers: expected(editor, 1) });
       assert.equal(remove.status, 204);
       assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.coverAttachmentId, null);

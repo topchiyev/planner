@@ -3,6 +3,8 @@ import { relationshipCommands, type RelationshipBoardInvalidation, type Relation
 import type { Db } from 'mongodb';
 import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields, JournalOperation, PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { availableProjectImage } from './project-background.js';
+import { authorizeProjectDelete, planProjectCreate, planProjectDelete } from './project-lifecycle.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -33,7 +35,7 @@ async function memberEdge(records: WorkspaceRecords, boardId: string, userId: st
 
 async function projectEdit(scope: WorkspaceAuthorization, input: RelationshipCommandInput<'projects.update'>) {
   const authorized = await scope.requireProject(input.id);
-  if (input.name !== undefined || input.description !== undefined) requireCapability(authorized.permissions.canEdit);
+  if (input.name !== undefined || input.description !== undefined || input.background !== undefined) requireCapability(authorized.permissions.canEdit);
   if (input.hidden !== undefined) requireCapability(authorized.permissions.canToggleHidden);
   if (input.type !== undefined) {
     if (authorized.project.type === 'private') requireCapability(authorized.ownsProject);
@@ -87,8 +89,9 @@ export function createRelationshipJournalOperations(
   database: Db,
   resolveActor: (context: CommandContext) => Promise<WorkspaceAuthorization>,
   origin: 'web' | 'mcp' = 'web',
+  idempotencyKey?: string,
 ): Record<RelationshipCommand, JournalOperation> {
-  function define<K extends RelationshipCommand, Scope extends ProjectAccessContext | BoardAccessContext>(
+  function define<K extends RelationshipCommand, Scope extends ProjectAccessContext | BoardAccessContext | void>(
     operation: K,
     authorize: (actor: WorkspaceAuthorization, input: RelationshipCommandInput<K>) => Promise<Scope>,
     plan: (records: WorkspaceRecords, access: Scope, input: RelationshipCommandInput<K>, context: CommandPlanningContext,
@@ -110,6 +113,10 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'projects.create': define('projects.create', async (scope) => { requireCapability(scope.roles.canCreateProject); },
+      (records, _access, input, context) => planProjectCreate(records, input, context)),
+    'projects.delete': define('projects.delete', (scope, input) => authorizeProjectDelete(database, scope, input, idempotencyKey),
+      (records, _access, input, _context, actor) => planProjectDelete(records, actor, input)),
     'projects.favorite': define('projects.favorite', favoriteAccess,
       (records, access, input, context) => changeFavorite(true, records, access, input, context)),
     'projects.unfavorite': define('projects.unfavorite', favoriteAccess,
@@ -121,6 +128,13 @@ export function createRelationshipJournalOperations(
       if (input.name !== undefined) fields.name = input.name;
       if (input.description !== undefined) fields.description = input.description;
       if (input.hidden !== undefined) fields.hidden = input.hidden;
+      if (input.background !== undefined) {
+        if (input.background?.kind === 'image' && !await availableProjectImage(database, context.generationId, input.id, input.background.id)) {
+          throw new RelationshipError('background');
+        }
+        fields.backgroundId = input.background?.kind === 'image' ? input.background.id : null;
+        fields.backgroundPreset = input.background?.kind === 'preset' ? input.background.preset : null;
+      }
       let retainsRead = true;
       if (input.type !== undefined && input.type !== project.type) {
         fields.type = input.type;

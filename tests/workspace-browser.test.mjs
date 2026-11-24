@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
 import { Secret, TOTP } from 'otpauth';
+import { createMediaDecoder } from '../apps/backend/dist/application/media/decoder.js';
+import { createMediaService } from '../apps/backend/dist/application/media/service.js';
+import { createPrivateMediaStore } from '../apps/backend/dist/storage/blobs/private-store.js';
 import { createTotpSecret, issueRecoveryCodes } from '../apps/backend/dist/application/auth/mfa-crypto.js';
 import { assertOwnedMongoEnvironment } from './support/mongo-environment.ts';
 import { cookieOf, fixtureId, ids, makeWorkspaceAccessFixture } from './support/workspace-access-fixture.mjs';
@@ -14,20 +21,33 @@ assertOwnedMongoEnvironment(process.env);
 const project = (id) => '/projects/' + id;
 const board = (id) => '/boards/' + id;
 
-async function workspaceBrowser(run) {
+async function workspaceBrowser(run, mediaEnabled = false) {
   await withFixtureMongo(async (mongo) => {
     let fixture;
     let web;
     let browser;
+    let store;
     try {
       web = await tlsBridge(mongo.directory, async (browserOrigin) => {
-        fixture = await makeWorkspaceAccessFixture(mongo, { browserOrigin });
+        fixture = await makeWorkspaceAccessFixture(mongo, { browserOrigin, ...(mediaEnabled && {
+          async configureMedia({ db, directory, installationId, gate, now }) {
+            const staging = join(directory, 'staging');
+            const blobs = join(directory, 'blobs');
+            await mkdir(staging, { mode: 0o700 });
+            await mkdir(blobs, { mode: 0o700 });
+            store = await createPrivateMediaStore(staging, blobs);
+            const decode = createMediaDecoder(fileURLToPath(new URL('../ops/package/decode-media.py', import.meta.url)),
+              process.env.PLANNER_TEST_MEDIA_PYTHON || undefined);
+            const media = createMediaService(db, installationId, gate, store, decode, { now });
+            return (callback) => callback(media);
+          },
+        }) });
         return { path: fixture.socketPath, close: fixture.close };
       });
       browser = await chromium.launch();
       const page = async (viewport) => (await browser.newContext({ ignoreHTTPSErrors: true, viewport })).newPage();
       await run({ fixture, origin: web.origin, page });
-    } finally { await Promise.allSettled([browser?.close(), web?.close()]); }
+    } finally { await Promise.allSettled([browser?.close(), web?.close()]); await store?.close(); }
   });
 }
 
@@ -268,4 +288,120 @@ test('native project and board links restore the authorized selection through MF
     await expect(narrow.getByText('Moving an assigned card')).toHaveCount(0);
     await expect(narrow.getByText('Private fixture project')).toHaveCount(0);
   });
+});
+
+test('project settings preserve a stale draft and refresh manager authority through ownership changes', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const owner = await page({ width: 1440, height: 900 });
+    const admin = await page({ width: 1440, height: 900 });
+    const viewer = await page({ width: 1440, height: 900 });
+    await signIn(owner, origin, 'create-only-owner');
+    await signIn(admin, origin, 'admin');
+    await signIn(viewer, origin, 'viewer');
+    await expect(viewer.getByRole('button', { name: 'Create project', exact: true })).toHaveCount(0);
+    await owner.getByRole('button', { name: 'Create project', exact: true }).click();
+    const create = owner.getByRole('dialog', { name: 'Create project' });
+    await create.getByLabel('Project name').fill('Browser project');
+    await create.getByLabel('Description').fill('Original description');
+    await create.getByLabel('Visibility').selectOption('private');
+    await create.getByRole('button', { name: 'Create project', exact: true }).click();
+    await expect(owner.getByRole('heading', { name: 'Browser project', level: 1 })).toBeVisible();
+    const pathname = new URL(owner.url()).pathname;
+    const id = pathname.split('/').at(-1);
+    await admin.goto(origin + pathname);
+    await expect(admin.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+    await owner.getByRole('button', { name: 'Project settings' }).click();
+    const settings = owner.getByRole('dialog', { name: 'Project settings' });
+    await settings.getByLabel('Project name').fill('Browser draft title');
+    await fixture.gate.runCommand(() => fixture.db.collection('projects').updateOne({ ...fixture.scope, id }, {
+      $set: { description: 'Changed by another session' }, $inc: { revision: 1 },
+    }));
+    await settings.getByRole('button', { name: 'Save project details' }).click();
+    await expect(settings.getByRole('alert')).toContainText('Current information has been loaded');
+    await expect(settings.getByLabel('Project name')).toHaveValue('Browser draft title');
+    await expect(settings.getByLabel('Description')).toHaveValue('Changed by another session');
+    await settings.getByRole('button', { name: 'Save project details' }).click();
+    await expect(owner.getByRole('heading', { name: 'Browser draft title', level: 1 })).toBeVisible();
+    await settings.getByRole('button', { name: 'Fern' }).click();
+    await expect(settings.getByRole('button', { name: 'Fern' })).toHaveAttribute('aria-pressed', 'true');
+    await settings.getByRole('button', { name: 'Make shared' }).click();
+    await settings.getByRole('button', { name: 'Confirm shared' }).click();
+    await expect(settings.getByText('Shared project', { exact: true })).toBeVisible();
+    await settings.getByRole('button', { name: 'Close', exact: true }).click();
+    await owner.getByRole('button', { name: 'Managers', exact: true }).click();
+    const roster = owner.getByRole('dialog', { name: 'Project managers' });
+    await roster.getByLabel('Find an eligible manager').fill('viewer');
+    await roster.getByRole('button', { name: 'Search accounts' }).click();
+    await expect(roster.getByText('No eligible accounts found.')).toBeVisible();
+    await roster.getByLabel('Find an eligible manager').fill('project-manager');
+    await roster.getByRole('button', { name: 'Search accounts' }).click();
+    await roster.getByRole('button', { name: 'Add Fixture project-manager' }).click();
+    await expect(roster.getByRole('button', { name: 'Remove Fixture project-manager' })).toBeVisible();
+    await roster.getByRole('button', { name: 'Remove Fixture project-manager' }).click();
+    await expect(roster.getByRole('button', { name: 'Add Fixture project-manager' })).toBeVisible();
+    await roster.getByRole('button', { name: 'Remove Fixture create-only-owner' }).click();
+    await expect(roster.getByRole('alert')).toContainText('Keep at least one project manager');
+    await roster.getByRole('button', { name: 'Close', exact: true }).click();
+    await admin.goto(origin + pathname);
+    await admin.getByRole('button', { name: 'Project settings' }).click();
+    const access = admin.getByRole('dialog', { name: 'Project settings' });
+    await expect(access.getByLabel('Project name')).toHaveCount(0);
+    await expect(access.getByLabel('Background image')).toHaveCount(0);
+    await access.getByRole('button', { name: 'Hide project' }).click();
+    await expect(access.getByRole('button', { name: 'Show project' })).toBeVisible();
+    await access.getByRole('button', { name: 'Make private' }).click();
+    await access.getByRole('button', { name: 'Confirm private' }).click();
+    await expect(admin).toHaveURL(origin + '/workspace');
+    await expect(admin.getByRole('dialog')).toHaveCount(0);
+    await owner.reload();
+    await expect(owner.getByRole('button', { name: 'Managers', exact: true })).toHaveCount(0);
+    await owner.getByRole('button', { name: 'Delete project', exact: true }).click();
+    const deletion = owner.getByRole('dialog', { name: 'Delete project' });
+    await deletion.getByLabel('Confirm project name').fill('Incorrect title');
+    await expect(deletion.getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+    await deletion.getByLabel('Confirm project name').fill('Browser draft title');
+    await deletion.getByRole('button', { name: 'Delete permanently' }).click();
+    await expect(owner).toHaveURL(origin + '/workspace');
+    await expect(owner.getByRole('link', { name: 'Browser draft title' })).toHaveCount(0);
+
+    const shared = project(ids.sharedProject);
+    await admin.goto(origin + shared);
+    const managers = admin.getByRole('button', { name: 'Managers', exact: true });
+    await expect(managers).toBeVisible();
+    await admin.context().clearCookies();
+    await managers.click();
+    await expect(admin.getByRole('heading', { name: 'Sign in', level: 1 })).toBeVisible();
+    assert.equal(new URL(admin.url()).searchParams.get('returnTo'), shared);
+  });
+});
+
+const projectDecoderAvailable = !!process.env.PLANNER_TEST_MEDIA_PYTHON
+  || spawnSync('/usr/bin/python3', ['-I', '-B', '-c', 'import PIL']).status === 0;
+
+test('project image upload, selection and removal use the protected media path in Chromium', {
+  timeout: 120_000, skip: !projectDecoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required',
+}, async () => {
+  await workspaceBrowser(async ({ origin, page }) => {
+    const owner = await page({ width: 1280, height: 860 });
+    await signIn(owner, origin, 'private-owner');
+    await owner.goto(origin + project(ids.privateProject));
+    await owner.getByRole('button', { name: 'Project settings' }).click();
+    const settings = owner.getByRole('dialog', { name: 'Project settings' });
+    await settings.getByLabel('Background image').setInputFiles(fileURLToPath(new URL('./fixtures/media/sample.png', import.meta.url)));
+    await settings.getByRole('button', { name: 'Upload image' }).click();
+    const select = settings.getByRole('button', { name: 'Use sample.png' });
+    await expect(select).toBeVisible();
+    await select.click();
+    await expect(select).toHaveAttribute('aria-pressed', 'true');
+    await settings.getByRole('button', { name: 'Close', exact: true }).click();
+    const banner = owner.locator('img.project-banner');
+    await expect(banner).toBeVisible();
+    await expect.poll(() => banner.evaluate((element) => element.naturalWidth)).toBeGreaterThan(0);
+    await owner.getByRole('button', { name: 'Project settings' }).click();
+    await settings.getByRole('button', { name: 'Remove sample.png' }).click();
+    await expect(settings.getByRole('button', { name: 'None', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(settings.getByText('sample.png')).toHaveCount(0);
+    await settings.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(banner).toHaveCount(0);
+  }, true);
 });
