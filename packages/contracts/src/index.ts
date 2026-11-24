@@ -21,3 +21,4 @@ export * from './card-lifecycle.js';
 export * from './list-lifecycle.js';
 export * from './list-maintenance.js';
 export * from './card-transitions.js';
+export * from './affiliations.js';
