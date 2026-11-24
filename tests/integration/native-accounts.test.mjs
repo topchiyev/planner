@@ -226,3 +226,68 @@ test('isolated credential transitions recover after interruption and enforce one
     } finally { await f.close(); }
   });
 });
+
+test('operator replay checks the original approval and post-effect state before completing after expiry', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    const { db } = mongo;
+    try {
+      const admin = await f.seed('admin@example.test', { role: 'admin' });
+      const target = await f.seed('member@example.test');
+      const login = await f.sessions().login({ identifier: admin.email, password });
+      const svc = f.accountServices();
+      const requested = await svc.requestApproval(login.token, admin.id, target.id, 1, { action: 'role', role: 'projectOwner' });
+      const approval = { ...f.scope, id: requested.id };
+      const targetMatch = { _id: target._id, ...f.scope };
+      await assert.rejects(f.accountServices(() => { throw new Error('test interruption'); }).confirmApproval(requested.id), /test interruption/u);
+      assert.equal((await db.collection('users').findOne(targetMatch)).role, 'projectOwner');
+
+      await db.collection('recoveryGrants').updateOne(approval, { $set: { change: { action: 'recovery' } } });
+      await assert.rejects(f.reboot(), /does not match the recorded approval/u);
+      assert.equal(f.gate().ready, false);
+      assert.equal((await db.collection('recoveryGrants').findOne(approval)).consumedAt, null);
+      assert.equal(await db.collection('auditEntries').countDocuments(f.scope), 0);
+
+      await db.collection('recoveryGrants').updateOne(approval, { $set: { change: requested.change } });
+      await db.collection('users').updateOne(targetMatch, { $set: { role: 'boardUser' } });
+      await assert.rejects(f.reboot(), /state does not match the recorded approval/u);
+      assert.equal(await db.collection('auditEntries').countDocuments(f.scope), 0);
+
+      await db.collection('users').updateOne(targetMatch, { $set: { role: 'projectOwner' } });
+      f.advanceBy(11 * 60_000);
+      await f.reboot();
+      await f.reboot();
+      assert.equal(f.gate().ready, true);
+      assert.ok((await db.collection('recoveryGrants').findOne(approval)).consumedAt instanceof Date);
+      assert.equal((await db.collection('users').findOne(targetMatch)).accountChange, undefined);
+      assert.equal(await db.collection('auditEntries').countDocuments({ ...f.scope, action: 'account.role', origin: 'operator' }), 1);
+    } finally { await f.close(); }
+  });
+});
+
+test('a later role change and expiration invalidate outstanding recovery delivery', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    try {
+      const admin = await f.seed('admin@example.test', { role: 'admin' });
+      const target = await f.seed('member@example.test');
+      const login = await f.sessions().login({ identifier: admin.email, password });
+      const svc = f.accountServices();
+      async function reset(revision) {
+        const approval = await svc.requestApproval(login.token, admin.id, target.id, revision, { action: 'recovery' });
+        return (await svc.confirmApproval(approval.id)).recovery.grant;
+      }
+      const first = await reset(1);
+      const promote = await svc.requestApproval(login.token, admin.id, target.id, 2, { action: 'role', role: 'projectOwner' });
+      await svc.confirmApproval(promote.id);
+      await assert.rejects(svc.consumeRecovery({ grant: first, password }), accountError('grant'));
+      const expiring = await reset(3);
+      f.advanceBy(30 * 60_000);
+      await assert.rejects(svc.consumeRecovery({ grant: expiring, password }), accountError('grant'));
+      const final = await reset(4);
+      assert.deepEqual(await svc.consumeRecovery({ grant: final, password }), { status: 'confirmed' });
+      const member = await f.sessions().login({ identifier: target.email, password });
+      assert.equal(member.session.account.role, 'projectOwner');
+    } finally { await f.close(); }
+  });
+});
