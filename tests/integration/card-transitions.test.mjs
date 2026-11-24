@@ -73,7 +73,10 @@ test('a same-board move updates closure, scoped linked completion and eligible d
     await f.insert('checklists', hiddenChecklist, { cardId: hiddenOwner, name: 'Hidden checklist', rank: '1024' });
     await f.insert('tasks', hiddenTask, { checklistId: hiddenChecklist, linkedCardId: card, completed: true, rank: '1024' });
     await f.insert('boardPreferences', fixtureId(5004), { boardId: ids.privateBoard, restrictedCardType: 'story' });
-    for (const [i, userId] of [ids.viewer, ids.secondEditor, ids.firstEditor].entries()) {
+    await f.db.collection('boardMembers').deleteOne({ ...f.scope, boardId: ids.privateBoard, userId: ids.privateOwner });
+    const inherited = await data(f.call(boardPath(ids.privateBoard), manager));
+    assert.deepEqual([inherited.permissions.canManage, inherited.permissions.canFollow], [true, false]);
+    for (const [i, userId] of [ids.viewer, ids.secondEditor, ids.firstEditor, ids.privateOwner].entries()) {
       await f.insert('boardFollows', fixtureId(5010 + i), { boardId: ids.privateBoard, userId });
     }
     for (const [i, userId] of [ids.viewer, ids.unrelated, ids.disabledMember, ids.firstEditor].entries()) {
@@ -83,16 +86,24 @@ test('a same-board move updates closure, scoped linked completion and eligible d
     const body = { toListId: destination, beforeCardId: anchor, ...versions(1, 1) };
     const move = (revision, changes = {}, key, cookie = editor) => mutate(f, cookie, 'POST', route, revision, { ...body, ...changes }, key);
     await expected(move(1, {}, undefined, viewer), 403);
-    await expected(move(1, { beforeCardId: ids.sharedTarget }), 409, 'CARD_ORDER_CONFLICT');
-    await expected(move(1, { beforeCardId: fixtureId(5500) }), 409, 'CARD_ORDER_CONFLICT');
-    await expected(move(1, { ...versions(2, 1) }), 409, 'CARD_ORDER_CONFLICT');
-    await expected(move(1, { toListId: ids.sharedActiveList }), 409, 'CARD_ORDER_CONFLICT');
+    for (const beforeCardId of [ids.sharedTarget, fixtureId(5500)]) {
+      const unavailable = await expected(move(1, { beforeCardId }), 409, 'CARD_ORDER_CONFLICT');
+      assert.equal(unavailable.data.error.fields, undefined);
+    }
+    const stale = await expected(move(1, { ...versions(2, 1) }), 409, 'CARD_ORDER_CONFLICT');
+    assert.deepEqual(stale.data.error.fields.current, {
+      cardRevision: 1, source: { listId: source, revision: 1, orderVersion: 1 },
+      destination: { listId: destination, revision: 1, orderVersion: 1 },
+    });
+    const foreign = await expected(move(1, { toListId: ids.sharedActiveList }), 409, 'CARD_ORDER_CONFLICT');
+    assert.equal(foreign.data.error.fields, undefined);
     const key = randomUUID();
     const moved = await data(move(1, {}, key));
     assert.deepEqual(moved.card, { id: card, boardId: ids.privateBoard, listId: destination, kind: 'board', closed: false, revision: 2 });
     assert.deepEqual([moved.source.orderVersion, moved.destination.orderVersion], [2, 2]);
     assert.deepEqual(await data(move(1, {}, key)), moved);
-    await expected(move(1), 409, 'REVISION_CONFLICT');
+    const outdated = await expected(move(1), 409, 'REVISION_CONFLICT');
+    assert.deepEqual(outdated.data.error.fields.current, { cardRevision: 2, source: moved.destination, destination: moved.destination });
     const saved = await data(f.call(cardPath(card), editor));
     assert.equal(saved.type, 'project');
     assert.equal(saved.closed, false);
@@ -114,6 +125,15 @@ test('a same-board move updates closure, scoped linked completion and eligible d
       .sort({ sequence: 1 }).toArray();
     assert.deepEqual(localEvents.map(({ kind, payload }) => [kind, payload]), [['card.changed', { id: card, revision: 2 }], ['board.invalidated', {}]]);
     assert.equal(await f.db.collection('activities').countDocuments({ ...f.scope, cardId: card }), 1);
+
+    await data(mutate(f, editor, 'PATCH', cardPath(card), 2, { closed: true }));
+    const priorReorder = await f.db.collection('cards').findOne({ ...f.scope, id: card });
+    const reordered = await data(move(3, { beforeCardId: null, ...versions(2, 2) }));
+    assert.equal(reordered.card.closed, true);
+    assert.deepEqual(reordered.source, reordered.destination);
+    assert.equal(reordered.destination.orderVersion, 3);
+    const afterReorder = await f.db.collection('cards').findOne({ ...f.scope, id: card });
+    assert.deepEqual(afterReorder.listChangedAt, priorReorder.listChangedAt);
 
     await expected(mutate(f, manager, 'PATCH', boardPath(ids.privateBoard) + '/members/' + ids.firstEditor, 1,
       { role: 'viewer', canComment: false }), 200);

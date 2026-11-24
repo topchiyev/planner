@@ -211,6 +211,8 @@ test('trash clear confirms the exact list, keeps its roots and protects links ac
     await f.insert('activities', victimFeed, { boardId, cardId: victim });
     await f.insert('labels', keepLabel, { boardId, name: 'Board-owned label', rank: '1' });
     await f.insert('cardLabels', labelJoin, { cardId: victim, labelId: keepLabel });
+    const boardNotice = await f.insert('notifications', fixtureId(8018), { boardId, cardId: null, recipientId: ids.viewer });
+    const cardNotice = await f.insert('notifications', fixtureId(8019), { boardId, cardId: victim, recipientId: ids.viewer });
     const createdAt = new Date('2026-01-16T10:30:45.000Z');
     await f.db.collection('tasks').insertMany(Array.from({ length: 270 }, (_, index) => {
       const id = fixtureId(8100 + index);
@@ -266,9 +268,9 @@ test('trash clear confirms the exact list, keeps its roots and protects links ac
     await response(f.call(card(victim), owner), 404);
     assert.equal((await get(f, 'boards', boardId)).historySequence.toString(), '9223372036854775807');
     assert.equal((await get(f, 'boards', boardId)).orderVersion, 1);
-    for (const [collection, id] of [['activities', boardFeed], ['labels', keepLabel], ['lists', trash],
+    for (const [collection, id] of [['activities', boardFeed], ['notifications', boardNotice], ['labels', keepLabel], ['lists', trash],
       ['cards', ids.archivedStory], ['fieldGroups', ids.fieldGroup]]) assert.ok(await get(f, collection, id), collection);
-    for (const [collection, id] of [['activities', victimFeed], ['cardLabels', labelJoin], ['cards', victim],
+    for (const [collection, id] of [['activities', victimFeed], ['notifications', cardNotice], ['cardLabels', labelJoin], ['cards', victim],
       ['checklists', victimChecklist]]) assert.equal(await get(f, collection, id), null, collection);
     assert.equal(await f.db.collection('tasks').countDocuments({ ...f.scope, checklistId: victimChecklist }), 0);
     assert.ok(await f.db.collection('cards').findOne({ generationId: f.stagedGenerationId, id: victim }));
@@ -279,9 +281,11 @@ test('trash clear confirms the exact list, keeps its roots and protects links ac
     }
     const internal = await openActiveWorkspace(f.db, f.installationId);
     assert.equal(Object.hasOwn(await internal.read('tasks', ownTask), 'linkedUnavailableProvenance'), false);
-    const tasks = (await response(f.call(card(ids.activeCard) + '/checklists', viewer), 200)).data.flatMap(({ tasks }) => tasks);
-    assert.deepEqual(tasks.filter(({ id }) => id === ownTask).map(({ kind, linkedCard, completed }) => [kind, linkedCard, completed]),
-      [['unavailable', undefined, undefined]]);
+    for (const [ownerCard, caller, taskId] of [[ids.activeCard, viewer, ownTask], [ids.sharedTarget, editor, externalTask]]) {
+      const tasks = (await response(f.call(card(ownerCard) + '/checklists', caller), 200)).data.flatMap(({ tasks }) => tasks);
+      assert.deepEqual(tasks.filter(({ id }) => id === taskId).map(({ kind, linkedCard, completed }) => [kind, linkedCard, completed]),
+        [['unavailable', undefined, undefined]]);
+    }
     for (const [collection, id] of [['cards', ids.activeCard], ['cards', ids.sharedTarget],
       ['checklists', ids.checklist], ['checklists', externalChecklist]]) assert.equal((await get(f, collection, id)).revision, 2);
     const events = await f.db.collection('events').find({ ...f.scope, commandId: prepared.id }).sort({ ordinal: 1 }).toArray();

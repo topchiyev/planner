@@ -102,7 +102,7 @@ function ClearTrashDialog({ boardId, trash, close }: { boardId: string; trash: B
 
   return <WorkspaceDialog title="Clear trash" onClose={close} busy={action.busy}>
     <form className="project-form" onSubmit={clear}>
-      <p>Permanently delete {trash.cardCount} {trash.cardCount === 1 ? 'card' : 'cards'} and their contents?</p>
+      <p>Permanently delete {trash.cardCount} {trash.cardCount === 1 ? 'card and its contents' : 'cards and their contents'}?</p>
       <label className="board-checkbox"><input type="checkbox" checked={matches} disabled={action.busy || !trash.cardCount}
         onChange={(event) => setConfirmed(event.target.checked ? { revision: trash.revision, orderVersion: trash.orderVersion } : null)} />
         I confirm permanent deletion of these cards

@@ -5,6 +5,8 @@ import { workspaceCardContext, workspaceData } from './workspace.js';
 const target = z.strictObject({ id: publicIdSchema, expectedRevision: revisionSchema });
 const versions = { sourceOrderVersion: revisionSchema, destinationOrderVersion: revisionSchema };
 const position = z.strictObject({ listId: publicIdSchema, revision: revisionSchema, orderVersion: revisionSchema });
+export const cardPlacementVersionsSchema = z.strictObject({ cardRevision: revisionSchema, source: position, destination: position });
+export type CardPlacementVersions = z.infer<typeof cardPlacementVersionsSchema>;
 const receipt = workspaceData(z.strictObject({
   card: z.strictObject({
     id: publicIdSchema, revision: revisionSchema, boardId: publicIdSchema, listId: publicIdSchema,

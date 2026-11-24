@@ -1,4 +1,4 @@
-import type { CardTransition, RelationshipCommandInput } from '@planner/contracts';
+import type { CardPlacementVersions, CardTransition, RelationshipCommandInput } from '@planner/contracts';
 import type { Db } from 'mongodb';
 import { decodeRank } from '../../storage/identity.js';
 import type { CommandPlan, CommandPlanningContext, JournalFields, PlannedEffect } from '../command-journal/operation.js';
@@ -12,14 +12,14 @@ import { cardClosed } from './card-state.js';
 import { planLinkedCardCompletion } from './linked-card-completion.js';
 import { listCardOrderVersion } from './list-state.js';
 import { planRankChange, RankAnchorError } from './ordered-ranks.js';
-import { RelationshipError, requireRevision, touchRevision } from './relationship-policy.js';
+import { CardPlacementConflict, RelationshipError, requireRevision, touchRevision } from './relationship-policy.js';
 import type { WorkspaceRecords, WorkspaceRow } from './records.js';
 
 type Request = { [K in CardTransition]: { operation: K; input: RelationshipCommandInput<K> } }[CardTransition];
 type List = WorkspaceRow<'lists'>;
 type Access = { source: CardAccessContext; explicitDestination: List | null };
 type Update = Extract<PlannedEffect, { kind: 'update' }>;
-type Position = { listId: string; revision: number; orderVersion: number };
+type Position = CardPlacementVersions['source'];
 
 export async function authorizeCardTransition(scope: WorkspaceAuthorization, input: Request['input']): Promise<Access> {
   const source = await scope.requireCard(input.id);
@@ -73,10 +73,17 @@ export async function planCardTransition(database: Db, records: WorkspaceRecords
   const { card, list: source, board: { board } } = access.source;
   const { generationId, timestamp } = context;
   const { operation, input } = request;
-  const revision = requireRevision(card, input.expectedRevision)!;
   const destination = await resolveDestination(records, generationId, access, request);
-  if (input.sourceOrderVersion !== listCardOrderVersion(source) || input.destinationOrderVersion !== listCardOrderVersion(destination)) {
-    throw new RelationshipError('cardOrder');
+  const current = { cardRevision: card.revision, source: listPosition(source), destination: listPosition(destination) };
+  let revision: number;
+  try {
+    revision = requireRevision(card, input.expectedRevision, true)!;
+  } catch (error) {
+    if (error instanceof RelationshipError && error.code === 'REVISION_CONFLICT') throw new CardPlacementConflict('cardRevision', current);
+    throw error;
+  }
+  if (input.sourceOrderVersion !== current.source.orderVersion || input.destinationOrderVersion !== current.destination.orderVersion) {
+    throw new CardPlacementConflict('cardOrder', current);
   }
 
   const same = source.id === destination.id;

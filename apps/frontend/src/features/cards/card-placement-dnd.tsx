@@ -7,8 +7,9 @@ import {
 
 const cardDrag = 'card-placement';
 type Target = { listId: string; beforeCardId: string | null };
+type Focus = { id: string; expected?: { listId: string; revision: number } };
 type Controls = {
-  sourceId?: string; busy: boolean; open: (card: PlacementCard) => void; bindMoveButton: (id: string, element: HTMLButtonElement | null) => void;
+  sourceId?: string; busy: boolean; open: (card: PlacementCard) => void; bindMoveButton: (id: string, element: HTMLButtonElement) => () => void;
 };
 const Placement = createContext<Controls | null>(null);
 
@@ -19,15 +20,17 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
   const [dialog, setDialog] = useState<CardPlacement>();
   const [message, setMessage] = useState('');
   const buttons = useRef(new Map<string, HTMLButtonElement>());
-  const [focus, setFocus] = useState<string>();
+  const [focus, setFocus] = useState<Focus>();
   const feedback = useRef<HTMLParagraphElement>(null);
 
   useEffect(() => {
-    if (focus && !action.busy) {
-      (buttons.current.get(focus) ?? feedback.current)?.focus();
-      setFocus(undefined);
-    }
-  }, [focus, action.busy]);
+    if (!focus || action.busy) return;
+    const card = cards.find(({ id }) => id === focus.id);
+    if (focus.expected && card && (card.revision < focus.expected.revision
+        || (card.revision === focus.expected.revision && card.listId !== focus.expected.listId))) return;
+    (buttons.current.get(focus.id) ?? feedback.current)?.focus();
+    setFocus(undefined);
+  }, [focus, action.busy, cards]);
 
   function place(state: CardPlacement, { listId, beforeCardId }: Target) {
     setDialog(undefined);
@@ -35,9 +38,13 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     if (!body) return;
     const { card } = state;
     setMessage('');
+    const nextFocus: Focus = { id: card.id };
     void action.run(['cards.move', card.id, card.revision, body], (csrf, key) =>
       relationshipCommand('cards.move', csrf, key, { id: card.id, revision: card.revision, body }),
-    () => setMessage('Moved ' + card.name + '.')).then(() => setFocus(card.id));
+    (result) => {
+      if (result) nextFocus.expected = result.data.card;
+      setMessage('Moved ' + card.name + '.');
+    }).then(() => setFocus(nextFocus));
   }
 
   useDragDropMonitor({
@@ -55,7 +62,7 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
       const target = operation.target?.data;
       if (canceled || typeof target?.listId !== 'string'
           || (target.beforeCardId !== null && typeof target.beforeCardId !== 'string')) {
-        setFocus(state.card.id);
+        setFocus({ id: state.card.id });
         return;
       }
       place(state, { listId: target.listId, beforeCardId: target.beforeCardId });
@@ -66,15 +73,17 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     const captured = captureCardPlacement(workspace, card);
     if (captured) { action.clearProblem(); setMessage(''); setDialog(captured); }
   }, bindMoveButton(id, element) {
-    if (element) buttons.current.set(id, element);
-    else buttons.current.delete(id);
+    buttons.current.set(id, element);
+    return () => {
+      if (buttons.current.get(id) === element) buttons.current.delete(id);
+    };
   } }}>
     {action.problem && <p className="workspace-problem" role="alert" ref={feedback} tabIndex={-1}>{action.problem}</p>}
     {message && <p role="status" ref={feedback} tabIndex={-1}>{message}</p>}
     {children}
     {dialog && <CardPlacementDialog state={dialog} mode="move" onClose={() => {
       setDialog(undefined);
-      setFocus(dialog.card.id);
+      setFocus({ id: dialog.card.id });
     }} onPlace={(listId, beforeCardId) => place(dialog, { listId, beforeCardId })} />}
   </Placement.Provider>;
 }
@@ -92,7 +101,7 @@ export function DraggableBoardCard({ card, children }: { card: PlacementCard; ch
     {children}
     {controls && card.permissions.canMove && <div className="board-card-placement">
       <button className="workspace-button" type="button" aria-label={'Move card ' + card.name} disabled={controls.busy || !!controls.sourceId}
-        ref={(element) => controls.bindMoveButton(card.id, element)} onClick={() => controls.open(card)}>Move</button>
+        ref={(element) => element ? controls.bindMoveButton(card.id, element) : undefined} onClick={() => controls.open(card)}>Move</button>
       <span className="board-card-handle" ref={drag.handleRef} data-card-drag-handle aria-hidden="true" tabIndex={-1} title={'Drag ' + card.name}>⠿</span>
     </div>}
   </li>;
