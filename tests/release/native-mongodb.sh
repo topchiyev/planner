@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run as root inside a disposable Ubuntu guest after native-installation.sh passes.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "Native MongoDB acceptance failed on line %s.\n" "$LINENO" >&2' ERR
 umask 077
 
 work=$(mktemp -d /var/tmp/planner-mongo-test.XXXXXX)
@@ -25,6 +26,16 @@ wait_for() {
     done
     echo "Condition timed out: $*" >&2
     return 1
+}
+check_readiness() {
+    runuser -u planner -- "$node" --input-type=module - "$release" "${1:-}" <<'JS'
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const { checkMongoReadiness } = await import(pathToFileURL(process.argv[2] + '/apps/backend/dist/native/mongo-readiness.js'));
+const expected = process.argv[3];
+if (expected) await assert.rejects(checkMongoReadiness(), (error) => error.message.includes(expected));
+else await checkMongoReadiness();
+JS
 }
 
 [ "$(id -u)" = 0 ]
@@ -51,7 +62,11 @@ collision_pid=$(pid "$collision")
 if initialize > "$work/collision" 2>&1; then exit 1; fi
 grep -F 'occupied by an unexpected listener' "$work/collision"
 [ "$(pid "$collision")" = "$collision_pid" ]
-if journalctl -u "$collision" --no-pager | grep -q 'UNEXPECTED CONNECTION'; then exit 1; fi
+if journalctl -u "$collision" "_PID=$collision_pid" _TRANSPORT=stdout --no-pager --output=cat |
+    grep -Fx 'UNEXPECTED CONNECTION' >/dev/null; then
+    echo 'The bootstrap controller connected to the foreign listener.' >&2
+    exit 1
+fi
 [ ! -e "$journal" ]
 [ ! -e "$config/mongodb-app.json" ]
 [ "$(ls -A "$config")" = "$config_before" ]
@@ -95,11 +110,7 @@ first_pid=$(pid "$amongo")
 [ "$(stat -c '%U:%G:%a' /run/planner-mongodb/mongod.sock)" = planner-mongodb:planner-mongodb:777 ]
 if runuser -u nobody -- touch /run/planner-mongodb/foreign 2>/dev/null; then exit 1; fi
 
-runuser -u planner -- "$node" --input-type=module - "$release" <<'JS'
-import { pathToFileURL } from 'node:url';
-const { checkMongoReadiness } = await import(pathToFileURL(process.argv[2] + '/apps/backend/dist/native/mongo-readiness.js'));
-await checkMongoReadiness();
-JS
+check_readiness
 
 systemctl restart "$amongo"
 wait_for test -S /run/planner-mongodb/mongod.sock
@@ -168,6 +179,7 @@ JS
 }
 health
 change_identity wrong
+check_readiness 'installation UUID does not match'
 if initialize > "$work/wrong-identity" 2>&1; then exit 1; fi
 grep -F 'installation UUID does not match' "$work/wrong-identity"
 [ "$(pid "$amongo")" = "$restarted_pid" ]
@@ -176,6 +188,7 @@ change_identity restore
 initialize > "$work/restored"
 cmp "$work/initialized" "$work/restored"
 systemctl stop "$amongo"
+check_readiness 'listener has unexpected ownership or binding'
 health
 kill "$backend"
 wait "$backend" 2>/dev/null || true
