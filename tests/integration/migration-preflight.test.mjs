@@ -13,7 +13,7 @@ import { inspectDirectory, inspectObjects, parseObjectService, reconcileAssets }
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { durable } from '../../apps/backend/dist/application/command-journal/records.js';
 import { importRunKey, migrationCursors, writeMigrationBatch } from '../../apps/backend/dist/application/migration/checkpoint.js';
-import { MigrationError, readAssetManifest, readCaptureManifest, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
+import { MigrationError, assetKeyKind, readAssetManifest, readCaptureManifest, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
 import { compareSourceHistory, compareSourcePosition, SourceJsonNumber } from '../../apps/backend/dist/application/migration/source-projections.js';
 import { inspectMigration, withMigrationSnapshot } from '../../apps/backend/dist/application/migration/preflight.js';
 import { parseSourceService } from '../../apps/backend/dist/application/migration/source-service.js';
@@ -226,6 +226,8 @@ test('both synthetic restored tags match the native-source preflight through a t
           ('10',301,401,'story',1000,'edge',NULL,NULL,0,false),
           ('2',301,401,'story',1000,'edge',NULL,NULL,0,false),
           ('9223372036854775807',301,401,'story',NULL,'edge',NULL,NULL,0,false);
+      INSERT INTO public.uploaded_file (id, type, size)
+        VALUES ('-9223372036854775808','attachment',0),('0','attachment',0),('9223372036854775807','attachment',0);
       UPDATE public.action SET data = '{"card":{"id":9007199254740993},"sample":0.000000000000000001,"absentContrast":null,"flag":false,"empty":""}'
         WHERE id=712;
     `);
@@ -239,6 +241,14 @@ test('both synthetic restored tags match the native-source preflight through a t
       assert.deepEqual(cards.slice(0, 3).map(({ description, stopwatch }) => [description, stopwatch]),
         [['', { value: null }], ['  Ω  ', null], [null, null]]);
       assert.equal(cards[0].position, Math.PI);
+      const uploads = (await snapshot.readBatch('uploaded_file', null, 3)).rows;
+      assert.deepEqual(uploads.map(({ id }) => id), ['-9223372036854775808', '0', '03000000-0000-4000-8000-000000000001']);
+      assert.deepEqual((await snapshot.readBatch('uploaded_file', uploads[2].id, 1)).rows.map(({ id }) => id),
+        ['03000000-0000-4000-8000-000000000002']);
+      assert.equal(assetKeyKind('private/attachments/-9223372036854775808/body.txt'), 'original');
+      assert.equal(assetKeyKind('private/attachments/0/body.txt'), 'original');
+      assert.throws(() => assetKeyKind('private/attachments/-9223372036854775809/body.txt'), refuses('asset-key'));
+
       assert.deepEqual([...cards.slice(0, 2)].reverse().sort(compareSourcePosition).map(({ id }) => id),
         ['-9223372036854775808', '-9007199254740993']);
       assert.deepEqual(cards.filter((row) => row.list_changed_at).sort(compareSourceHistory).map(({ id }) => id),
