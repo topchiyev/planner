@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, type MouseEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo } from 'react';
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRouteLoaderData, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
@@ -72,12 +72,18 @@ export function BoardPage() {
     return () => cancelAnimationFrame(frame);
   }, [inspectorOpen, concealed, board?.recipeScope, pathname, search, key, routeState?.cardReturnKey]);
 
-  function preserveDepartingView(event: MouseEvent<HTMLAnchorElement>) {
-    if (viewKey && !explicitView && !event.defaultPrevented && event.button === 0
-        && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
-      saveBoardEntryView(viewKey, key, view);
+  useEffect(() => {
+    if (!viewKey || explicitView) return;
+    function rememberViewOnLink(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+      if (!(link instanceof HTMLAnchorElement) || (link.target && link.target !== '_self') || link.hasAttribute('download')
+          || link.origin !== window.location.origin || link.pathname + link.search === pathname + search) return;
+      saveBoardEntryView(viewKey!, key, view);
     }
-  }
+    document.addEventListener('click', rememberViewOnLink, { capture: true });
+    return () => document.removeEventListener('click', rememberViewOnLink, { capture: true });
+  }, [viewKey, explicitView, key, view, pathname, search]);
 
   function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: BoardView) {
     const nextParams = new URLSearchParams(params);
@@ -114,12 +120,12 @@ export function BoardPage() {
         <div className="board-controls">
           <nav aria-label="Board context" className="context-nav">
             {contexts.map((item) => (
-              <Link aria-current={item.id === context.id ? 'page' : undefined} key={item.id} onClick={preserveDepartingView} to={boardLocation(item.id)}>{item.name}</Link>
+              <Link aria-current={item.id === context.id ? 'page' : undefined} key={item.id} to={boardLocation(item.id)}>{item.name}</Link>
             ))}
           </nav>
           <nav aria-label="Board view" className="view-nav">
             {availableViews.map((item) => (
-              <Link aria-current={item.id === view ? 'page' : undefined} key={item.id} onClick={preserveDepartingView} to={boardLocation(context.id, item.id)}>{item.name}</Link>
+              <Link aria-current={item.id === view ? 'page' : undefined} key={item.id} to={boardLocation(context.id, item.id)}>{item.name}</Link>
             ))}
           </nav>
         </div>

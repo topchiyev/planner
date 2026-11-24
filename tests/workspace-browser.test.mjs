@@ -1969,6 +1969,12 @@ test('native board layouts share card placement, preference display, and paged i
     assert.equal(new URL(editor.url()).search, paged);
     await cardLink.click();
     await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
+    const inspectorViews = editor.getByRole('navigation', { name: 'Board view' });
+    await inspectorViews.getByRole('link', { name: 'List' }).click();
+    await expect(inspectorViews.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await editor.goBack();
+    await expect(editor.getByRole('heading', { name: 'Layout second card', level: 2 })).toBeVisible();
+    await expect(inspectorViews.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     await editor.goBack();
     await expect(cardLink).toBeFocused();
     await cardGrid.getByRole('button', { name: 'Move card Layout second card' }).press('Enter');
