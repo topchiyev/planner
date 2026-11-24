@@ -34,7 +34,7 @@ interface Records {
   lists: Ordered & { boardId: string; kind: ListKind; orderVersion?: number };
   cards: Ordered & {
     boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
-    description?: string | null; previousListId?: string | null; dueDate?: Date | null;
+    description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
     listChangedAt?: Date | null; historySequence?: Long; coverAttachmentId?: string | null;
   };
   labels: Omit<Ordered, 'name'> & { name?: string | null; boardId: string; color?: string | null };

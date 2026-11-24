@@ -209,7 +209,7 @@ async function verifyWorkspaceRecords(database: Db) {
       }
       for (const field of storedInstantFields) {
         if (!(field in key)) continue;
-        try { readStoredInstant(key[field]); }
+        try { readStoredInstant(key[field], field); }
         catch { throw new StorageSchemaError('records', `A stored ${name} instant is not a BSON Date or null.`); }
       }
     }

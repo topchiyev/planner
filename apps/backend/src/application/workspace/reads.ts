@@ -1,7 +1,7 @@
 import type { WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document, Long } from 'mongodb';
-import { decodeRank } from '../../storage/identity.js';
+import { decodeRank, readStoredInstant } from '../../storage/identity.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
@@ -21,7 +21,7 @@ const boardDto = ({ board, permissions }: BoardAccessContext) => ({ ...ordered(b
 
 function cardDto(card: WorkspaceRow<'cards'>, board: BoardAccessContext, list: WorkspaceRow<'lists'>) {
   return { ...ordered(card), boardId: board.board.id, listId: list.id, name: card.name, type: card.type, kind: card.kind,
-    closed: card.closed ?? list.kind === 'closed', dueDate: iso(card.dueDate), permissions: cardPermissions(board, list) };
+    closed: card.closed ?? list.kind === 'closed', dueDate: iso(readStoredInstant(card.dueDate ?? null, 'dueDate')), permissions: cardPermissions(board, list) };
 }
 
 function inertLink(raw?: string | null) {
@@ -97,7 +97,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     ] }, rankSort);
     const fields = await together(groups.map(async (group) => fieldGroup(group, await access.effectiveDefinitionGroups(context, group))));
     const definitions = new Map(fields.map(({ id, definitions }) => [id, new Set(definitions.map((definition) => definition.id))]));
-    const allValues = await records.find('fieldValues', { cardId: context.card.id, fieldGroupId: { $in: [...definitions.keys()] } });
+    const allValues = await records.find('fieldValues', { cardId: context.card.id, fieldGroupId: { $in: [...definitions.keys()] } },
+      { fieldGroupId: 1, fieldDefinitionId: 1 });
     const values = allValues.flatMap(({ fieldGroupId, fieldDefinitionId, value }) =>
       definitions.get(fieldGroupId)?.has(fieldDefinitionId) ? [{ fieldGroupId, fieldDefinitionId, value }] : []);
     return { fields, values };

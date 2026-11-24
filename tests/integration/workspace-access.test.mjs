@@ -150,7 +150,8 @@ test('workspace aggregation and child projections stay in the authorized parent 
     try {
       await f.insert('labels', related, { boardId: ids.privateBoard, name: 'Owned label', rank: '1024' });
       await f.insert('labels', foreign, { boardId: ids.sharedBoard, name: 'Foreign secret label', rank: '1024' });
-      await f.insert('cards', extra, { name: 'Second matching label', description: 'Needle with [literal] punctuation and Artifact/',
+      const dueDate = '2026-04-01T04:05:06.723Z';
+      await f.insert('cards', extra, { name: 'Second matching label', description: 'Needle with [literal] punctuation and Artifact/', dueDate,
         boardId: ids.privateBoard, listId: ids.privateActiveList, type: 'project', kind: 'board', rank: '1024' });
       await f.insert('cards', listDrift, { name: 'Wrong board private sentinel', boardId: ids.privateBoard,
         listId: ids.sharedActiveList, type: 'project', kind: 'board', rank: '0' });
@@ -186,7 +187,14 @@ test('workspace aggregation and child projections stay in the authorized parent 
       const cursor = first.data.page.nextCursor;
       assert.ok(cursor);
       const next = path + '?limit=1&cursor=' + encodeURIComponent(cursor);
-      assert.deepEqual(resultIds(await verified(f, next, viewer, 'boardCards')), [extra]);
+      const secondPage = await verified(f, next, viewer, 'boardCards');
+      assert.deepEqual(resultIds(secondPage), [extra]);
+      assert.equal(secondPage.data.data[0].dueDate, dueDate);
+      assert.equal((await verified(f, cardPath(extra), viewer, 'cardGet')).data.data.dueDate, dueDate);
+      assert.ok((await mongo.db.collection('cards').findOne({ ...f.scope, id: extra })).dueDate instanceof Date);
+      await mongo.db.collection('cards').updateOne({ ...f.scope, id: extra }, { $set: { dueDate } });
+      assert.equal((await verified(f, next, viewer, 'boardCards')).data.data[0].dueDate, dueDate);
+      assert.equal((await verified(f, cardPath(extra), viewer, 'cardGet')).data.data.dueDate, dueDate);
       assert.equal((await f.call(next, editor)).status, 422);
       assert.equal((await f.call(next + '&q=needle', viewer)).status, 422);
       assert.equal((await f.call(boardPath(ids.privateBoard) + '/cards?unknown=true', viewer)).status, 422);
