@@ -88,6 +88,35 @@ async function privateMongo(directory, configuration) {
   };
 }
 
+test('owned MongoDB provisions a fresh installation in one call', { timeout: 20_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'planner-native-mongo-first-'));
+  const socket = join(directory, 'mongod.sock');
+  const endpoint = encodeURIComponent(socket);
+  const credentials = {
+    installationId: randomUUID(), dbUid: process.getuid(), dbGid: process.getgid(), port: 27431,
+    password: randomBytes(32).toString('hex'),
+  };
+  const temporaryPassword = randomBytes(32).toString('hex');
+  const app = mongoClient(endpoint, databaseName, appUsername, credentials.password);
+  const admin = mongoClient(endpoint, 'admin', 'planner-bootstrap', temporaryPassword);
+  let server;
+  try {
+    await mkdir(join(directory, 'db'), { mode: 0o700 });
+    server = await privateMongo(directory, { net: { bindIp: socket, port: 0 }, localhostBypass: true });
+    assert.ok(server.process.pid);
+    await waitFor(() => assertOwnedUnixSocket(socket, server.process.pid, 0o700));
+    let checkpoints = 0;
+    await provisionMongoIdentity(socket, credentials, temporaryPassword, true, async () => { checkpoints += 1; });
+    assert.equal(checkpoints, 1);
+    await assertMongoIdentity(app, credentials.installationId);
+    await assert.rejects(admin.connect(), { code: 18 });
+  } finally {
+    await Promise.all([app.close(), admin.close()]);
+    await server?.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('owned MongoDB resumes bootstrap and preserves the exact app role and installation across restart', { timeout: 45_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'planner-native-mongo-'));
   const socket = join(directory, 'mongod.sock');
