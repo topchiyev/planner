@@ -3,6 +3,7 @@ import { Link, useLoaderData, useLocation, useNavigation, useRevalidator, useRou
 import { workspaceSignInPath } from '@planner/contracts';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
 import { ProjectBackgroundPreview, ProjectSettingsControls } from '../projects/project-settings.js';
+import { ProjectBoards } from '../boards/project-boards.js';
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import {
   type BoardSummary, type DisplayPreferences, type ProjectSummary, readWorkspace, saveDisplayPreference, saveProjectFavorite, WorkspaceRequestError,
@@ -238,8 +239,6 @@ export function NativeProjectPage() {
     {revalidator.state === 'idle' && <ProjectBackgroundPreview project={project} />}
     {favorite.problem && <p className="workspace-problem" role="alert">{favorite.problem}</p>}
     {project.description && <p className="workspace-description">{project.description}</p>}
-    {project.boards.length ? <section aria-label="Boards" className="workspace-detail">
-      <h2>Boards</h2><BoardLinks boards={project.boards} />
-    </section> : <EmptyState title="No boards to show" />}
+    <ProjectBoards key={project.id} project={project} />
   </section>;
 }

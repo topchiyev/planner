@@ -3,6 +3,7 @@ import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js'
 
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
 import { projectHref } from '../workspace/workspace-navigation.js';
+import { BoardManagement } from './board-management.js';
 
 const contexts = [
   { id: 'board', name: 'Board', emptyTitle: 'No cards to show' },
@@ -48,6 +49,7 @@ export function BoardPage() {
             {board && <Link to={projectHref(board.project.id)}>{board.project.name}</Link>}
           </nav>
           <PageHeading focus={!inspectorOpen} id="page-heading">{board?.board.name ?? 'Board'}</PageHeading>
+          {board && <BoardManagement key={board.board.id} workspace={board} />}
         </header>
         <div className="board-controls">
           <nav aria-label="Board context" className="context-nav">

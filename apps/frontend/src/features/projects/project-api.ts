@@ -1,10 +1,9 @@
 import { maximumMediaBytes, mediaMutationSchema, mediaOperations, relationshipCommands, relationshipReads,
-  type RelationshipCommandOutput, type RelationshipReadOutput } from '@planner/contracts';
+  type RelationshipCommand, type RelationshipCommandOutput, type RelationshipRead, type RelationshipReadOutput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { workspaceResponse, WorkspaceRequestError } from '../workspace/workspace-api.js';
 
-type ProjectCommand = 'projects.create' | 'projects.update' | 'projects.delete' | 'projects.addManager' | 'projects.removeManager';
-type ProjectRead = 'projects.managers' | 'projects.managerCandidates';
+export { relationshipCommand as projectCommand, readAffiliation as readProjectAffiliation };
 
 function pathWithId(path: string, marker: string, id: string | undefined) {
   return id === undefined ? path : path.replace(marker, publicIdSchema.parse(id));
@@ -15,7 +14,7 @@ function headers(csrf: string, key: string, revision?: number | null): Record<st
     ...(revision !== undefined && { 'If-Match': `"${revision ?? 0}"` }) };
 }
 
-export async function projectCommand<K extends ProjectCommand>(command: K, csrf: string, key: string, options: {
+export async function relationshipCommand<K extends RelationshipCommand>(command: K, csrf: string, key: string, options: {
   id?: string; userId?: string; revision?: number | null; body?: object;
 } = {}): Promise<RelationshipCommandOutput<K> | undefined> {
   const operation = relationshipCommands[command];
@@ -27,7 +26,7 @@ export async function projectCommand<K extends ProjectCommand>(command: K, csrf:
   return response.status === 204 ? undefined : operation.output.parse(await response.json()) as RelationshipCommandOutput<K>;
 }
 
-export async function readProjectAffiliation<K extends ProjectRead>(command: K, id: string, query: URLSearchParams, signal: AbortSignal) {
+export async function readAffiliation<K extends RelationshipRead>(command: K, id: string, query: URLSearchParams, signal: AbortSignal) {
   const operation = relationshipReads[command];
   const response = await workspaceResponse(pathWithId(operation.path, ':id', id) + '?' + query, { signal });
   return operation.output.parse(await response.json()) as RelationshipReadOutput<K>;
