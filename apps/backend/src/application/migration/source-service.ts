@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { isAbsolute, join, normalize } from 'node:path';
 import type { ClientConfig } from 'pg';
@@ -42,22 +43,25 @@ export function parseSourceService(config: string, name: string) {
   if (!isAbsolute(host) || normalize(host) !== host || host === '/' || !sqlName.test(database) || !sqlName.test(user)
     || !/^[1-9][0-9]{0,4}$/u.test(portText) || port > 65_535 || Buffer.byteLength(join(host, versionSocket + port)) > 103
     || database === 'postgres' || database === 'template0' || database === 'template1') throw invalid();
-  const password = service.get('password') ?? '';
+  // An explicit supplier prevents pg's authentication challenge from consulting an ambient passfile.
+  const password = () => service.get('password') ?? '';
   return { host, port, user, database, password, ssl: false, application_name: 'planner-migration-preflight',
     client_encoding: 'UTF8', connectionTimeoutMillis: 8_000, query_timeout: 35_000 } satisfies ClientConfig;
 }
 
 export async function assertSourceSocket(service: ReturnType<typeof parseSourceService>) {
   let current = '/';
+  const parents: Stats[] = [];
   try {
     for (const component of service.host.slice(1).split('/')) {
       current = join(current, component);
       const entry = await lstat(current);
       if (!entry.isDirectory() || (entry.mode & 0o022) !== 0) throw invalid();
+      parents.push(entry);
     }
     const socket = await lstat(join(service.host, versionSocket + service.port));
-    const directory = await lstat(service.host);
-    if (!socket.isSocket() || socket.uid !== directory.uid || (directory.mode & 0o077) !== 0 || (socket.mode & 0o077) !== 0)
-      throw invalid();
+    const directory = parents.at(-1);
+    if (!directory || !socket.isSocket() || socket.uid !== directory.uid || (directory.mode & 0o077) !== 0 || (socket.mode & 0o077) !== 0
+      || parents.some((entry) => entry.uid !== 0 && entry.uid !== socket.uid)) throw invalid();
   } catch { throw invalid(); }
 }

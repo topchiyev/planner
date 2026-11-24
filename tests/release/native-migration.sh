@@ -52,14 +52,20 @@ cleanup() {
 trap cleanup EXIT
 install -d -m 0711 "$pgroot"
 install -d -m 0755 "$pgroot/runtime"
-tar -xf "$media/postgresql-runtime.tar.gz" -C "$pgroot/runtime"
+(umask 022; tar -xf "$media/postgresql-runtime.tar.gz" -C "$pgroot/runtime")
 useradd --system --no-create-home --shell /usr/sbin/nologin planka-fixture
 install -d -m 0700 -o planka-fixture -g planka-fixture "$socket" "$pgroot/db"
 as_postgres() { runuser -u planka-fixture -- env LD_LIBRARY_PATH="$pglib" "$@"; }
-as_postgres "$pgbin/initdb" -D "$pgroot/db" -U fixture_owner --auth-local=trust --auth-host=reject \
-    --no-instructions --encoding=UTF8 --locale=C >"$work/initdb.log" 2>&1
-as_postgres "$pgbin/pg_ctl" -D "$pgroot/db" -l "$pgroot/db/server.log" -w \
-    -o "-c listen_addresses= -c unix_socket_directories=$socket -c unix_socket_permissions=0700 -p $port" start >"$work/pg-start.log" 2>&1
+if ! as_postgres "$pgbin/initdb" -D "$pgroot/db" -U fixture_owner --auth-local=trust --auth-host=reject \
+    --no-instructions --encoding=UTF8 --locale=C >"$work/initdb.log" 2>&1; then
+    cat "$work/initdb.log" >&2
+    exit 1
+fi
+if ! as_postgres "$pgbin/pg_ctl" -D "$pgroot/db" -l "$pgroot/db/server.log" -w \
+    -o "-c listen_addresses= -c unix_socket_directories=$socket -c unix_socket_permissions=0700 -p $port" start >"$work/pg-start.log" 2>&1; then
+    cat "$work/pg-start.log" "$pgroot/db/server.log" >&2
+    exit 1
+fi
 sql() {
     local db=$1
     shift
@@ -146,14 +152,50 @@ for release in 2.3.0 2.3.1; do
     cp -R "$media/planka/$release/assets" "$stage/"
     chmod -R go-rwx "$stage"
     "$node" "$media/planka/snapshot.mjs" "$release" >"$stage/source.sql"
-    tar --format=posix -C "$stage" -czf "$work/capture-$suffix.tar.gz" manifest.json asset-manifest.json source.sql assets
+    dump_name=source.sql
+    if [ "$release" = 2.3.0 ]; then
+        sql postgres -c 'CREATE DATABASE planka_custom_seed'
+        sql planka_custom_seed <"$stage/source.sql"
+        env LD_LIBRARY_PATH="$pglib" "$pgbin/pg_dump" -h "$socket" -p "$port" -U fixture_owner \
+            --format=custom --no-owner --no-acl --file="$stage/source.dump" planka_custom_seed
+        dump_name=source.dump
+        python3 - "$stage" <<'PY2'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+manifest = root / 'manifest.json'
+capture = json.loads(manifest.read_text())
+with (root / 'source.dump').open('rb') as stream:
+    capture['source']['dumpSha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+manifest.write_text(json.dumps(capture))
+PY2
+    fi
+    tar --format=posix -C "$stage" -czf "$work/capture-$suffix.tar.gz" manifest.json asset-manifest.json "$dump_name" assets
     old_archive=$(sha256sum "$work/capture-$suffix.tar.gz")
     plannerctl migration prepare --archive "$work/capture-$suffix.tar.gz" --work-dir "$work/processed" --json >"$work/prepared-$suffix.json"
     [ "$(sha256sum "$work/capture-$suffix.tar.gz")" = "$old_archive" ]
     prepared=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["directory"])' "$work/prepared-$suffix.json")
     sql postgres -c "CREATE DATABASE $db"
-    sql "$db" <"$prepared/source.sql"
-    sql "$db" -c "REVOKE TEMPORARY ON DATABASE $db FROM PUBLIC; GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader"
+    if [ "$dump_name" = source.dump ]; then
+        env LD_LIBRARY_PATH="$pglib" "$pgbin/pg_restore" -h "$socket" -p "$port" -U fixture_owner \
+            --exit-on-error --no-owner --no-acl -d "$db" "$prepared/source.dump"
+    else
+        sql "$db" <"$prepared/source.sql"
+    fi
+    sql "$db" -c "REVOKE TEMPORARY ON DATABASE $db FROM PUBLIC"
+    if [ "$release" = 2.3.0 ]; then
+        "$node" --input-type=module - <<'JS' | sql "$db"
+import { sourceColumns } from '/opt/planner/current/apps/backend/dist/application/migration/source-catalog.js';
+for (const [table, columns] of Object.entries(sourceColumns)) {
+  const grant = columns.map((column) => '"' + column + '"').join(',');
+  console.log('GRANT SELECT (' + grant + ') ON TABLE public."' + table + '" TO fixture_reader;');
+}
+JS
+        [ "$(sql "$db" -c "SELECT pg_catalog.has_column_privilege('fixture_reader','public.user_account','password','SELECT')")" = f ]
+        [ "$(sql "$db" -c "SELECT pg_catalog.has_column_privilege('fixture_reader','public.session','access_token','SELECT')")" = f ]
+    else
+        sql "$db" -c 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader'
+    fi
     printf '[source-%s]\nisolated=true\nhost=%s\nport=%s\ndbname=%s\nuser=fixture_reader\n' \
         "$suffix" "$socket" "$port" "$db" >>/etc/planner/migration-pg.services
     PGHOST=/unused PGSERVICE=ignored PGDATABASE=postgres PGUSER=ignored PGOPTIONS='-c transaction_read_only=off' \

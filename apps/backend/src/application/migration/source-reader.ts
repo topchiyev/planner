@@ -116,9 +116,11 @@ export async function withSourceSnapshot<T>(service: ReturnType<typeof parseSour
         current_setting('TimeZone') AS zone, current_database() AS database, session_user AS username, inet_server_addr()::text
     `);
     const scope = result.rows[0];
-    if (!scope || scope.database !== service.database || scope.username !== service.user || scope.inet_server_addr !== null
+    const restoredPostgresVersion = scope?.server_version.match(/^(17\.[0-9]+)(?:$| )/u)?.[1];
+    if (!scope || !restoredPostgresVersion || scope.database !== service.database || scope.username !== service.user || scope.inet_server_addr !== null
       || scope.transaction_read_only !== 'on' || scope.transaction_isolation !== 'repeatable read' || scope.zone !== 'UTC'
-      || !/^17[0-9]{4}$/u.test(scope.server_version_num)) {
+      || !/^17[0-9]{4}$/u.test(scope.server_version_num)
+      || Number(restoredPostgresVersion.split('.')[1]) !== Number(scope.server_version_num) - 170000) {
       throw new MigrationError('source-service', 'Use a private PostgreSQL 17 restore with a verified read-only snapshot.');
     }
     if ((await client.query<{ allowed: boolean }>(roleSql)).rows[0]?.allowed !== true)
@@ -141,7 +143,7 @@ export async function withSourceSnapshot<T>(service: ReturnType<typeof parseSour
     const value = await read(client);
     await client.query('COMMIT');
     began = false;
-    return { value, restoredPostgresVersion: scope.server_version.match(/^[0-9]+\.[0-9]+/u)?.[0] ?? '17' };
+    return { value, restoredPostgresVersion };
   } catch (error) {
     if (began) await client.query('ROLLBACK').catch(() => undefined);
     if (error instanceof MigrationError) throw error;

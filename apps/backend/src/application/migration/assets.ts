@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, readdir, type FileHandle } from 'node:fs/promises';
+import { open, opendir, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { MigrationAsset, MigrationCapture } from '@planner/contracts';
 import { anchoredDirectory, fdPath, fileChunks, type Owner } from '../backup/archive.js';
@@ -9,6 +9,7 @@ import type { SourceAsset } from './source-reader.js';
 import { migrationServiceName } from './source-service.js';
 
 const { O_RDONLY, O_NOFOLLOW, O_DIRECTORY, O_NONBLOCK } = constants;
+const pathDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 type ObjectService = { base: URL; token?: string; snapshotId: string };
 type Contents = { length: number; digest: string };
 type Reader = { inspect: (asset: MigrationAsset) => Promise<Contents | null>; close: () => Promise<void> };
@@ -65,13 +66,18 @@ export async function inspectDirectory(root: string, owner: Owner, manifest: Rea
   let total = 0;
 
   async function walk(parent: FileHandle, prefix: string) {
-    const entries = await readdir(fdPath(parent), { withFileTypes: true });
-    for (const entry of entries) {
+    // Node's directory iterator supports raw names even though its declarations omit this encoding.
+    const entries = await opendir(fdPath(parent), { encoding: 'buffer' as BufferEncoding });
+    const observed = new Set<string>();
+    for await (const entry of entries) {
       total += 1;
-      if (total > 200_000) throw invalid();
-      const key = prefix + entry.name;
+      if (total > 200_000 || !Buffer.isBuffer(entry.name)) throw invalid();
+      const leaf = pathDecoder.decode(entry.name);
+      if (!Buffer.from(leaf, 'utf8').equals(entry.name) || observed.has(leaf)) throw invalid();
+      observed.add(leaf);
+      const key = prefix + leaf;
       registerPath(known, key);
-      const path = join(fdPath(parent), entry.name);
+      const path = join(fdPath(parent), leaf);
       if (entry.isDirectory()) {
         if (!declaredDirectories.has(key)) throw invalid();
         const child = await open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY);
@@ -110,7 +116,7 @@ export async function inspectDirectory(root: string, owner: Owner, manifest: Rea
 export function inspectObjects(service: ObjectService, request = fetch): Reader {
   return {
     async inspect(asset) {
-      if (!asset.versionId) throw invalid();
+      if (!asset.versionId || asset.versionId === 'null') throw invalid();
       const item = new URL(asset.key.split('/').map(encodeURIComponent).join('/'), service.base);
       item.searchParams.set('versionId', asset.versionId);
       try {
