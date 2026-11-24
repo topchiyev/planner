@@ -98,7 +98,10 @@ export function cardPermissions(board: BoardAccessContext, list: List): CardAcce
 export async function resolveBrowserWorkspace(database: Db, installationId: string, token: string, now: Date) {
   const session = await loadCurrentBrowserSession(database, installationId, token, now);
   if (!session) throw new WorkspaceAccessError('session');
-  return createWorkspaceAuthorization(database, session.generationId, session.account.actor);
+  return Object.freeze({
+    ...createWorkspaceAuthorization(database, session.generationId, session.account.actor),
+    sessionDeadline: session.deadline,
+  });
 }
 
 // For trusted adapters with an already verified current actor and active generation under the same lease.

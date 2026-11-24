@@ -57,8 +57,9 @@ export async function loadCurrentBrowserSession(database: Db, installationId: st
     _id: workspaceKey(generationId, record.userId), generationId, id: record.userId,
   });
   const account = getLocalAccount(stored);
-  if (!stored || !account || account.auth.credentialsVersion !== record.credentialsVersion
-      || time.getTime() - record.lastActivityAt.getTime() >= account.inactivityMs) return null;
+  if (!stored || !account || account.auth.credentialsVersion !== record.credentialsVersion) return null;
+  const deadline = Math.min(record.expiresAt.getTime(), record.lastActivityAt.getTime() + account.inactivityMs);
+  if (time.getTime() >= deadline) return null;
   if (account.auth.mfa === 'none') {
     if (!hasPasswordOnlyAuth(stored) || record.factorId !== undefined) return null;
   } else {
@@ -68,7 +69,7 @@ export async function loadCurrentBrowserSession(database: Db, installationId: st
   const match = {
     _id: record._id, installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' as const },
   };
-  return { account, stored, generationId, time, match };
+  return { account, stored, generationId, time, deadline, match };
 }
 
 export function createBrowserSessions(

@@ -326,3 +326,46 @@ test('logout closes only its stream, stale generation closes the survivor, and a
     } finally { await f.close(); }
   });
 });
+
+test('session expiry during awaited Mongo reads closes the stream before any response or frame', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const start = new Date('2026-03-19T13:13:59.719Z');
+    const deadline = new Date(start.getTime() + 12 * 60 * 60_000);
+    const justBefore = new Date(deadline.getTime() - 1);
+    let time = start;
+    let expireDuringRead = false;
+    const f = await makeWorkspaceAccessFixture(mongo, {
+      heartbeatMs: 60_000,
+      clock() {
+        const captured = time;
+        if (expireDuringRead) {
+          expireDuringRead = false;
+          time = deadline;
+        }
+        return captured;
+      },
+    });
+    try {
+      const viewer = await login(f, ids.viewer);
+      time = justBefore;
+      expireDuringRead = true;
+      const expiredAdmission = await f.call(eventPath(ids.privateBoard), viewer);
+      assert.equal(expiredAdmission.status, 401);
+      assert.equal(expireDuringRead, false);
+
+      time = justBefore;
+      const stream = await open(f, ids.privateBoard, viewer);
+      try {
+        assert.equal((await stream.next()).event, 'ready');
+        const next = event(f, ids.privateBoard, 1n);
+        await append(f, next);
+        expireDuringRead = true;
+        await f.gate.readSnapshot(() => f.streams.accept({
+          id: next.id, generationId: f.generationId, boardId: ids.privateBoard, sequence: '1',
+        }));
+        assert.equal(await stream.next(), null);
+        assert.equal(expireDuringRead, false);
+      } finally { stream.close(); }
+    } finally { await f.close(); }
+  });
+});
