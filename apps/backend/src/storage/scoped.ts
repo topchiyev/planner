@@ -18,6 +18,9 @@ interface WorkspaceDocument {
 }
 
 const indexedCollections = new Set<WorkspaceCollection>(workspaceCollections);
+const protectedCollections = new Set<WorkspaceCollection>([
+  'sessions', 'recoveryGrants', 'trustedDevices', 'oauthArtifacts', 'oauthConnections',
+]);
 const identityFields = new Set(['_id', 'id', 'generationId', 'revision', 'commandEffectId']);
 const versionedCollections = new Set<WorkspaceCollection>([
   'users', 'projects', 'boards', 'boardPreferences', 'lists', 'cards', 'labels', 'checklists', 'tasks',
@@ -64,6 +67,7 @@ export function encodeWorkspaceFields(fields: WorkspaceFields) {
   }
   return Object.fromEntries(Object.entries(fields).map(([field, value]) => {
     if (identityFields.has(field)) throw new TypeError('Workspace identity fields cannot be overridden.');
+    if (field === 'localAuth') throw new TypeError('Account credentials require protected storage access.');
     validateField(field);
     if (integer64Fields.has(field)) return [field, (field === 'rank' && value === null) ? null : encodeRank(value as bigint | string)];
     if (dates.has(field)) return [field, toInstant(value)];
@@ -102,7 +106,9 @@ function decodeValue(value: unknown): Value {
 
 function scopedWorkspace(database: Db, installationId: string, generationId: string, kind: 'active' | 'staged') {
   const collection = (name: WorkspaceCollection) => {
-    if (!indexedCollections.has(name)) throw new TypeError('Expected a workspace collection.');
+    if (!indexedCollections.has(name) || protectedCollections.has(name)) {
+      throw new TypeError('Expected a collection available to the workspace.');
+    }
     return database.collection<WorkspaceDocument>(name);
   };
   const lookup = (id: string): Filter<WorkspaceDocument> => ({ _id: workspaceKey(generationId, id), generationId, id });
@@ -119,7 +125,10 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
       const source = collection(name);
       const filter = lookup(id);
       await checkBinding();
-      const stored = await source.findOne(filter, { promoteLongs: false });
+      const stored = await source.findOne(filter, {
+        promoteLongs: false,
+        ...(name === 'users' && { projection: { localAuth: 0 } }),
+      });
       if (!stored) return null;
       const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;
       return Object.fromEntries(Object.entries(logical).map(([field, value]) => {

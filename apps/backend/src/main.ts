@@ -1,9 +1,11 @@
 import { lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultAppPort } from '@planner/contracts/native';
+import { recoverFirstAdmin } from './application/auth/first-admin.js';
 import type { CommandGate } from './application/command-gate/gate.js';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
+import { createNativeBrowserAuth } from './native/browser-auth.js';
 import { startNativeCommandRecovery } from './native/command-recovery.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
 import { readProtectedFile } from './native/mongo-host.js';
@@ -47,9 +49,11 @@ try {
     // Apply this before binding the local operator socket, including direct service-account startup.
     process.umask(0o077);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess);
-    dependencies = { frontendRoot, native: { origin: config.publicUrl, proxyToken, readAccess } };
+    dependencies = { frontendRoot, native: {
+      origin: config.publicUrl, proxyToken, readAccess, auth: createNativeBrowserAuth(config, gate),
+    } };
     port = config.appPort;
-    stopRecovery = startNativeCommandRecovery(config, gate);
+    stopRecovery = startNativeCommandRecovery(config, gate, recoverFirstAdmin);
   } else {
     const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
     if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');

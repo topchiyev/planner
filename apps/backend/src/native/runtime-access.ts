@@ -1,7 +1,8 @@
 import type { NativeInstallationConfig } from '@planner/contracts/native';
+import { firstAdminBinding, hasFirstAdminGrant } from '../application/auth/first-admin.js';
 import { StorageSchemaError, verifyStorageSchema } from '../storage/schema.js';
 import { checkDirectory } from './mongo-host.js';
-import { databaseName, uuidPattern } from './mongo-identity.js';
+import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
 
 export type RuntimeAccess =
@@ -44,27 +45,14 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
       const database = client.db(databaseName);
       const installation = await verifyStorageSchema(database, config.installationId);
       if (installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
-      if (installation.activeGenerationId !== null) {
-        // Activation also needs command recovery to finish before serving ordinary workspace requests.
-        return { kind: 'unavailable', reason: 'schema-or-recovery' };
-      }
       if (config.mode === 'import') return { kind: 'unavailable', reason: 'migration' };
+      const binding = firstAdminBinding(installation);
+      if (binding?.published) return { kind: 'ready' };
+      if (installation.activeGenerationId !== null) return { kind: 'unavailable', reason: 'schema-or-recovery' };
 
-      const { pendingAction, enrollmentGenerationId, firstAdminGrantIssuedAt } = installation.setup;
-      if (pendingAction !== 'first-admin-enrollment'
-          || typeof enrollmentGenerationId !== 'string' || !uuidPattern.test(enrollmentGenerationId)
-          || !(firstAdminGrantIssuedAt instanceof Date) || !Number.isFinite(firstAdminGrantIssuedAt.getTime())) {
-        return { kind: 'unavailable', reason: 'setup' };
-      }
-      const grant = await database.collection('recoveryGrants').findOne({
-        installationId: config.installationId,
-        generationId: enrollmentGenerationId,
-        kind: 'first-admin',
-        issuedAt: firstAdminGrantIssuedAt,
-        consumedAt: { $type: 'null' },
-        expiresAt: { $gt: new Date() },
-      }, { projection: { _id: 1 } });
-      return grant ? { kind: 'enrollment', step: 'recovery' } : { kind: 'unavailable', reason: 'setup' };
+      return await hasFirstAdminGrant(database, installation, new Date())
+        ? { kind: 'enrollment', step: 'recovery' }
+        : { kind: 'unavailable', reason: 'setup' };
     } finally {
       await client.close();
     }

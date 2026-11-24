@@ -1,10 +1,24 @@
 import { createBrowserRouter, redirect } from 'react-router';
 import { RouteError, RouteNotFound, RoutePending } from './page-state.js';
 import { AppShell } from './shell.js';
+import { loadBrowserSession } from '../features/auth/browser-session.js';
 
 export const router = createBrowserRouter([
   {
+    path: 'recover',
+    lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).FirstAdminPage }),
+  },
+  {
+    path: 'sign-in',
+    lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).SignInPage }),
+  },
+  {
     Component: AppShell,
+    loader: loadBrowserSession,
+    shouldRevalidate: ({ currentUrl, nextUrl, defaultShouldRevalidate }) =>
+      currentUrl.pathname !== nextUrl.pathname || defaultShouldRevalidate,
+    ErrorBoundary: RouteError,
+    HydrateFallback: RoutePending,
     children: [{
       ErrorBoundary: RouteError,
       HydrateFallback: RoutePending,

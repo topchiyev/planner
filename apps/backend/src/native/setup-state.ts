@@ -129,13 +129,17 @@ async function setupState(client: MongoClient, installationId: string, intent: S
     );
     stored = await installation.findOne(key);
   }
+  if (intent.grant && stored?.activeGenerationId === intent.grant.generationId
+      && stored.schemaVersion === currentStorageSchema && stored.schemaMigration === undefined
+      && stored.setup?.mode === 'fresh' && stored.setup.pendingAction === 'complete'
+      && stored.setup.enrollmentGenerationId === intent.grant.generationId) return { confirmed: true };
   if (stored?.activeGenerationId !== null || (stored.schemaVersion !== 0 && stored.schemaVersion !== currentStorageSchema)
       || stored.schemaMigration !== undefined
       || stored.setup?.mode !== setup.mode || stored.setup.pendingAction !== setup.pendingAction
       || stored.setup.enrollmentGenerationId !== setup.enrollmentGenerationId) {
     throw new NativeMongoError('The database setup state does not match this installation.');
   }
-  if (!intent.grant) return undefined;
+  if (!intent.grant) return { confirmed: false };
 
   const grant = intent.grant;
   const keyForGrant = workspaceKey(grant.generationId, grant.id);
@@ -155,7 +159,7 @@ async function setupState(client: MongoClient, installationId: string, intent: S
   }
   const saved = await recoveryGrants.findOne({ _id: keyForGrant });
   // The installation retains the issuance marker even after an expired or consumed grant is removed.
-  if (!saved && firstIssuedAt !== undefined) return undefined;
+  if (!saved && firstIssuedAt !== undefined) return { confirmed: false };
   if (saved?.installationId !== installationId || saved.id !== grant.id || saved.generationId !== grant.generationId
       || saved.kind !== 'first-admin' || saved.tokenDigest !== digest
       || !(saved.issuedAt instanceof Date) || !(saved.expiresAt instanceof Date)
@@ -171,8 +175,8 @@ async function setupState(client: MongoClient, installationId: string, intent: S
     );
     if (marker.matchedCount !== 1) throw new NativeMongoError('Could not retain the first-administrator grant issuance.');
   }
-  if (saved.consumedAt !== null || Date.now() >= saved.expiresAt.getTime()) return undefined;
-  return { token: grant.token, expiresAt: saved.expiresAt.toISOString() };
+  if (saved.consumedAt !== null || Date.now() >= saved.expiresAt.getTime()) return { confirmed: false };
+  return { confirmed: false, grant: { token: grant.token, expiresAt: saved.expiresAt.toISOString() } };
 }
 
 export function readPersistedSetup(client: MongoClient, installationId: string, intent: SetupIntent) {

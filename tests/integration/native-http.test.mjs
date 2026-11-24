@@ -37,7 +37,7 @@ function unixRequest(socketPath, path, { method, headers } = {}) {
 
 test('native transport gates every protected route and strips forged forwarding metadata', async (t) => {
   let access = { kind: 'unavailable', reason: 'migration' };
-  const app = buildApp({ frontendRoot, native: { origin, proxyToken, readAccess: async () => access } });
+  const app = buildApp({ frontendRoot, transportFixture: { origin, proxyToken, readAccess: async () => access } });
   t.after(() => app.close());
   let protectedCalls = 0;
   for (const [method, url] of [
@@ -139,7 +139,7 @@ test('timed-out readiness is bounded and keeps a single probe in flight', async 
     checks += 1;
     return new Promise((settle) => { resolve = settle; });
   }, 20);
-  const app = buildApp({ native: { origin, readAccess: check } });
+  const app = buildApp({ transportFixture: { origin, readAccess: check } });
   try {
     const responses = await Promise.all([app.inject('/health/ready'), app.inject('/health/ready')]);
     assert.deepEqual(responses.map((response) => response.statusCode), [503, 503]);

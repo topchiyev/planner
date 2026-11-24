@@ -109,7 +109,7 @@ done
 [ "$(status_code curl_tls -X POST -H 'Origin: https://forged.invalid' "$origin/api/v1/recovery/consume")" = 503 ]
 [ "$(status_code curl_loopback -X POST -H "Origin: $origin" -H 'X-Forwarded-For: 192.0.2.9' \
     -H 'X-Forwarded-Host: planner.example.test' -H 'X-Forwarded-Proto: https' "$backend/api/v1/recovery/consume")" = 503 ]
-[ "$(status_code curl_tls -X POST -H "Origin: $origin" "$origin/api/v1/recovery/consume")" = 404 ]
+[ "$(status_code curl_tls -X POST -H "Origin: $origin" "$origin/api/v1/recovery/consume")" = 400 ]
 
 chmod 0710 /var/lib/planner/staging
 check_access '{"kind":"unavailable","reason":"staging"}'

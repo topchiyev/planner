@@ -2,16 +2,25 @@ import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
 import { registerFrontendShell } from './frontend-shell.js';
+import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-auth.js';
 import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
+
+type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth };
 
 export type AppDependencies = {
   frontendRoot?: string;
-} & ({ isReady: () => Promise<boolean>; native?: never } | { native: NativeHttpBoundary; isReady?: never });
+} & (
+  { isReady: () => Promise<boolean>; native?: never; transportFixture?: never }
+  | { native: NativeAuthBoundary; isReady?: never; transportFixture?: never }
+  | { transportFixture: NativeHttpBoundary; isReady?: never; native?: never }
+);
 
-export function buildApp({ isReady, frontendRoot, native }: AppDependencies) {
+export function buildApp({ isReady, frontendRoot, native, transportFixture }: AppDependencies) {
   const app = Fastify({ requestIdHeader: false, genReqId: () => randomUUID() });
+  const transport = native ?? transportFixture;
   app.decorateRequest('plannerConnection', null);
-  if (native) registerNativeHttpBoundary(app, native);
+  if (transport) registerNativeHttpBoundary(app, transport);
+  if (native) registerNativeBrowserAuth(app, native.auth);
 
   app.get('/health/live', (request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -25,7 +34,7 @@ export function buildApp({ isReady, frontendRoot, native }: AppDependencies) {
   app.get('/health/ready', async (request, reply) => {
     let status: 'ready' | 'unavailable' = 'unavailable';
     try {
-      if (native ? (await native.readAccess()).kind === 'ready' : (await isReady()) === true) {
+      if (transport ? (await transport.readAccess()).kind === 'ready' : (await isReady?.()) === true) {
         status = 'ready';
       }
     } catch {
@@ -40,6 +49,6 @@ export function buildApp({ isReady, frontendRoot, native }: AppDependencies) {
     });
   });
 
-  if (frontendRoot) registerFrontendShell(app, frontendRoot, native !== undefined);
+  if (frontendRoot) registerFrontendShell(app, frontendRoot, transport !== undefined, native !== undefined);
   return app;
 }
