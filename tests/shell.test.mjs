@@ -152,8 +152,13 @@ test('Chromium opens and restores routes at desktop and narrow widths', { timeou
       await expect(page).toHaveURL(board);
       await expect(page.getByRole('heading', { name: 'Board', exact: true })).toBeFocused();
       await page.getByRole('link', { name: 'Trash' }).click();
-      await expect(page).toHaveURL(`${address}${boardPath}?context=trash&view=grid&filter=kept`);
+      await expect(page).toHaveURL(`${address}${boardPath}?context=trash&filter=kept`);
       await expect(page.getByRole('heading', { name: 'No trashed cards to show' })).toBeVisible();
+      await expect(page.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+      await page.goBack();
+      await expect(page).toHaveURL(board);
+      await expect(page.getByRole('link', { name: 'Archive' })).toHaveAttribute('aria-current', 'page');
+      await expect(page.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     });
   }
 });
