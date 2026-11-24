@@ -133,11 +133,12 @@ export const commentSchema = entity.extend({
 export const workspaceActivityKind = z.enum(['createCard', 'moveCard', 'assignCard', 'unassignCard', 'completeTask', 'uncompleteTask']);
 export const workspaceNotificationKind = z.enum(['moveCard', 'assignCard', 'commentCard', 'mentionInComment']);
 const feedCard = z.strictObject({ id: publicIdSchema, boardId: publicIdSchema, kind: workspaceCardContext, name: z.string() });
-const activityItem = entity.extend({
+const activityItem = entity.omit({ revision: true }).extend({
   kind: workspaceActivityKind, card: feedCard, actor: workspacePersonSchema.nullable(),
 });
 const notificationItem = entity.extend({
-  kind: workspaceNotificationKind, card: feedCard, actor: workspacePersonSchema.nullable(), readAt: nullableUtcInstantSchema,
+  revision: revisionSchema.nullable(), kind: workspaceNotificationKind, card: feedCard,
+  actor: workspacePersonSchema.nullable(), readAt: nullableUtcInstantSchema,
 });
 
 const identifier = z.strictObject({ id: publicIdSchema });

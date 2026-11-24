@@ -141,6 +141,7 @@ test('inbox counts and scoped activity pages ignore orphan, inaccessible and sta
       kind: 'moveCard', activityId: fixtureId(799), readAt: null, snapshot: { text: 'Orphan detail' } });
     await f.insert('notifications', historical, { ...cards, recipientId: ids.viewer, actorId: ids.firstEditor,
       kind: 'commentCard', commentId: knownComment, readAt: new Date('2026-03-19T13:02:00.000Z') });
+    await f.db.collection('notifications').updateOne({ ...f.scope, id: historical }, { $unset: { revision: '' } });
     await f.insert('notifications', ownUnread, { ...cards, recipientId: ids.viewer, actorId: ids.firstEditor,
       kind: 'commentCard', commentId: knownComment, readAt: null });
     await f.insert('comments', fixtureId(702), { boardId: ids.sharedBoard, cardId: ids.sharedTarget, authorId: ids.firstEditor, text: 'Hidden board text' });
@@ -155,7 +156,7 @@ test('inbox counts and scoped activity pages ignore orphan, inaccessible and sta
     assert.deepEqual(first.data.map(({ id }) => id), [ownUnread]);
     assert.ok(first.page.nextCursor);
     const next = new URLSearchParams({ limit: '1', cursor: first.page.nextCursor });
-    assert.deepEqual((await data(f.call(inbox + '?' + next, viewer))).map(({ id }) => id), [historical]);
+    assert.deepEqual((await data(f.call(inbox + '?' + next, viewer))).map(({ id, revision }) => [id, revision]), [[historical, null]]);
     await expectResponse(f.call(inbox + '?' + next, other), 422, 'INVALID_CURSOR');
     next.set('unread', 'true');
     await expectResponse(f.call(inbox + '?' + next, viewer), 422, 'INVALID_CURSOR');
@@ -174,6 +175,9 @@ test('inbox counts and scoped activity pages ignore orphan, inaccessible and sta
     assert.equal((await row(f, 'notifications', invisible)).readAt, null);
     assert.equal((await row(f, 'notifications', fixtureId(725))).readAt, null);
     assert.equal((await f.db.collection('notifications').findOne({ generationId: f.stagedGenerationId, id: ownUnread })).readAt, null);
+    const legacy = await data(write(f, viewer, 'PATCH', notice(historical), 0, { read: false }));
+    assert.deepEqual([legacy.revision, legacy.readAt], [1, null]);
+    await data(write(f, viewer, 'PATCH', notice(historical), 1, { read: true }));
 
     const historic = (await data(f.call(card(ids.archivedStory) + '/activity', viewer)))[0];
     assert.equal(historic.card.kind, 'archive');
@@ -239,6 +243,8 @@ test('actual activity producers remain scoped when a card and its comments trans
     const editor = await signIn(f, ids.firstEditor);
     const viewer = await signIn(f, ids.viewer);
     const destinationReader = await signIn(f, ids.projectManager);
+    const both = await signIn(f, ids.secondEditor);
+    await f.insert('boardMembers', fixtureId(20159), { boardId: ids.sharedBoard, userId: ids.secondEditor, role: 'viewer', canComment: false });
     const privateActivity = board(ids.privateBoard) + '/activity';
     const currentRevision = async (id) => (await data(f.call(card(id), editor))).revision;
     const made = await data(write(f, editor, 'POST', '/api/v1/lists/' + ids.privateActiveList + '/cards', 1,
@@ -261,8 +267,13 @@ test('actual activity producers remain scoped when a card and its comments trans
     assert.equal((await data(f.call(privateActivity, viewer))).filter((item) => item.card.id === id).length, 6);
 
     await f.insert('boardFollows', fixtureId(20160), { boardId: ids.privateBoard, userId: ids.viewer });
+    await f.insert('boardFollows', fixtureId(20161), { boardId: ids.privateBoard, userId: ids.secondEditor });
+    const boardless = fixtureId(20162);
+    await f.insert('activities', boardless, { boardId: null, cardId: id, actorId: ids.privateOwner, kind: 'moveCard',
+      fromList: { id: fixtureId(20163), name: 'Restricted old name' } });
     const text = 'Carry the existing discussion';
-    const authored = await data(write(f, editor, 'POST', comments(id), moved.card.revision, { text }), 201);
+    const authorKey = randomUUID();
+    const authored = await data(write(f, editor, 'POST', comments(id), moved.card.revision, { text }, authorKey), 201);
     const delivered = (await data(f.call(inbox, viewer))).find((entry) => entry.card.id === id);
     assert.ok(delivered);
     const cross = await data(write(f, editor, 'POST', card(id) + '/move', authored.cardRevision, {
@@ -277,9 +288,18 @@ test('actual activity producers remain scoped when a card and its comments trans
 
     const destination = (await data(f.call(comments(id) + '?boardId=' + ids.sharedBoard, destinationReader)))[0];
     assert.deepEqual([destination.id, destination.text, destination.revision], [authored.id, text, 2]);
-    assert.deepEqual((await data(f.call(card(id) + '/activity', destinationReader))).map(({ kind, card }) => [kind, card.boardId]),
-      [['moveCard', ids.sharedBoard]]);
+    const history = await data(f.call(card(id) + '/activity', destinationReader));
+    assert.equal(history.length, 8);
+    assert.ok(history.every(({ card }) => card.boardId === ids.sharedBoard));
+    assert.deepEqual(history.filter(({ actor }) => actor).map(({ kind, actor }) => [kind, actor.id]), [['moveCard', ids.firstEditor]]);
+    assert.equal(history.find(({ id }) => id === boardless).actor, null);
+    assert.equal(JSON.stringify(history).includes('Restricted old name'), false);
+    assert.equal((await data(f.call(board(ids.sharedBoard) + '/activity', destinationReader))).filter((entry) => entry.card.id === id).length, 8);
+    const retainedDelivery = (await data(f.call(inbox, both))).find((entry) => entry.card.id === id && entry.kind === 'commentCard');
+    assert.equal(retainedDelivery.card.boardId, ids.sharedBoard);
+    assert.equal(retainedDelivery.actor, null);
     assert.equal(await f.db.collection('activities').countDocuments({ ...f.scope, boardId: ids.privateBoard, cardId: id }), 6);
+    await expectResponse(write(f, editor, 'POST', comments(id), moved.card.revision, { text }, authorKey), 404);
     await data(write(f, editor, 'PATCH', comment(authored.id), destination.revision, { text: 'Updated in its current board' }));
   });
 });

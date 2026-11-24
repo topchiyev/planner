@@ -27,9 +27,9 @@ export const discussionCommands = {
     input: target, output: removedComment,
   },
   'notifications.update': {
-    id: 'notifications.update', kind: 'command', method: 'PATCH', path: '/api/v1/notifications/:id', status: 200, target: 'parent',
-    input: target.extend({ read: z.boolean() }),
-    output: workspaceData(identified.extend({ revision: revisionSchema, readAt: nullableUtcInstantSchema })),
+    id: 'notifications.update', kind: 'command', method: 'PATCH', path: '/api/v1/notifications/:id', status: 200, target: 'edge',
+    input: identified.extend({ expectedRevision: revisionSchema.nullable(), read: z.boolean() }),
+    output: workspaceData(identified.extend({ revision: revisionSchema.nullable(), readAt: nullableUtcInstantSchema })),
   },
   'notifications.readAll': {
     id: 'notifications.readAll', kind: 'command', method: 'POST', path: '/api/v1/notifications/read-all', status: 200, target: 'unversioned',

@@ -14,7 +14,7 @@ import { authorizeLabelDelete, authorizeLabelEdit, authorizePaletteBoard, planLa
 import { authorizeBoardFollow, authorizeCardFollow, planPersonalFollow } from './personal-follows.js';
 import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
 import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
-import { authorizeCommentCreate, authorizeCommentDelete, authorizeCommentEdit,
+import { authorizeCommentCreate, authorizeCommentDelete, authorizeCommentEdit, authorizeCommentReplay,
   planCommentCreate, planCommentDelete, planCommentUpdate } from './comment-commands.js';
 import { authorizeNotificationUpdate, planNotificationUpdate, planReadNotifications } from './notification-commands.js';
 import { authorizeCardTransfer, planCrossBoardCardMove, planDuplicateCard } from './card-transfer.js';
@@ -130,7 +130,9 @@ export function createRelationshipJournalOperations(
       normalize: (input) => Object.fromEntries(Object.entries(parse(input)).filter(([, value]) => value !== undefined)),
       async authorize(context, input) { await authorize(await resolveActor(context), parse(input)); },
       async authorizeReplay(context, receipt) {
-        await authorizeTransferReplay(await resolveActor(context), operation, receipt.scope, receipt.request, receipt.result);
+        const scope = await resolveActor(context);
+        if (operation.startsWith('comments.')) await authorizeCommentReplay(scope, receipt.scope);
+        else await authorizeTransferReplay(scope, operation, receipt.scope, receipt.request, receipt.result);
       },
       async plan(context, input) {
         const parsed = parse(input);

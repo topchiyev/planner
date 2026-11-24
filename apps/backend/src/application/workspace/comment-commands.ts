@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { publicIdSchema } from '@planner/contracts/storage';
 import { commentMentions, removedComment, type RelationshipCommandInput } from '@planner/contracts';
 import type { Db } from 'mongodb';
-import type { CommandPlan, CommandPlanningContext, PlannedEffect } from '../command-journal/operation.js';
+import type { CommandPlan, CommandPlanningContext, JournalValue, PlannedEffect } from '../command-journal/operation.js';
 import { boardCardFollowers } from './affiliation-edges.js';
 import { requireCapability, WorkspaceAccessError, type CardAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { readTerminalDeletionReceipt } from './deletion-receipt.js';
@@ -15,6 +16,18 @@ type CommentAccess = { comment: Comment; card: CardAccessContext; authoredByActo
 const audit = (action: string, id: string) => ({ action, resourceId: id, resourceType: 'comment' });
 const invalidation = (boardId: string) => [{ boardId, kind: 'board.invalidated', payload: {} }];
 const receipt = (id: string, revision: number, cardRevision: number) => ({ data: { id, revision, cardRevision } });
+const replayScope = ({ id: cardId, boardId }: WorkspaceRow<'cards'>) => ({ cardId, boardId });
+
+export async function authorizeCommentReplay(scope: WorkspaceAuthorization, recorded: JournalValue) {
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded) || Object.keys(recorded).length !== 2) {
+    throw new WorkspaceAccessError('missing');
+  }
+  const card = publicIdSchema.safeParse(recorded.cardId);
+  const board = publicIdSchema.safeParse(recorded.boardId);
+  if (!card.success || !board.success) throw new WorkspaceAccessError('missing');
+  await scope.requireCard(card.data, board.data);
+}
+
 
 export function commentPermissions(context: CardAccessContext, authoredByActor: boolean) {
   return {
@@ -84,7 +97,7 @@ export async function planCommentCreate(records: WorkspaceRecords, { card }: Car
     effects: [{ kind: 'insert', collection: 'comments', id, fields: {
       cardId: card.id, boardId: card.boardId, authorId, text: input.text, createdAt: timestamp, updatedAt: null,
     } }, parent, ...follow, ...await commentDeliveries(records, card, id, input.text, context)],
-    result: receipt(id, 1, parent.revision + 1), audit: audit('comments.create', id), events: invalidation(card.boardId),
+    result: receipt(id, 1, parent.revision + 1), replayScope: replayScope(card), audit: audit('comments.create', id), events: invalidation(card.boardId),
   };
 }
 
@@ -93,12 +106,12 @@ export async function planCommentUpdate(_records: WorkspaceRecords, { comment, c
   const revision = requireRevision(comment, input.expectedRevision)!;
   const id = comment.id;
   const proof = audit('comments.update', id);
-  if (input.text === comment.text) return { effects: [], result: receipt(id, revision, card.revision), audit: proof };
+  if (input.text === comment.text) return { effects: [], result: receipt(id, revision, card.revision), replayScope: replayScope(card), audit: proof };
   const changed = touchRevision('comments', comment, timestamp, revision);
   const parent = touchRevision('cards', card, timestamp);
   return {
     effects: [{ ...changed, fields: { ...changed.fields, text: input.text } }, parent],
-    result: receipt(id, changed.revision + 1, parent.revision + 1), audit: proof, events: invalidation(card.boardId),
+    result: receipt(id, changed.revision + 1, parent.revision + 1), replayScope: replayScope(card), audit: proof, events: invalidation(card.boardId),
   };
 }
 
@@ -116,6 +129,6 @@ export async function planCommentDelete(records: WorkspaceRecords, access: Comme
   return {
     effects: [...children, { kind: 'delete', collection: 'comments', id, revision }, parent],
     result: { data: { id, cardId: card.id, cardRevision: parent.revision + 1, authoredByActor } },
-    audit: audit('comments.delete', id), events: invalidation(card.boardId),
+    replayScope: replayScope(card), audit: audit('comments.delete', id), events: invalidation(card.boardId),
   };
 }

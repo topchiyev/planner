@@ -182,7 +182,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
         { $project: { _id: 1 } },
       ]),
       { $match: { 'readableTargetBoard.0': { $exists: true } } },
-      { $project: summary ? { _id: 0, id: 1, name: 1, boardId: 1, kind: 1 } : { _id: 1 } },
+      { $project: summary ? { _id: 0, id: 1, name: 1, boardId: 1, kind: 1, transferredAcrossBoards: 1 } : { _id: 1 } },
     ]);
   }
 

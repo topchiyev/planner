@@ -7,10 +7,10 @@ import { datedOrder, readPage } from './queries.js';
 import { canonicalRow, equal, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 type Activity = WorkspaceRow<'activities'>;
-type Notice = WorkspaceRow<'notifications'>;
+export type Notice = Omit<WorkspaceRow<'notifications'>, 'revision'> & { revision?: number };
 type FeedCard = Pick<WorkspaceRow<'cards'>, 'id' | 'name' | 'boardId' | 'kind'>;
 type FeedRow<T> = T & { currentCard: FeedCard };
-const activityAliases = { addMemberToCard: 'assignCard', removeMemberFromCard: 'unassignCard' } as const;
+const activityAliases = { addMemberToCard: 'assignCard', removeMemberFromCard: 'unassignCard', duplicateCard: 'createCard' } as const;
 const activityKinds = [...workspaceActivityKind.options, ...Object.keys(activityAliases)];
 const noticeKinds = [...workspaceNotificationKind.options, 'addMemberToCard'];
 const commentKinds = ['commentCard', 'mentionInComment'];
@@ -25,21 +25,26 @@ function noticeKind(kind: string) {
 }
 
 const iso = (value?: Date | null) => value?.toISOString() ?? null;
-const dateFields = ({ id, revision, createdAt, updatedAt }: Activity | Notice) => ({ id, revision, createdAt: createdAt.toISOString(), updatedAt: iso(updatedAt) });
+const dateFields = ({ id, createdAt, updatedAt }: Activity | Notice) => ({ id, createdAt: createdAt.toISOString(), updatedAt: iso(updatedAt) });
 const nullField = (field: string) => ({ $in: [{ $type: '$' + field }, ['missing', 'null']] });
 export const unreadNotice = { readAt: null, $expr: nullField('readAt') };
 
-function boardBinding(current: string) {
-  return { $or: [equal('boardId', current), nullField('boardId')] };
+function boardHistory(current: string, transferred: string) {
+  return { $or: [equal('boardId', current), nullField('boardId'), { $eq: [transferred, true] }] };
 }
+
+const currentBoard = '$currentCard.boardId';
+const cardWasTransferred = '$currentCard.transferredAcrossBoards';
+const isCurrentBoard = equal('boardId', currentBoard);
+const cardProjection = { id: '$currentCard.id', name: '$currentCard.name', boardId: currentBoard, kind: '$currentCard.kind' };
 
 function withCurrentCard(access: WorkspaceAuthorization, boardId?: string): Document[] {
   return [
     access.readableCardLookup('currentCard', '$cardId', true),
     { $unwind: '$currentCard' },
     { $match: { $expr: { $and: [
-      boardBinding('$currentCard.boardId'),
-      ...(boardId ? [{ $eq: ['$currentCard.boardId', boardId] }] : []),
+      boardHistory(currentBoard, cardWasTransferred),
+      ...(boardId ? [{ $eq: [currentBoard, boardId] }] : []),
     ] } } },
   ];
 }
@@ -65,16 +70,22 @@ export function visibleNoticeStages(records: WorkspaceRecords, access: Workspace
     records.lookup('comments', 'liveComment', { id: '$commentId', card: '$currentCard.id', board: '$currentCard.boardId', kind: '$kind' },
       { $expr: { $and: [canonical, equal('id', '$$id'), equal('cardId', '$$card'), equal('boardId', '$$board'), { $in: ['$$kind', commentKinds] }] } },
       [{ $limit: 1 }, { $project: { _id: 1 } }]),
-    records.lookup('activities', 'liveActivity', { id: '$activityId', card: '$currentCard.id', board: '$currentCard.boardId', notice: '$kind' },
-      { $expr: { $and: [canonical, equal('id', '$$id'), equal('cardId', '$$card'), boardBinding('$$board'),
+    records.lookup('activities', 'liveActivity', {
+      id: '$activityId', card: '$currentCard.id', board: currentBoard, transferred: cardWasTransferred, notice: '$kind',
+    },
+      { $expr: { $and: [canonical, equal('id', '$$id'), equal('cardId', '$$card'), boardHistory('$$board', '$$transferred'),
         { $in: ['$$notice', activityNoticeKinds] }, {
           $or: [
             { $and: [{ $eq: ['$$notice', 'moveCard'] }, equal('kind', 'moveCard')] },
             { $and: [{ $in: ['$$notice', ['assignCard', 'addMemberToCard']] }, exactKind(['assignCard', 'addMemberToCard'])] },
           ],
-        }] } }, [{ $limit: 1 }, { $project: { _id: 1 } }]),
+        }] } }, [{ $limit: 1 }, { $project: { _id: 1, boardId: 1 } }]),
     { $match: { $or: [{ 'liveComment.0': { $exists: true } }, { 'liveActivity.0': { $exists: true } }] } },
-    { $project: { id: 1, generationId: 1, revision: 1, createdAt: 1, updatedAt: 1, actorId: 1, kind: 1, readAt: 1, currentCard: 1 } },
+    { $project: { id: 1, generationId: 1, revision: 1, createdAt: 1, updatedAt: 1, kind: 1, readAt: 1, currentCard: cardProjection,
+      actorId: { $cond: [{ $and: [isCurrentBoard, { $or: [
+        { $gt: [{ $size: '$liveComment' }, 0] }, { $in: [currentBoard, '$liveActivity.boardId'] },
+      ] }] }, '$actorId', null] },
+    } },
   ];
 }
 
@@ -101,13 +112,13 @@ export function createFeedReads(records: WorkspaceRecords, access: WorkspaceAuth
     const scope = cursorScope(cardId ? 'activity.card' : 'activity.board', 'time-id-desc', [boardId, cardId ?? '', String(limit)]);
     const pagination = readPage(datedOrder, scope, limit, cursor);
     const rows = await records.aggregate<FeedRow<Activity>>('activities', {
-      ...(cardId ? { cardId } : { boardId: { $in: [boardId, null] } }), kind: { $in: activityKinds },
-      $expr: { $and: [
-        canonicalRow(generationId), exactKind(activityKinds), boardBinding(boardId), ...(cardId ? [equal('cardId', cardId)] : []),
-      ] },
+      ...(cardId && { cardId }), kind: { $in: activityKinds },
+      $expr: { $and: [canonicalRow(generationId), exactKind(activityKinds), ...(cardId ? [equal('cardId', cardId)] : [])] },
     }, [
       ...withCurrentCard(access, boardId), ...pagination.stages,
-      { $project: { id: 1, revision: 1, kind: 1, currentCard: 1, actorId: 1, createdAt: 1, updatedAt: 1 } },
+      { $project: { id: 1, revision: 1, kind: 1, currentCard: cardProjection, createdAt: 1, updatedAt: 1,
+        actorId: { $cond: [isCurrentBoard, '$actorId', null] },
+      } },
     ]);
     const { selected, page } = pagination.result(rows, (row) => ({ createdAt: iso(row.createdAt), id: row.id }));
     const accounts = await actors(selected);
@@ -141,7 +152,7 @@ export function createFeedReads(records: WorkspaceRecords, access: WorkspaceAuth
       const { selected, page } = pagination.result(result?.rows ?? [], (row) => ({ createdAt: iso(row.createdAt), id: row.id }));
       const accounts = await actors(selected);
       return { data: selected.map((row) => ({
-        ...dateFields(row), kind: noticeKind(row.kind!), card: row.currentCard, readAt: iso(row.readAt),
+        ...dateFields(row), revision: row.revision ?? null, kind: noticeKind(row.kind!), card: row.currentCard, readAt: iso(row.readAt),
         actor: row.actorId ? accounts.get(row.actorId) ?? null : null,
       })), page, unreadCount: Number(result?.unread[0]?.count ?? 0) };
     },
