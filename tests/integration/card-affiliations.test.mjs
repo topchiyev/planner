@@ -131,6 +131,12 @@ test('direct assignment distinguishes implicit, explicit and legacy follows and 
     assert.equal((await profile(second)).following, true);
     assert.equal((await profile(viewer)).following, false);
     assert.equal((await profile()).following, false);
+    const demoted = await data(mutate(f, manager, 'PATCH', board() + '/members/' + ids.secondEditor, 1,
+      { role: 'viewer', canComment: false }));
+    const demotedRead = await profile(second);
+    assert.deepEqual([demotedRead.permissions.canEdit, demotedRead.permissions.canFollow, demotedRead.following], [false, true, true]);
+    assert.deepEqual(await followFor(ids.secondEditor), implicit);
+    assert.equal((await profile()).assignees[0].id, ids.secondEditor);
     await expectResponse(follow('PUT', second, 1), 409, 'REVISION_CONFLICT');
     await expectResponse(follow('PUT', second, undefined), 422, 'INVALID_REQUEST');
     const personal = await data(follow('PUT', second, 2));
@@ -175,10 +181,10 @@ test('direct assignment distinguishes implicit, explicit and legacy follows and 
     revision++;
     assert.equal(await followFor(ids.disabledMember), null);
 
-    await data(mutate(f, viewer, 'PUT', board() + '/follow', 1));
+    await data(mutate(f, viewer, 'PUT', board() + '/follow', demoted.parentRevision));
     assert.deepEqual([(await data(f.call(board() + '/workspace', viewer))).following, (await data(f.call(board() + '/workspace', editor))).following],
       [true, false]);
-    assert.equal((await data(f.call(board() + '/workspace', viewer))).board.revision, 1);
+    assert.equal((await data(f.call(board() + '/workspace', viewer))).board.revision, demoted.parentRevision);
     await data(follow('PUT', viewer, 1, ids.archivedStory));
     assert.equal((await profile(viewer, ids.archivedStory)).following, true);
     await expectResponse(set('PUT', ids.viewer, revision, manager), 200);
