@@ -32,12 +32,12 @@ export function captureCardPlacement(workspace: PlacementWorkspace, card: Placem
   return { card, source, destinations: workspace.board.permissions.canEdit ? workspace.lists.filter(({ kind }) => kind === 'active' || kind === 'closed') : [] };
 }
 
-export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardId: string | null, destinationVersion?: number):
+export function cardMoveBody(state: CardPlacement, toListId: string, beforeCardId: string | null, destinationVersion?: number, destinationBoardId?: string):
   Omit<RelationshipCommandInput<'cards.move'>, 'id' | 'expectedRevision'> | null {
   const destination = state.destinations.find(({ id }) => id === toListId);
   const destinationOrderVersion = destinationVersion ?? destination?.orderVersion;
   if (destinationOrderVersion === undefined) return null;
-  return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion };
+  return { toListId, beforeCardId, sourceOrderVersion: state.source.orderVersion, destinationOrderVersion, ...(destinationBoardId && { destinationBoardId }) };
 }
 
 function anchorPage(boardId: string, listId: string, signal: AbortSignal, cursor?: string) {
@@ -55,7 +55,7 @@ interface PlacementPage {
 
 export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
   state: CardPlacement; mode: 'move' | 'restore' | 'duplicate'; onClose: () => void;
-  onPlace: (toListId: string, beforeCardId: string | null, destinationVersion: number) => void;
+  onPlace: (toListId: string, beforeCardId: string | null, destinationVersion: number, destinationBoardId: string) => void;
 }) {
   const initiallySameList = mode !== 'restore' && state.destinations.some(({ id }) => id === state.source.id);
   const [to, setTo] = useState(initiallySameList ? state.source.id : '');
@@ -132,7 +132,7 @@ export function CardPlacementDialog({ state, mode, onClose, onPlace }: {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (to && destinationVersion !== undefined) onPlace(to, before || null, destinationVersion);
+    if (to && destinationVersion !== undefined) onPlace(to, before || null, destinationVersion, boardId);
   }
 
   return <WorkspaceDialog title={action} onClose={onClose}>

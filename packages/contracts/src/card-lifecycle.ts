@@ -21,7 +21,7 @@ export const cardLifecycleCommands = {
   },
   'cards.duplicate': {
     id: 'cards.duplicate', kind: 'command', method: 'POST', path: '/api/v1/cards/:id/duplicate', status: 201, target: 'parent',
-    input: target.extend({ toListId: publicIdSchema, beforeCardId: publicIdSchema.nullable(),
+    input: target.extend({ toListId: publicIdSchema, destinationBoardId: publicIdSchema.optional(), beforeCardId: publicIdSchema.nullable(),
       sourceOrderVersion: revisionSchema, destinationOrderVersion: revisionSchema }),
     output: workspaceData(z.strictObject({ card: cardSummarySchema, destination: transferListPosition, remaps: transferSummary })),
   },
