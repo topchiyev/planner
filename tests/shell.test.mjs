@@ -48,7 +48,10 @@ test('compiled Planner serves only its browser routes and built assets', { timeo
   assert.equal(root.headers.get('location'), '/workspace');
 
   let html;
-  for (const path of ['/workspace', '/projects/p', '/boards/b?view=list', '/boards/b/cards/c?context=archive&view=grid']) {
+  for (const path of [
+    '/workspace', '/workspace/', '/projects/p', '/projects/p/', '/boards/b?view=list',
+    '/boards/b/?view=list', '/boards/b/cards/c?context=archive&view=grid', '/boards/b/cards/c/?view=list',
+  ]) {
     const response = await load(path);
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /text\/html/u);
@@ -67,7 +70,11 @@ test('compiled Planner serves only its browser routes and built assets', { timeo
     assert.match(response.headers.get('cache-control'), /immutable/u);
     assert.ok((await response.text()).length > 0);
   }
-  for (const path of ['/api/v1/example', '/health/other', '/mcp', '/other', '/projects/p/unknown', '/boards/b/cards', '/boards/b/cards/c/unknown', '/assets/missing.js']) {
+  for (const path of [
+    '/api/v1/example', '/health/other', '/mcp', '/other', '/projects/p/unknown', '/boards/b/cards',
+    '/boards/b/cards/c/unknown', '/assets/missing.js', '/projects/', '/boards/', '/boards/b/cards/',
+    '/boards//cards/c', '/workspace//', '/projects//', '/boards/b/cards//', '/boards/b/cards/c//',
+  ]) {
     const response = await load(path);
     assert.equal(response.status, 404, path);
     assert.match(response.headers.get('content-type'), /application\/json/u, path);

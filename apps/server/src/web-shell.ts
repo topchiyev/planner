@@ -20,8 +20,11 @@ export function registerWebShell(app: FastifyInstance, webRoot: string) {
     });
 
     web.get('/', (_request, reply) => reply.redirect('/workspace'));
-    for (const route of shellRoutes) {
-      web.get(route, (_request, reply) => {
+    for (const route of shellRoutes.flatMap((path) => [path, `${path}/`])) {
+      web.get<{ Params: Record<string, string> }>(route, (request, reply) => {
+        if (Object.values(request.params).some((id) => id.length === 0)) {
+          return reply.callNotFound();
+        }
         reply.header('Cache-Control', 'no-store');
         return reply.sendFile('index.html', webRoot, { cacheControl: false });
       });
