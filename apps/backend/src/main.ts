@@ -1,8 +1,13 @@
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './build-app.js';
+import { checkMongoReadiness } from './native/mongo-readiness.js';
 
 const app = buildApp({
-  isReady: async () => false,
+  isReady: async () => {
+    await checkMongoReadiness();
+    // Schema, recovery and setup must also complete before the workspace can become ready.
+    return false;
+  },
   frontendRoot: fileURLToPath(new URL('../../frontend/dist/', import.meta.url)),
 });
 

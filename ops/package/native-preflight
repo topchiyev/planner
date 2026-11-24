@@ -18,6 +18,7 @@ case "$mode" in
         db_port=${PLANNER_INSTALL_DB_PORT-27431}
         ;;
     report) app_port=$2; db_port=$3 ;;
+    database) ;;
     abort-upgrade) exit 0 ;;
     *) exit 2 ;;
 esac
@@ -277,7 +278,7 @@ if [ -f "$config/planner.json" ] && [ -f "$config/mongod.conf" ]; then note runt
 else note runtime unconfigured
 fi
 check_storage
-check_ports
+if [ "$mode" != database ]; then check_ports; fi
 
 if [ "$mode" = provision ]; then
     [ "$(id -u)" = 0 ] || fail identity 'Planner native provisioning requires root.'
