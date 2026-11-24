@@ -12,6 +12,7 @@ import {
 import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
 import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
 import { authorizeFiniteListDeletion, planFiniteListDeletion } from './finite-list-deletion.js';
+import { authorizeClearTrash, planArchiveCards, planClearTrash, planListSort } from './list-maintenance.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -120,6 +121,9 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'lists.sort': define('lists.sort', (scope, input) => authorizeListEdit(scope, input.id), planListSort),
+    'lists.archiveCards': define('lists.archiveCards', (scope, input) => authorizeListEdit(scope, input.id), planArchiveCards),
+    'lists.clearTrash': define('lists.clearTrash', (scope, input) => authorizeClearTrash(scope, input.id, origin), planClearTrash),
     'lists.create': define('lists.create', (scope, input) => authorizeListCreate(scope, input.id), planListCreate),
     'lists.update': define('lists.update', (scope, input) => authorizeListEdit(scope, input.id), planListUpdate),
     'lists.move': define('lists.move', authorizeListMove, planListMove),
