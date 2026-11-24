@@ -526,3 +526,30 @@ test('narrow board membership grants only selected access, handles leaving and d
     assert.ok(await main.evaluate((element) => element.scrollWidth <= element.clientWidth));
   });
 });
+
+test('project deletion confirms and sends an exact imported name with spaces and line breaks', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const id = fixtureId(2899);
+    const raw = '  Imported\r\n' + 'Long title '.repeat(15);
+    const displayed = String.raw`"\u0020\u0020Imported\r\n` + String.raw`Long\u0020title\u0020`.repeat(15) + '"';
+    await fixture.insert('projects', id, { name: raw, type: 'shared', hidden: false, ownerProjectManagerId: null, rank: '2899' });
+    await fixture.insert('projectManagers', fixtureId(2900), { projectId: id, userId: ids.projectManager });
+    const owner = await page({ width: 390, height: 844 });
+    await signIn(owner, origin, 'project-manager');
+    await owner.goto(origin + project(id));
+    await owner.getByRole('button', { name: 'Delete project', exact: true }).click();
+    const dialog = owner.getByRole('dialog', { name: 'Delete project' });
+    await expect(dialog.locator('code')).toHaveText(displayed);
+    const input = dialog.getByLabel('Confirm project name');
+    const remove = dialog.getByRole('button', { name: 'Delete permanently' });
+    await input.fill(displayed.replace(String.raw`\u0020"`, '"'));
+    await expect(remove).toBeDisabled();
+    await input.fill(displayed);
+    await expect(remove).toBeEnabled();
+    const request = owner.waitForRequest((request) => request.method() === 'DELETE' && request.url().endsWith('/api/v1' + project(id)));
+    await remove.click();
+    assert.equal((await request).postDataJSON().name, raw);
+    await expect(owner).toHaveURL(origin + '/workspace');
+    assert.equal(await fixture.db.collection('projects').findOne({ ...fixture.scope, id }), null);
+  });
+});
