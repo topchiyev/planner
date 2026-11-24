@@ -453,6 +453,9 @@ test('desktop manager creates, keyboard reorders and configures a board without 
     await owner.reload();
     await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
     await owner.goBack();
+    await expect(owner).toHaveURL((url) => !url.searchParams.has('view'));
+    await expect(view.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await owner.goto(origin + href + '?view=grid');
     await expect(view.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
     await main.getByRole('button', { name: 'Board settings', exact: true }).click();
     await expect(settings.getByLabel('Default view')).toHaveValue('grid');
@@ -1981,6 +1984,13 @@ test('native board layouts share card placement, preference display, and paged i
     await editor.getByRole('link', { name: 'Archive', exact: true }).click();
     await expect(views.getByRole('link', { name: 'Kanban' })).toHaveCount(0);
     await expect(views.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await views.getByRole('link', { name: 'Grid' }).click();
+    await expect(views.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
+    await editor.getByRole('link', { name: 'Trash', exact: true }).click();
+    await expect(views.getByRole('link', { name: 'List' })).toHaveAttribute('aria-current', 'page');
+    await editor.getByRole('link', { name: 'Archive', exact: true }).click();
+    await expect(views.getByRole('link', { name: 'Grid' })).toHaveAttribute('aria-current', 'page');
+    await expect(editor).toHaveURL((url) => !url.searchParams.has('view'));
 
     await signIn(narrow, origin, 'viewer');
     await narrow.goto(path + '/cards/' + after + '?view=list');
