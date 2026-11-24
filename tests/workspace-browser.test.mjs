@@ -1650,7 +1650,18 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     await comments.getByLabel('Find a board member').fill('second-editor');
     await comments.getByRole('button', { name: 'Find members' }).click();
     await comments.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
+    const submitted = Promise.withResolvers();
+    const acknowledgment = Promise.withResolvers();
+    await author.route('**/api/v1/cards/' + ids.activeCard + '/comments', async (route) => {
+      if (route.request().method() === 'POST') { submitted.resolve(); await acknowledgment.promise; }
+      await route.continue();
+    });
     await comments.getByRole('button', { name: 'Post comment' }).click();
+    await submitted.promise;
+    try {
+      await expect(comments.getByLabel('Write a comment')).toBeDisabled();
+      await expect(comments.getByRole('button', { name: 'Mention a board member' })).toBeDisabled();
+    } finally { acknowledgment.resolve(); }
     const posted = comments.getByRole('listitem').filter({ hasText: 'Recheck <strong>this measurement</strong>' });
     await expect(posted.getByText('@Fixture second-editor', { exact: true })).toBeVisible();
     await expect(posted.locator('.comment-body strong')).toHaveCount(0);

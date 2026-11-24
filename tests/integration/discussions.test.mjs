@@ -179,7 +179,24 @@ test('inbox counts and scoped activity pages ignore orphan, inaccessible and sta
     assert.deepEqual([legacy.revision, legacy.readAt], [1, null]);
     await data(write(f, viewer, 'PATCH', notice(historical), 1, { read: true }));
 
-    const historic = (await data(f.call(card(ids.archivedStory) + '/activity', viewer)))[0];
+    const previousBoard = fixtureId(20110);
+    await f.insert('activities', previousBoard, {
+      cardId: ids.archivedStory, boardId: ids.sharedBoard, actorId: ids.projectManager, kind: 'moveCard',
+      fromList: { id: fixtureId(20111), name: 'Restricted previous list' },
+    });
+    const retainedNotice = fixtureId(20112);
+    await f.insert('notifications', retainedNotice, {
+      cardId: ids.archivedStory, boardId: ids.sharedBoard, actorId: ids.projectManager, recipientId: ids.viewer,
+      activityId: previousBoard, kind: 'moveCard', readAt: new Date('2026-03-19T13:03:00.000Z'),
+    });
+    const priorHistory = await data(f.call(card(ids.archivedStory) + '/activity', viewer));
+    const previous = priorHistory.find(({ id }) => id === previousBoard);
+    assert.deepEqual([previous.card.boardId, previous.actor], [ids.privateBoard, null]);
+    assert.equal(JSON.stringify(previous).includes(ids.sharedBoard), false);
+    assert.equal(JSON.stringify(previous).includes('Restricted previous list'), false);
+    const previousNotice = (await data(f.call(inbox, viewer))).find(({ id }) => id === retainedNotice);
+    assert.deepEqual([previousNotice.card.boardId, previousNotice.actor], [ids.privateBoard, null]);
+    const historic = priorHistory.find(({ id }) => id === oldActivity);
     assert.equal(historic.card.kind, 'archive');
     assert.equal(historic.kind, 'moveCard');
     assert.equal(JSON.stringify(historic).includes('Restricted old list name'), false);
@@ -277,7 +294,7 @@ test('actual activity producers remain scoped when a card and its comments trans
     const delivered = (await data(f.call(inbox, viewer))).find((entry) => entry.card.id === id);
     assert.ok(delivered);
     const cross = await data(write(f, editor, 'POST', card(id) + '/move', authored.cardRevision, {
-      toListId: ids.sharedActiveList, beforeCardId: null, sourceOrderVersion: 2, destinationOrderVersion: 1,
+      toListId: ids.sharedActiveList, destinationBoardId: ids.sharedBoard, beforeCardId: null, sourceOrderVersion: 2, destinationOrderVersion: 1,
     }));
     assert.equal(cross.card.boardId, ids.sharedBoard);
     await expectResponse(f.call(comments(id) + '?boardId=' + ids.privateBoard, editor), 404);
