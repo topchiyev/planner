@@ -92,6 +92,27 @@ export function createRelationshipReads(database: Db, scope: WorkspaceAuthorizat
   }
 
   return {
+    async 'boards.transferDestinations'(input: RelationshipReadInput<'boards.transferDestinations'>) {
+      const { permissions } = await scope.requireBoard(input.id);
+      requireCapability(permissions.canDuplicateFrom);
+      const search = textQuery(input.q, ['name', 'project.name']);
+      const paging = page('boards.transferDestinations', input, [search.binding]);
+      type Destination = { id: string; name: string; project: { id: string; name: string } };
+      const rows = await records.aggregate<Destination>('boards', { id: { $ne: input.id }, $expr: canonical }, [
+        records.lookup('boardMembers', 'editor', { boardId: '$id' }, {
+          userId: actor.id, role: 'editor',
+          $expr: { $and: [canonical, equal('userId', actor.id), equal('role', 'editor'), { $eq: ['$boardId', '$$boardId'] }] },
+        }, [{ $limit: 1 }, { $project: { _id: 1 } }]),
+        { $match: { 'editor.0': { $exists: true } } },
+        records.lookup('projects', 'project', { projectId: '$projectId' },
+          { $expr: { $and: [canonical, { $eq: ['$id', '$$projectId'] }] } }, [{ $project: { _id: 0, id: 1, name: 1 } }]),
+        { $unwind: '$project' },
+        { $match: search.filter },
+        ...paging.stages, { $project: { _id: 0, id: 1, name: 1, project: 1 } },
+      ]);
+      const selected = paging.result(rows, ({ id }) => ({ id }));
+      return { data: selected.selected, page: selected.page };
+    },
     'boards.mentionMembers': mentionMembers,
     async 'fields.templateOptions'(input: RelationshipReadInput<'fields.templateOptions'>) {
       const board = await scope.requireBoard(input.id);

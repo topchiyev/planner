@@ -25,7 +25,7 @@ type View = (typeof views)[number]['id'];
 export function BoardPage() {
   const board = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
   const [params] = useSearchParams();
-  const { pathname } = useLocation();
+  const { pathname, state: routeState } = useLocation();
   const inspectorOpen = useMatch('/boards/:boardId/cards/:cardId') !== null;
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
@@ -52,6 +52,7 @@ export function BoardPage() {
             {board && <Link to={projectHref(board.project.id)}>{board.project.name}</Link>}
           </nav>
           <PageHeading focus={!inspectorOpen} id="page-heading">{board?.board.name ?? 'Board'}</PageHeading>
+          {typeof routeState?.transferNotice === 'string' && <p role="status">{routeState.transferNotice}</p>}
           {board && <BoardManagement key={board.board.id} workspace={board} />}
           {board && <BoardAffiliations key={'affiliations:' + board.board.id} workspace={board} />}
           {board && <BoardFieldGroups key={'fields:' + board.board.id} workspace={board} />}

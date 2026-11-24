@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { listColorSchema, type ListColor } from '@planner/contracts';
+import { useRevalidator } from 'react-router';
+import { TransferBoardPicker, type TransferBoard } from '../transfers/transfer-board-picker.js';
 import { WorkspaceDialog } from '../projects/project-controls.js';
 import type { BoardList } from './board-lists.js';
 
@@ -51,19 +53,30 @@ export function ListDetailsDialog({ list, busy, problem, close, save }: {
   </WorkspaceDialog>;
 }
 
-export function MoveListDialog({ list, neighbors, previousAnchor, onMove, onClose }: {
-  list: Pick<BoardList, 'name'>; neighbors: Pick<BoardList, 'id' | 'name'>[]; previousAnchor: string | null;
-  onMove: (beforeId: string | null) => void; onClose: () => void;
+export function MoveListDialog({ boardId, list, neighbors, previousAnchor, onMove, onClose }: {
+  boardId: string; list: Pick<BoardList, 'name'>; neighbors: Pick<BoardList, 'id' | 'name'>[]; previousAnchor: string | null;
+  onMove: (beforeId: string | null, destination?: TransferBoard) => void; onClose: () => void;
 }) {
+  const revalidator = useRevalidator();
   const [before, setBefore] = useState(previousAnchor ?? '');
+  const [destination, setDestination] = useState<TransferBoard | null | undefined>(null);
+  const choices = destination ? destination.lists.filter(({ kind }) => kind === 'active' || kind === 'closed') : neighbors;
+  const canMove = destination !== undefined && (destination !== null || before !== (previousAnchor ?? ''));
   return <WorkspaceDialog title="Move list" onClose={onClose}>
-    <form className="project-form" method="post" onSubmit={(event) => { event.preventDefault(); onMove(before || null); }}>
-      <p>Move <strong>{list.name}</strong> to a new position on this board.</p>
-      <label>Place list<select value={before} ref={dialogAutofocus} onChange={(event) => setBefore(event.target.value)}>
-        {neighbors.map(({ id, name }) => <option value={id} key={id}>Before {name}</option>)}
+    <form className="project-form" method="post" onSubmit={(event) => {
+      event.preventDefault();
+      if (canMove) onMove(before || null, destination ?? undefined);
+    }}>
+      <p>Move <strong>{list.name}</strong> with its cards.</p>
+      <TransferBoardPicker sourceBoardId={boardId} onPick={(next) => {
+        setDestination(next);
+        setBefore(next === null ? previousAnchor ?? '' : '');
+      }} onUnavailable={() => { onClose(); void revalidator.revalidate(); }} />
+      <label>Place list<select value={before} ref={dialogAutofocus} disabled={destination === undefined} onChange={(event) => setBefore(event.target.value)}>
+        {choices.map(({ id, name }) => <option value={id} key={id}>Before {name}</option>)}
         <option value="">At the end</option>
       </select></label>
-      <button className="workspace-button workspace-button-primary" type="submit" disabled={before === (previousAnchor ?? '')}>Move list</button>
+      <button className="workspace-button workspace-button-primary" type="submit" disabled={!canMove}>Move list</button>
     </form>
   </WorkspaceDialog>;
 }

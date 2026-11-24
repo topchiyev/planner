@@ -50,6 +50,7 @@ test('a same-board move updates closure, scoped linked completion and eligible d
   await workspace(async (f) => {
     const editor = await signIn(f, ids.firstEditor);
     const viewer = await signIn(f, ids.viewer);
+    const sourceEditor = await signIn(f, ids.secondEditor);
     const manager = await signIn(f, ids.privateOwner);
     const card = ids.activeCard;
     const source = ids.privateClosedList;
@@ -95,7 +96,7 @@ test('a same-board move updates closure, scoped linked completion and eligible d
       cardRevision: 1, source: { listId: source, revision: 1, orderVersion: 1 },
       destination: { listId: destination, revision: 1, orderVersion: 1 },
     });
-    const foreign = await expected(move(1, { toListId: ids.sharedActiveList }), 409, 'CARD_ORDER_CONFLICT');
+    const foreign = await expected(move(1, { toListId: ids.sharedActiveList }, undefined, sourceEditor), 409, 'CARD_ORDER_CONFLICT');
     assert.equal(foreign.data.error.fields, undefined);
     const key = randomUUID();
     const moved = await data(move(1, {}, key));

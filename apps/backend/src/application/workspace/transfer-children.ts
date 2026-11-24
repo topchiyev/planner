@@ -3,12 +3,12 @@ import { safeMediaLink } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { decodeRank } from '../../storage/identity.js';
 import type { CommandPlanningContext, JournalFields, PlannedEffect } from '../command-journal/operation.js';
-import { availableMedia, unavailableMedia, validBlobIdentity } from '../media/records.js';
+import { availableMedia, unavailableMedia } from '../media/records.js';
 import { WorkspaceAccessError, type CardAccessContext, type WorkspaceAuthorization } from './authorization.js';
-import { cardCovers } from './card-media.js';
+import { attachmentFiles, coverForCard } from './card-media.js';
 import { cardClosed } from './card-state.js';
 import { isUnavailableTask } from './checklist-state.js';
-import { equal, together, type WorkspaceRecords, type WorkspaceRow } from './records.js';
+import { equal, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 import { rowRevision } from './relationship-policy.js';
 import { scopedWorkspaceRows } from './scoped-rows.js';
 
@@ -90,14 +90,12 @@ export async function planMoveComments(records: WorkspaceRecords, sourceBoardId:
 export async function planCloneAttachments(records: WorkspaceRecords, card: WorkspaceRow<'cards'>, newCardId: string,
   { generationId, timestamp }: CommandPlanningContext) {
   const { find } = scopedWorkspaceRows(records, generationId);
-  const [attachments, covers] = await together([
-    find('attachments', { cardId: card.id, deletedAt: null, kind: { $in: ['file', 'link'] } }, equal('cardId', card.id),
-      { $in: [{ $type: '$deletedAt' }, ['null', 'missing']] }, { $in: ['$kind', ['file', 'link']] }),
-    cardCovers(records, generationId, [card]),
-  ]);
+  const attachments = await find('attachments', { cardId: card.id, deletedAt: null, kind: { $in: ['file', 'link'] } }, equal('cardId', card.id),
+    { $in: [{ $type: '$deletedAt' }, ['null', 'missing']] }, { $in: ['$kind', ['file', 'link']] });
+  const files = await attachmentFiles(records, generationId, attachments);
+  const cover = coverForCard(card, attachments.find(({ id }) => id === card.coverAttachmentId), files)?.attachmentId;
   const effects: PlannedEffect[] = [];
   let coverAttachmentId: string | null = null;
-  const cover = covers.get(card.id)?.attachmentId;
   for (const attachment of attachments) {
     if (typeof attachment.name !== 'string') continue;
     const id = randomUUID();
@@ -105,13 +103,9 @@ export async function planCloneAttachments(records: WorkspaceRecords, card: Work
       createdAt: timestamp, updatedAt: null };
     if (attachment.kind === 'link') fields.url = safeMediaLink(attachment.url);
     else {
-      const identity = { digest: attachment.blobDigest, byteLength: attachment.byteLength };
-      const catalog = attachment.availability === availableMedia && validBlobIdentity(identity)
-        ? await records.first('blobs', { digest: identity.digest, lifecycleState: availableMedia })
-        : null;
-      const available = !!catalog && catalog.byteLength === attachment.byteLength;
+      const available = files.has(attachment.id);
       fields.availability = available ? availableMedia : unavailableMedia;
-      fields.blobDigest = available ? catalog.digest : null;
+      fields.blobDigest = available ? attachment.blobDigest! : null;
       if (typeof attachment.byteLength === 'number' && Number.isSafeInteger(attachment.byteLength) && attachment.byteLength >= 0) {
         fields.byteLength = attachment.byteLength;
       }

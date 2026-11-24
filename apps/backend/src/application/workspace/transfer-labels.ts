@@ -23,7 +23,10 @@ export async function planTransferLabels(records: WorkspaceRecords, sourceBoard:
     scopedLabels(records, generationId, sourceBoard, [...new Set(links.map(({ labelId }) => labelId))]),
     scopedLabels(records, generationId, destinationBoard),
   ]);
-  const [source, destination] = labels;
+  const valid = ({ name, color }: { name?: string | null; color?: string | null }) =>
+    (name == null || typeof name === 'string') && (color == null || typeof color === 'string');
+  const source = labels[0].filter(valid);
+  const destination = labels[1].filter(valid);
   const destinationByKey = new Map<string, string>();
   for (const row of destination) {
     const key = labelKey(row);
