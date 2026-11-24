@@ -11,7 +11,6 @@ const failures = {
   cardOrder: [409, 'CARD_ORDER_CONFLICT', 'The card order changed. Review the current list and try again.'],
   cardType: [422, 'CARD_TYPE_RESTRICTED', 'This board does not allow the selected card type.'],
   cardDue: [422, 'CARD_DUE_DATE_REQUIRED', 'Set a due date before changing its completion.'],
-  cardCover: [422, 'CARD_COVER_UNAVAILABLE', 'Choose an available image from this card.'],
   cardStopwatch: [422, 'CARD_STOPWATCH_STATE', 'The stopwatch cannot make that change in its current state.'],
   duplicate: [409, 'RELATIONSHIP_EXISTS', 'This affiliation already exists.'],
   stale: [409, 'REVISION_CONFLICT', 'This affiliation or project changed. Reload and try again.'],

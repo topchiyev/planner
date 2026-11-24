@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { DragDropProvider, PointerSensor, useDraggable, useDroppable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/react';
 import type { RelationshipCommandInput } from '@planner/contracts';
 import { EmptyState } from '../../app/page-state.js';
@@ -33,15 +33,17 @@ function ListSummary({ list }: { list: BoardList }) {
   </div>;
 }
 
-export function ReadonlyBoardLists({ lists }: { lists: BoardList[] }) {
+export function ReadonlyBoardLists({ lists, renderContents }: {
+  lists: BoardList[]; renderContents?: (list: BoardList) => ReactNode;
+}) {
   return lists.length ? <ul aria-label="Board lists" className="workspace-list-summary">
-    {lists.map((list) => <li key={list.id}><ListSummary list={list} /></li>)}
+    {lists.map((list) => <li key={list.id}><ListSummary list={list} />{renderContents?.(list)}</li>)}
   </ul> : <EmptyState title="No lists to show" />;
 }
 
-function EditableList({ list, busy, allowMove, dragging, edit, move, focus }: {
+function EditableList({ list, busy, allowMove, dragging, edit, move, focus, children }: {
   list: BoardList; busy: boolean; allowMove: boolean; dragging?: string;
-  edit: () => void; move: () => void; focus: (node: HTMLButtonElement | null) => void;
+  edit: () => void; move: () => void; focus: (node: HTMLButtonElement | null) => void; children?: ReactNode;
 }) {
   const drag = useDraggable({ id: list.id, disabled: busy || !allowMove });
   const drop = useDroppable({ id: 'before-' + list.id, disabled: !dragging || dragging === list.id });
@@ -60,6 +62,7 @@ function EditableList({ list, busy, allowMove, dragging, edit, move, focus }: {
           aria-hidden="true" title={'Drag ' + list.name}>⠿</span>
       </>}
     </div>
+    {children}
   </li>;
 }
 
@@ -71,7 +74,9 @@ function AppendTarget({ active }: { active: boolean }) {
 
 type Dialog = { kind: 'create' } | { kind: 'edit'; listId: string } | { kind: 'move'; snapshot: MoveSnapshot };
 
-export function BoardLists({ workspace, lists }: { workspace: Workspace; lists: BoardList[] }) {
+export function BoardLists({ workspace, lists, renderContents }: {
+  workspace: Workspace; lists: BoardList[]; renderContents?: (list: BoardList) => ReactNode;
+}) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [message, setMessage] = useState('');
   const [dragging, setDragging] = useState<string>();
@@ -151,7 +156,7 @@ export function BoardLists({ workspace, lists }: { workspace: Workspace; lists: 
           }} move={() => {
             const captured = snapshot(list.id);
             if (captured) { action.clearProblem(); setMessage(''); setDialog({ kind: 'move', snapshot: captured }); }
-          }} focus={(node) => { if (node) moveButtons.current.set(list.id, node); else moveButtons.current.delete(list.id); }} />)}
+          }} focus={(node) => { if (node) moveButtons.current.set(list.id, node); else moveButtons.current.delete(list.id); }}>{renderContents?.(list)}</EditableList>)}
       </ul>
       <AppendTarget active={!!dragging} />
     </DragDropProvider> : <EmptyState title="No lists to show" />}

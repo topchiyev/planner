@@ -1,3 +1,4 @@
+import { workspaceCardContext } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { redirect, type LoaderFunctionArgs } from 'react-router';
 import { readWorkspace, readWorkspacePreferences, workspaceSignIn, WorkspaceRequestError } from './workspace-api.js';
@@ -69,7 +70,14 @@ export function loadNativeProject({ params, request }: LoaderFunctionArgs) {
 export function loadNativeBoard({ params, request }: LoaderFunctionArgs) {
   const id = publicIdSchema.safeParse(params.boardId);
   if (!id.success) return null;
-  return loadVisible(request, async () => (await readWorkspace('boardWorkspace', id.data, undefined, request.signal)).data);
+  return loadVisible(request, async () => {
+    const context = workspaceCardContext.safeParse(new URL(request.url).searchParams.get('context')).data ?? 'board';
+    const [workspace, cardsPage] = await Promise.all([
+      readWorkspace('boardWorkspace', id.data, undefined, request.signal),
+      readWorkspace('boardCards', id.data, new URLSearchParams({ context }), request.signal),
+    ]);
+    return { ...workspace.data, cardsPage };
+  });
 }
 
 export function loadNativeCard({ params, request }: LoaderFunctionArgs) {
