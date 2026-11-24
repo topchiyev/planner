@@ -110,6 +110,12 @@ chmod 0710 /var/lib/planner/staging
 check_access '{"kind":"unavailable","reason":"staging"}'
 [ "$(status_code curl_tls "$origin/recover")" = 503 ]
 chmod 0700 /var/lib/planner/staging
+mv /var/lib/planner/staging /var/lib/planner/staging-fixture
+plannerctl restart --json > "$work/staging-restart.json"
+[ "$(status_code curl_tls "$origin/health/live")" = 200 ]
+check_access '{"kind":"unavailable","reason":"staging"}'
+mv /var/lib/planner/staging-fixture /var/lib/planner/staging
+plannerctl restart --json > "$work/restored-staging.json"
 runuser -u planner -- "$node" "$media/native-http-fixture.mjs" database
 check_access '{"kind":"enrollment","step":"recovery"}'
 systemctl stop planner-mongodb.service
