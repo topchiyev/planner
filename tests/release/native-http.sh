@@ -135,7 +135,7 @@ for attempt in {1..60}; do
 done
 check_access '{"kind":"enrollment","step":"recovery"}'
 
-systemctl kill --signal=KILL planner.service
+systemctl kill --kill-whom=main --signal=KILL planner.service
 for attempt in {1..60}; do
     if [ "$(systemctl show -p MainPID --value planner.service)" = 0 ]; then break; fi
     sleep .1
