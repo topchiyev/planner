@@ -6,7 +6,7 @@ import { MediaRejection, reserveSlots } from './errors.js';
 export const imageTypes = { JPEG: 'image/jpeg', PNG: 'image/png', GIF: 'image/gif', WEBP: 'image/webp' } as const;
 type ImageFormat = keyof typeof imageTypes;
 export type MediaVariants = Readonly<{ small: BlobIdentity; large: BlobIdentity }>;
-const variantLimit = 8 * 1024 * 1024;
+export const maximumDerivativeBytes = 8 * 1024 * 1024;
 
 export function detectImage(header: Buffer): ImageFormat | undefined {
   if (header[0] === 255 && header[1] === 216 && header[2] === 255) return 'JPEG';
@@ -52,8 +52,8 @@ export function createMediaDecoder(script: string, executable = '/usr/bin/python
       handles.push(await stage.createPart('small'));
       handles.push(await stage.createPart('large'));
       await decode(executable, script, format, handles, signal);
-      const small = await stage.seal('small', handles[1], variantLimit);
-      const large = await stage.seal('large', handles[2], variantLimit);
+      const small = await stage.seal('small', handles[1], maximumDerivativeBytes);
+      const large = await stage.seal('large', handles[2], maximumDerivativeBytes);
       if (!small.byteLength || !large.byteLength) throw new MediaStorageError();
       return { small, large };
     } catch (error) {

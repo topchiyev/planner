@@ -81,6 +81,17 @@ wait_for() {
 }
 
 wait_for 200 /recover
+main_pid=$(systemctl show -p MainPID --value planner.service)
+nsenter --target "$main_pid" --mount -- runuser -u planner -- /bin/bash -euc '
+  [ "$(findmnt -no ID -T /var/lib/planner/staging)" = "$(findmnt -no ID -T /var/lib/planner/blobs)" ]
+  if test -x /var/lib/planner/mongodb || ls /var/lib/planner/mongodb >/dev/null 2>&1; then exit 1; fi
+  probe=$(mktemp /var/lib/planner/staging/qualification.XXXXXX)
+  link=/var/lib/planner/blobs/.qualification-atomic-link
+  trap '''rm -f -- "$probe" "$link"''' EXIT
+  ln "$probe" "$link"
+  [ "$(stat -c "%d:%i" "$probe")" = "$(stat -c "%d:%i" "$link")" ]
+'
+echo 'Planner service mount permits atomic publication and shields MongoDB data.'
 python3 - "$work/setup.json" > "$work/enroll.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -132,6 +143,14 @@ mv "$blob" "$work/intact.png"
 plannerctl start --json > "$work/started.json"
 wait_for 503 /health/ready
 systemctl is-active --quiet planner.service
+invocation=$(systemctl show -p InvocationID --value planner.service)
+for _ in {1..100}; do
+    journalctl --no-pager -o cat "_SYSTEMD_INVOCATION_ID=$invocation" > "$work/recovery-log"
+    if grep -F 'Planner command recovery could not be completed.' "$work/recovery-log" >/dev/null; then break; fi
+    sleep .2
+done
+grep -F 'Planner command recovery could not be completed.' "$work/recovery-log"
+expect 503 GET /health/ready
 mv "$work/intact.png" "$blob"
 wait_for 200 /health/ready
 expect 200 GET /api/v1/me/avatar "${auth[@]}"

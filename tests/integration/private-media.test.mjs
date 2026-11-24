@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { request } from 'node:http';
-import { mkdir, readdir, stat, utimes, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, readdir, readlink, stat, utimes, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -148,7 +148,9 @@ test('private streaming upload authorizes exact logical references and replays i
     assert.deepEqual(await readdir(stagePath), []);
     const oldLink = fixtureId(5001);
     await f.insert('attachments', oldLink, { cardId: ids.activeCard, kind: 'link', url: 'javascript:unsafe', name: 'Old imported link' });
-    const renamed = await f.call(filePath(oldLink), editor, { method: 'PATCH', headers: expected(editor, 1), body: { name: 'Renamed' } });
+    const renameHeaders = expected(editor, 1);
+    const rename = () => f.call(filePath(oldLink), editor, { method: 'PATCH', headers: renameHeaders, body: { name: 'Renamed' } });
+    const renamed = await rename();
     assert.equal(renamed.status, 200);
     assert.equal(renamed.data.data.reference.url, null);
     assert.equal(renamed.data.data.reference.available, false);
@@ -157,6 +159,8 @@ test('private streaming upload authorizes exact logical references and replays i
     const link = await f.call(addPath, editor, { method: 'POST', headers: expected(editor, 4), body: { name: 'Guide', url: 'HTTPS://EXAMPLE.TEST' } });
     assert.equal(link.status, 201);
     assert.equal(link.data.data.reference.url, 'https://example.test/');
+    assert.equal((await f.call(filePath(oldLink), editor, { method: 'DELETE', headers: expected(editor, 2) })).status, 204);
+    assert.equal((await rename()).status, 404);
   });
 });
 
@@ -171,8 +175,17 @@ test('native Pillow derivatives are bounded and metadata-free with distinct avat
       const staleCover = fixtureId(5100);
       await f.insert('attachments', staleCover, { cardId: ids.activeCard, name: 'Unavailable imported cover', kind: 'file', availability: 'unavailable' });
       await f.db.collection('cards').updateOne({ id: ids.activeCard, generationId: f.generationId }, { $set: { coverAttachmentId: staleCover } });
+      const imported = (await f.call(cardPath(ids.activeCard), editor)).data.data;
+      assert.equal(imported.coverAttachmentId, staleCover);
+      assert.equal(imported.attachments.find(({ id }) => id === staleCover).available, false);
+      assert.equal((await socket(f, `${filePath(staleCover)}/thumbnail/small`, viewer)).status, 404);
+      const pinned = await upload(f, path, editor, 1, await readFile(new URL('sample.png', formats)), 'pinned-cover.png');
+      assert.equal(pinned.status, 201);
+      assert.equal(pinned.data.data.parent.coverAttachmentId, staleCover);
+      const missingCover = fixtureId(5101);
+      await f.db.collection('cards').updateOne({ id: ids.activeCard, generationId: f.generationId }, { $set: { coverAttachmentId: missingCover } });
       assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.coverAttachmentId, null);
-      let revision = 1;
+      let revision = 2;
       let cover;
       for (const [format, file] of uploads) {
         const source = await readFile(file);
@@ -324,6 +337,24 @@ test('enforces exact 32 MiB bounds and disposes an aborted or corrupt stage', { 
     assert.deepEqual(await readdir(stagePath), []);
     assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.revision, 2);
 
+    const download = `${filePath(accepted.data.data.reference.id)}/download`;
+    await new Promise((resolve, reject) => {
+      const client = request({ socketPath: f.socketPath, path: download, headers: { ...proxyHeaders(origin), Cookie: editor } }, (response) => {
+        if (response.statusCode !== 200) { response.resume(); reject(new Error('The large download did not start.')); return; }
+        response.once('data', () => { response.destroy(); resolve(); });
+      });
+      client.on('error', reject).end();
+    });
+    const target = join(blobPath, checksum(full));
+    async function openBlobDescriptors() {
+      return (await Promise.all((await readdir('/proc/self/fd')).map((fd) => readlink(`/proc/self/fd/${fd}`).catch(() => null))))
+        .filter((name) => name === target).length;
+    }
+    for (let attempt = 0; attempt < 30 && await openBlobDescriptors(); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(await openBlobDescriptors(), 0);
+
     const stage = await store.stage();
     try {
       const { identity } = await stage.receive(Readable.from([Buffer.from('abc')]), 1024, new AbortController().signal);
@@ -384,3 +415,29 @@ test('published bytes survive interrupted journal effects and readiness opens af
     if (interrupt && point === 'effectApplied' && step === 0) { interrupt = false; throw new Error('test interruption'); }
   } });
 });
+
+test('catalog reuse replaces missing orphan variants but rejects missing referenced variants',
+  { timeout: 100_000, skip: !decoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required' }, async () => {
+    const { readFile } = await import('node:fs/promises');
+    await withMedia(async (f) => {
+      const editor = await login(f, ids.firstEditor);
+      const file = await readFile(new URL('sample.png', formats));
+      const digest = checksum(file);
+      const legacy = { digest: checksum(Buffer.from('previous rendition')), byteLength: 18 };
+      const catalogId = fixtureId(5600);
+      await f.insert('blobs', catalogId, { digest, byteLength: file.length, mimeType: 'image/png',
+        lifecycleState: 'available', variants: { small: legacy, large: legacy } });
+      const path = `${cardPath(ids.activeCard)}/attachment-files`;
+      const inserted = await upload(f, path, editor, 1, file, 'fresh.png');
+      assert.equal(inserted.status, 201, JSON.stringify(inserted.data));
+      const catalog = await f.db.collection('blobs').findOne({ generationId: f.generationId, id: catalogId });
+      assert.notEqual(catalog.variants.small.digest, legacy.digest);
+      assert.notEqual(catalog.variants.large.digest, legacy.digest);
+      const id = inserted.data.data.reference.id;
+      assert.equal((await socket(f, `${filePath(id)}/thumbnail/small`, editor)).status, 200);
+      await f.db.collection('blobs').updateOne({ _id: catalog._id }, { $set: { 'variants.small': legacy } });
+      assert.equal((await upload(f, path, editor, 2, file, 'should-not-attach.png')).status, 503);
+      assert.equal(f.gate.ready, false);
+      assert.equal(await f.db.collection('attachments').countDocuments({ generationId: f.generationId }), 1);
+    });
+  });

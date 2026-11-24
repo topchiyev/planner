@@ -18,7 +18,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/planner/blobs -/var/lib/planner/staging /var/lib/planner/backups /run/planner /run/planner-proxy
+# Staging and blobs must share one mount for atomic hard-link publication.
+ReadWritePaths=/var/lib/planner /run/planner /run/planner-proxy
+InaccessiblePaths=/var/lib/planner/mongodb
 
 [Install]
 WantedBy=multi-user.target
