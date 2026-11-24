@@ -37,9 +37,9 @@ export function CardInspector() {
       {card && typeof state?.transferNotice === 'string' && <p className="inspector-status" role="status">{state.transferNotice}</p>}
       {card === undefined && <p className="inspector-status">Card details are unavailable.</p>}
       {card && workspace && <CardClipboardActions card={card} scope={workspace.recipeScope} />}
-      {card && workspace && <CardInspectorTransitions key={scope} card={card} workspace={workspace} />}
+      {card && workspace && <CardInspectorTransitions key={'placement:' + scope} card={card} workspace={workspace} />}
       {card && workspace && <CardAffiliationControls key={`affiliations:${scope}`} card={card} workspace={workspace} />}
-      {card && <CardEditing key={scope} card={card} restriction={workspace?.preferences.restrictedCardType} draftScope={workspace?.recipeScope} />}
+      {card && <CardEditing key={'content:' + scope} card={card} restriction={workspace?.preferences.restrictedCardType} draftScope={workspace?.recipeScope} />}
       {card && <CardAttachments key={`attachments:${scope}`} card={card} />}
       {card && <CardChecklists key={`checklists:${scope}`}
         card={card} groups={card.checklists} expand={workspace?.preferences.expandChecklists ?? false} />}
