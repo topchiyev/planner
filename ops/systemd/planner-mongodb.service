@@ -1,0 +1,18 @@
+[Unit]
+Description=Planner private MongoDB
+ConditionPathExists=/etc/planner/mongod.conf
+
+[Service]
+User=planner-mongodb
+Group=planner-mongodb
+WorkingDirectory=/var/lib/planner/mongodb
+ExecStart=/opt/planner/current/runtime/mongodb/bin/mongod --config /etc/planner/mongod.conf
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/planner/mongodb
+
+[Install]
+WantedBy=multi-user.target

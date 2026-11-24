@@ -30,7 +30,7 @@ done
 
 ## Extract and check the candidate
 
-The package stages the release files and entry points. Service installation, configuration and persistent storage are covered by the subsequent native installer tasks.
+The package stages release files, entry points and guarded native installation hooks. See the [native installation guide](operations.md) for directory permissions, service identities and offline installation.
 
 | Installed path | Contents |
 | --- | --- |
@@ -39,6 +39,7 @@ The package stages the release files and entry points. Service installation, con
 | `/opt/planner/releases/0.1.0/runtime/mongodb/bin/mongod` | Private MongoDB 8.0.38 Community Server |
 | `/opt/planner/current` | Relative symlink to `releases/0.1.0` |
 | `/usr/bin/plannerctl` | Link to the current release launcher, which invokes the release's private Node |
+| `/usr/lib/systemd/system/planner.service`, `/usr/lib/systemd/system/planner-mongodb.service` | Separate service units gated on configured paths |
 | `/usr/share/doc/planner-workspace` | Planner copyright, vendor notices, frontend bundle licenses, actual production npm inventory and source provenance |
 
 ```sh

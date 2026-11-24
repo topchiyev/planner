@@ -1,0 +1,23 @@
+[Unit]
+Description=Planner workspace
+After=planner-mongodb.service
+ConditionPathExists=/etc/planner/planner.json
+ConditionPathExists=/etc/planner/mongod.conf
+
+[Service]
+User=planner
+Group=planner
+WorkingDirectory=/opt/planner/current
+ExecStart=/opt/planner/current/runtime/node/bin/node /opt/planner/current/apps/backend/dist/main.js
+RuntimeDirectory=planner
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/planner/blobs /var/lib/planner/staging /var/lib/planner/backups /run/planner
+
+[Install]
+WantedBy=multi-user.target

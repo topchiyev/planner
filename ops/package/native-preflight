@@ -1,0 +1,298 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH LC_ALL=C
+
+config=/etc/planner
+state=/var/lib/planner
+release=/opt/planner
+receipt=.native-installation
+minimum_kib=524288
+app_label='Planner Workspace Application'
+db_label='Planner Workspace MongoDB'
+
+mode=${1:-}
+case "$mode" in
+    install|upgrade|provision)
+        app_port=${PLANNER_INSTALL_APP_PORT-27430}
+        db_port=${PLANNER_INSTALL_DB_PORT-27431}
+        ;;
+    report) app_port=$2; db_port=$3 ;;
+    abort-upgrade) exit 0 ;;
+    *) exit 2 ;;
+esac
+
+note() {
+    if [ "$mode" = report ]; then printf '%s=%s\n' "$1" "$2"; fi
+}
+
+fail() {
+    note failure "$1"
+    printf '%s\n' "$2" >&2
+    exit 1
+}
+
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+
+owned_directory() {
+    [ ! -L "$1" ] && [ -d "$1" ] && [ "$(stat -c '%u:%g:%a' -- "$1")" = "$2" ] ||
+        fail ownership "Unexpected directory owner, mode or type at $1."
+}
+
+owned_file() {
+    [ ! -L "$1" ] && [ -f "$1" ] && [ "$(stat -c '%u:%g:%a' -- "$1")" = "$2" ] ||
+        fail ownership "Unexpected file owner, mode or type at $1."
+}
+
+check_host() {
+    [ "$(uname -s):$(uname -m)" = Linux:x86_64 ] || fail host 'Planner requires Linux on amd64.'
+    [ -r /etc/os-release ] || fail host 'Ubuntu release information is missing.'
+    . /etc/os-release
+    [ "${ID:-}:${VERSION_ID:-}" = ubuntu:24.04 ] || fail host 'Planner requires Ubuntu 24.04.'
+    grep -Eq '^flags[[:space:]]*:.*[[:space:]]avx([[:space:]]|$)' /proc/cpuinfo ||
+        fail host 'The bundled MongoDB requires AVX support.'
+    note host supported
+}
+
+check_anchors() {
+    for path in / /opt /etc /var /var/lib /run /usr /usr/bin /usr/lib /usr/lib/systemd /usr/lib/systemd/system /usr/lib/tmpfiles.d; do
+        # dpkg may remove /opt with its last installed child and recreate it on unpack.
+        if [ "$path" = /opt ] && ! exists "$path"; then continue; fi
+        [ ! -L "$path" ] && [ -d "$path" ] && [ "$(stat -c '%u:%g' -- "$path")" = 0:0 ] ||
+            fail ownership "Unexpected system directory owner or type at $path."
+        bits=$(stat -c '%a' -- "$path")
+        [ "$((0$bits & 022))" -eq 0 ] || fail ownership "System directory is writable by other users at $path."
+    done
+}
+
+check_receipts() {
+    identity=''
+    if exists "$config"; then
+        owned_directory "$config" 0:0:711
+        owned_file "$config/$receipt" 0:0:644
+        identity=$(cat -- "$config/$receipt")
+        printf '%s\n' "$identity" | grep -Exq 'planner-workspace 1 [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' ||
+            fail identity 'The Planner installation receipt is invalid.'
+    fi
+    if exists "$state"; then
+        owned_directory "$state" 0:0:711
+        owned_file "$state/$receipt" 0:0:644
+        [ -n "$identity" ] && [ "$(cat -- "$state/$receipt")" = "$identity" ] ||
+            fail identity 'The Planner configuration and state receipts do not match.'
+    fi
+    if [ -n "$identity" ]; then note installation managed; else note installation absent; fi
+}
+
+check_account() {
+    account=$1 label=$2
+    user=$(getent passwd "$account" || :)
+    group=$(getent group "$account" || :)
+    if [ -z "$user$group" ]; then return; fi
+    [ -n "$identity" ] && [ -n "$group" ] || fail identity "System identity $account is already in use."
+    [ "$user" = "$(getent -s files passwd "$account" || :)" ] &&
+        [ "$group" = "$(getent -s files group "$account" || :)" ] ||
+        fail identity "System identity $account is not local to this host."
+    group_id=$(printf '%s\n' "$group" | cut -d: -f3)
+    printf '%s\n' "$group" | awk -F: '$3 > 0 && $3 < 1000 && $4 == "" {ok=1} END {exit !ok}' ||
+        fail identity "The service group $account is not dedicated to Planner."
+    getent passwd | awk -F: -v account="$account" -v gid="$group_id" '$4 == gid && $1 != account {exit 1}' ||
+        fail identity "Another user has the primary group $account."
+    getent group | awk -F: -v account="$account" -v gid="$group_id" '$3 == gid && $1 != account {exit 1}' ||
+        fail identity "Another group shares the service GID for $account."
+    # A previous postinst may have created only the group.
+    if [ -z "$user" ]; then return; fi
+    printf '%s\n' "$user" | awk -F: -v gid="$group_id" -v label="$label" \
+        '$3 > 0 && $3 < 1000 && $4 == gid && $5 == label && $6 == "/nonexistent" && $7 == "/usr/sbin/nologin" {ok=1} END {exit !ok}' &&
+        [ "$(id -G "$account")" = "$group_id" ] || fail identity "The service user $account is not dedicated to Planner."
+    user_id=$(printf '%s\n' "$user" | cut -d: -f3)
+    getent passwd | awk -F: -v account="$account" -v uid="$user_id" '$3 == uid && $1 != account {exit 1}' ||
+        fail identity "Another user shares the service UID for $account."
+}
+
+require_payload_owner() {
+    printf '%s\n' "$payload" | grep -Fxq -- "$1" ||
+        fail ownership "The path $1 is occupied outside the Planner package."
+}
+
+check_units() {
+    for unit in planner.service planner-mongodb.service; do
+        vendor=/usr/lib/systemd/system/$unit
+        for base in /etc/systemd/system /etc/systemd/system.control /run/systemd/system \
+            /run/systemd/system.control /run/systemd/transient /run/systemd/generator \
+            /run/systemd/generator.early /run/systemd/generator.late /usr/local/lib/systemd/system /usr/lib/systemd/system; do
+            if [ "$base/$unit" != "$vendor" ] && exists "$base/$unit"; then
+                fail ownership "A local definition already occupies $unit."
+            fi
+            if exists "$base/$unit.d"; then fail ownership "A local drop-in directory already occupies $unit."; fi
+            if [ "$unit" = planner-mongodb.service ] && exists "$base/planner-.service.d"; then
+                fail ownership "A local drop-in directory already occupies $unit."
+            fi
+        done
+        if exists "$vendor"; then
+            require_payload_owner "$vendor"
+            owned_file "$vendor" 0:0:644
+        fi
+        if [ -d /run/systemd/system ] && [ -S /run/systemd/private ]; then
+            effective=$(systemctl show --property=FragmentPath,DropInPaths "$unit") ||
+                fail ownership "Unable to determine the systemd definition for $unit."
+            fragment=$(printf '%s\n' "$effective" | sed -n 's/^FragmentPath=//p')
+            if [ -n "$fragment" ] && [ "$(readlink -m -- "$fragment")" != "$vendor" ]; then
+                fail ownership "The effective systemd definition for $unit is outside the Planner package."
+            fi
+            if printf '%s\n' "$effective" | grep -Eq '^DropInPaths=.*\/(planner(-mongodb)?|planner-)\.service\.d/'; then
+                fail ownership "The effective systemd definition for $unit uses a local drop-in."
+            fi
+        fi
+    done
+}
+
+check_payload() {
+    payload=$(dpkg-query -L planner-workspace 2>/dev/null || :)
+    if exists "$release"; then
+        require_payload_owner "$release"
+        owned_directory "$release" 0:0:755
+        owned_directory "$release/releases" 0:0:755
+        for path in "$release/releases/"*; do
+            if exists "$path"; then owned_directory "$path" 0:0:755; fi
+        done
+        if exists "$release/current"; then
+            [ -L "$release/current" ] && [ "$(stat -c '%u:%g' -- "$release/current")" = 0:0 ] ||
+                fail ownership 'The Planner current release link has unexpected ownership or type.'
+            target=$(readlink -- "$release/current")
+            printf '%s\n' "$target" | grep -Exq 'releases/[0-9]+\.[0-9]+\.[0-9]+' && [ -d "$release/$target" ] ||
+                fail ownership 'The Planner current release link has an unexpected target.'
+        fi
+        unowned=$({ printf '%s\n\n' "$payload"; find "$release" -xdev -print; } | awk '
+            /^$/ {scan=1; next}
+            !scan {owned[$0]=1; next}
+            !($0 in owned) {print}
+        ')
+        [ -z "$unowned" ] || fail ownership 'The Planner release tree contains a path outside the package inventory.'
+        unsafe=$(find "$release" -xdev \( ! -uid 0 -o ! -gid 0 -o \( ! -type l -perm /022 \) \) -print -quit)
+        [ -z "$unsafe" ] || fail ownership 'The Planner release tree contains a file with unsafe ownership or mode.'
+        find "$release" -xdev -type l -exec sh -c '
+            for path do
+                target=$(readlink -m -- "$path") || exit 1
+                case "$target" in /opt/planner/releases/*) ;; *) exit 1 ;; esac
+            done
+        ' sh {} + || fail ownership 'A Planner release link points outside the release tree.'
+    fi
+    if exists /usr/bin/plannerctl; then
+        require_payload_owner /usr/bin/plannerctl
+        [ -L /usr/bin/plannerctl ] && [ "$(stat -c '%u:%g' -- /usr/bin/plannerctl)" = 0:0 ] &&
+            [ "$(readlink -- /usr/bin/plannerctl)" = ../../opt/planner/current/bin/plannerctl ] ||
+            fail ownership 'The plannerctl entry point is already in use.'
+    fi
+    check_units
+    for base in /etc/tmpfiles.d /run/tmpfiles.d /usr/local/lib/tmpfiles.d; do
+        if exists "$base/planner-workspace.conf"; then
+            fail ownership "A local runtime directory override occupies $base/planner-workspace.conf."
+        fi
+    done
+    if exists /usr/lib/tmpfiles.d/planner-workspace.conf; then
+        require_payload_owner /usr/lib/tmpfiles.d/planner-workspace.conf
+        owned_file /usr/lib/tmpfiles.d/planner-workspace.conf 0:0:644
+    fi
+}
+
+check_service_path() {
+    path=$1 owner=$2 mode_bits=$3
+    if exists "$path"; then
+        [ -n "$identity" ] && uid=$(id -u "$owner" 2>/dev/null) && gid=$(id -g "$owner" 2>/dev/null) ||
+            fail ownership "The Planner path $path lacks a managed service identity."
+        if [ "$mode_bits" = file ]; then owned_file "$path" "0:$gid:640"
+        else owned_directory "$path" "$uid:$gid:$mode_bits"
+        fi
+    fi
+}
+
+check_storage() {
+    for scope in release state; do
+        case "$scope" in
+            release)
+                path=$release
+                parent=/
+                if [ -d /opt ]; then parent=/opt; fi
+                ;;
+            state) path=$state; parent=/var/lib ;;
+        esac
+        [ ! -d "$path" ] || parent=$path
+        free=$(df -Pk -- "$parent" | awk 'END {print $4}')
+        note "${scope}AvailableKiB" "$free"
+        [ "$free" -ge "$minimum_kib" ] 2>/dev/null || fail disk "At least 512 MiB must be free on the Planner $scope filesystem."
+    done
+}
+
+valid_port() {
+    case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac
+    [ "${#1}" -le 5 ] && [ "$1" -le 65535 ]
+}
+
+check_ports() {
+    valid_port "$app_port" && valid_port "$db_port" && [ "$app_port" != "$db_port" ] && [ "$db_port" != 27017 ] ||
+        fail port 'Choose distinct numeric ports from 1 to 65535 and avoid the MongoDB default port 27017.'
+    listeners=$(ss -H -ltn) || fail port 'Unable to inspect local TCP listeners.'
+    app_state=available; db_state=available
+    if printf '%s\n' "$listeners" | awk -v port="$app_port" '$4 ~ ":" port "$" {found=1} END {exit !found}'; then app_state=busy; fi
+    if printf '%s\n' "$listeners" | awk -v port="$db_port" '$4 ~ ":" port "$" {found=1} END {exit !found}'; then db_state=busy; fi
+    note appPortState "$app_state"
+    note dbPortState "$db_state"
+    [ "$app_state" = available ] || fail port "Planner application port $app_port is occupied."
+    [ "$db_state" = available ] || fail port "Planner database port $db_port is occupied."
+}
+
+create_root_directory() {
+    if [ -d "$1" ]; then return; fi
+    parent=${1%/*}
+    staging=$(mktemp -d -- "$parent/.planner-native.XXXXXX")
+    (umask 022; printf '%s\n' "$identity" > "$staging/$receipt")
+    chmod 0711 -- "$staging"
+    mv --no-clobber -T -- "$staging" "$1"
+    if [ -d "$staging" ]; then
+        unlink "$staging/$receipt"
+        rmdir "$staging"
+        fail ownership "The Planner path $1 appeared during provisioning."
+    fi
+}
+
+create_service_account() {
+    if ! getent group "$1" >/dev/null; then groupadd --system "$1"; fi
+    if ! getent passwd "$1" >/dev/null; then
+        useradd --system --gid "$1" --no-create-home --home-dir /nonexistent \
+            --shell /usr/sbin/nologin --comment "$2" "$1"
+    fi
+}
+
+create_service_directory() {
+    if [ ! -d "$1" ]; then install -d -o "$2" -g "$2" -m "$3" -- "$1"; fi
+}
+
+check_host
+check_anchors
+check_receipts
+check_account planner "$app_label"
+check_account planner-mongodb "$db_label"
+check_payload
+check_service_path "$state/mongodb" planner-mongodb 700
+for path in blobs staging backups; do check_service_path "$state/$path" planner 700; done
+check_service_path /run/planner planner 750
+check_service_path "$config/planner.json" planner file
+check_service_path "$config/mongod.conf" planner-mongodb file
+note ownership valid
+if [ -f "$config/planner.json" ] && [ -f "$config/mongod.conf" ]; then note runtime configured
+else note runtime unconfigured
+fi
+check_storage
+check_ports
+
+if [ "$mode" = provision ]; then
+    [ "$(id -u)" = 0 ] || fail identity 'Planner native provisioning requires root.'
+    if [ -z "$identity" ]; then identity="planner-workspace 1 $(cat /proc/sys/kernel/random/uuid)"; fi
+    create_root_directory "$config"
+    create_root_directory "$state"
+    create_service_account planner "$app_label"
+    create_service_account planner-mongodb "$db_label"
+    create_service_directory "$state/mongodb" planner-mongodb 0700
+    for path in blobs staging backups; do create_service_directory "$state/$path" planner 0700; done
+    create_service_directory /run/planner planner 0750
+fi
