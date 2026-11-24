@@ -3,6 +3,7 @@
   align-items: end;
   margin-bottom: 1rem;
 }
+.workspace-detail > :is(.board-create, .workspace-board-order, .workspace-problem) { margin-inline: 1rem; }
 .workspace-board-order {
   display: grid;
   gap: .45rem;
