@@ -47,8 +47,10 @@ export const accountRecoveryOutputSchema = z.strictObject({
   status: z.enum(['confirmed', 'enrollment-required']),
 });
 
+const pageCursorSchema = z.string().regex(/^v1\.[A-Za-z0-9_-]+$/u).max(2048);
 export const accountDirectoryQuerySchema = z.strictObject({
-  after: publicIdSchema.optional(),
+  cursor: pageCursorSchema.optional(),
+  limit: z.string().regex(/^[1-9]\d{0,8}$/u).transform((value) => Math.min(Number(value), 100)).optional(),
   q: z.string().trim().max(120).optional(),
 });
 export const accountPersonSchema = z.strictObject({ id: publicIdSchema, name: accountNameSchema, role: siteRoleSchema });
@@ -61,12 +63,12 @@ export const adminAccountSchema = accountPersonSchema.extend({
 });
 export const accountDirectorySchema = z.strictObject({
   access: z.literal('directory'),
-  accounts: z.array(accountPersonSchema).max(50),
-  next: publicIdSchema.nullable(),
+  accounts: z.array(accountPersonSchema).max(100),
+  next: pageCursorSchema.nullable(),
 }).or(z.strictObject({
   access: z.literal('administration'),
-  accounts: z.array(adminAccountSchema).max(50),
-  next: publicIdSchema.nullable(),
+  accounts: z.array(adminAccountSchema).max(100),
+  next: pageCursorSchema.nullable(),
 }));
 export const accountProvisionSchema = profileFields.pick({ name: true, email: true, username: true })
   .extend({ role: siteRoleSchema });

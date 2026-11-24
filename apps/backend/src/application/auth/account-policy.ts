@@ -1,4 +1,5 @@
 import { accountProfileSchema, adminAccountSchema, type AccountApprovalAction } from '@planner/contracts';
+import { revisionSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { workspaceKey } from '../../storage/identity.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
@@ -66,10 +67,16 @@ export function adminAccountOf(account: AccountRecord) {
 
 export function accountEpoch(account: AccountRecord) {
   const epoch = account.localAuth?.credentialsVersion ?? 0;
-  if (!Number.isSafeInteger(epoch) || epoch < 0 || !Number.isSafeInteger(epoch + 1)) {
+  if (!Number.isSafeInteger(epoch) || epoch < 0) {
     throw new AccountActionError('approval');
   }
   return epoch;
+}
+
+export function nextAccountRevision(revision: number) {
+  const next = revisionSchema.safeParse(revision + 1);
+  if (!next.success) throw new AccountActionError('revision');
+  return next.data;
 }
 
 export function usableAdmin(account: AccountRecord) {

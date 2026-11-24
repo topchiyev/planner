@@ -10,10 +10,10 @@ import { isStoredDate, newPublicId, workspaceKey } from '../../storage/identity.
 import type { CommandGate } from '../command-gate/gate.js';
 import { commandUuid, CommandRecoveryError } from '../command-journal/operation.js';
 import { assertChanged, durable } from '../command-journal/records.js';
-import { accountById, accountEpoch, accountLookup, AccountActionError, protectLastAdmin, requireSiteAdmin, usableAdmin } from './account-policy.js';
+import { accountById, accountEpoch, accountLookup, AccountActionError, nextAccountRevision, protectLastAdmin, requireSiteAdmin, usableAdmin } from './account-policy.js';
 import { accounts, type AccountRecord } from './accounts.js';
 import { newToken, tokenDigest } from './credentials.js';
-import type { PasswordHasher } from './password.js';
+import { isPasswordVerifier, type PasswordHasher } from './password.js';
 import { activeAccountGeneration, loadCurrentBrowserSession } from './sessions.js';
 
 const approvalLifetimeMs = 10 * 60_000;
@@ -44,6 +44,7 @@ interface Approval extends ProtectedGrant {
 interface RecoveryGrant extends ProtectedGrant {
   kind: 'account-recovery';
   actorEpoch: number;
+  targetRevision: number;
 }
 
 export interface AccountChange {
@@ -54,7 +55,7 @@ export interface AccountChange {
   appliedAt: Date;
   revision: number;
   epoch: number;
-  approvalId?: string;
+  approval?: Pick<Approval, 'id' | 'actorEpoch' | 'targetEpoch' | 'change'>;
   recovery?: { id: string; digest: string; actorEpoch: number };
   recoveryId?: string;
 }
@@ -98,16 +99,46 @@ function inspectChange(account: AccountRecord) {
   }
   const operator = ['role', 'availability', 'reset-issued'].includes(change.kind);
   if (change.origin !== (operator ? 'operator' : 'web')
-      || (operator ? !validId(change.approvalId) || change.approvalId !== change.id : change.approvalId !== undefined)
+      || (operator ? !change.approval || change.approval.id !== change.id
+        || !validEpoch(change.approval.actorEpoch) || !validEpoch(change.approval.targetEpoch)
+        || !accountApprovalActionSchema.safeParse(change.approval.change).success : change.approval !== undefined)
       || (!operator && change.actorId !== account.id)
       || ((change.kind === 'reset-consumed') ? !validId(change.recoveryId) || change.recoveryId !== change.id : change.recoveryId !== undefined)
       || (change.kind === 'reset-issued'
         ? !change.recovery || !validId(change.recovery.id) || !/^[0-9a-f]{64}$/u.test(change.recovery.digest)
           || !validEpoch(change.recovery.actorEpoch)
-        : change.recovery !== undefined)) {
+        : change.recovery !== undefined)
+      || (['reset-consumed', 'password-changed'].includes(change.kind) && !isPasswordVerifier(account.localAuth?.passwordVerifier))) {
     throw new CommandRecoveryError('An account transition has an invalid action or identity.');
   }
   return change;
+}
+
+async function verifyAppliedApproval(db: Db, installationId: string, account: AccountRecord, change: AccountChange) {
+  const claimed = change.approval!;
+  const { generationId, id: userId } = account;
+  const time = change.appliedAt;
+  const approval = await approvals(db).findOne({
+    _id: workspaceKey(generationId, claimed.id), id: claimed.id, generationId, installationId, userId,
+    kind: 'account-approval', actorId: change.actorId, targetRevision: change.revision - 1,
+  });
+  if (!approval) throw new CommandRecoveryError('The account approval disappeared.');
+  checkGrant(approval, approvalLifetimeMs);
+  if (approval.actorEpoch !== claimed.actorEpoch || approval.targetEpoch !== claimed.targetEpoch
+      || !isDeepStrictEqual(approval.change, claimed.change) || time < approval.issuedAt || time >= approval.expiresAt
+      || approval.revokedAt !== null || (approval.consumedAt !== null && !isDeepStrictEqual(approval.consumedAt, time))) {
+    throw new CommandRecoveryError('The applied account change does not match the recorded approval.');
+  }
+  const action = approval.change;
+  const expectedEpoch = approval.targetEpoch + (action.action === 'role' ? 0 : 1);
+  const matches = action.action === 'role' ? change.kind === 'role' && account.role === action.role
+    : action.action === 'availability' ? change.kind === 'availability' && isDeepStrictEqual(account.disabledAt, action.disabled ? time : null)
+    : change.kind === 'reset-issued' && account.disabledAt === null && account.localAuth?.passwordVerifier === null
+      && change.recovery?.actorEpoch === approval.actorEpoch;
+  if (!matches || change.epoch !== expectedEpoch) {
+    throw new CommandRecoveryError('The account state does not match the recorded approval.');
+  }
+  return approval;
 }
 
 async function finishAccountChange(db: Db, installationId: string, account: AccountRecord) {
@@ -115,17 +146,20 @@ async function finishAccountChange(db: Db, installationId: string, account: Acco
   const { generationId, id: userId } = account;
   const scope = { generationId, installationId };
   const time = change.appliedAt;
+  const approval = change.approval && await verifyAppliedApproval(db, installationId, account, change);
 
   if (change.recoveryId) {
     const grant = await recoveryGrants(db).findOne({
       ...scope, _id: workspaceKey(generationId, change.recoveryId), id: change.recoveryId, userId,
-      kind: 'account-recovery', targetEpoch: change.epoch - 1,
+      kind: 'account-recovery', targetEpoch: change.epoch - 1, targetRevision: change.revision - 1,
+      revokedAt: { $type: 'null' },
     });
-    if (!grant) throw new CommandRecoveryError('The account recovery grant disappeared.');
+    if (!grant) throw new CommandRecoveryError('The claimed account recovery grant is missing or revoked.');
     checkGrant(grant, recoveryLifetimeMs);
     if (time < grant.issuedAt || time >= grant.expiresAt) throw new CommandRecoveryError('An account recovery claim is stale.');
     const consumed = await recoveryGrants(db).updateOne({
-      ...grantIdentity(grant), kind: grant.kind, userId, $or: [{ consumedAt: { $type: 'null' } }, { consumedAt: time }],
+      ...grantIdentity(grant), kind: grant.kind, userId, revokedAt: { $type: 'null' },
+      $or: [{ consumedAt: { $type: 'null' } }, { consumedAt: time }],
     }, { $set: { consumedAt: time } }, durable);
     assertChanged(consumed.matchedCount);
   }
@@ -145,7 +179,7 @@ async function finishAccountChange(db: Db, installationId: string, account: Acco
     const { id, digest, actorEpoch } = change.recovery;
     const grant: RecoveryGrant = {
       ...scope, _id: workspaceKey(generationId, id), id, userId, actorId: change.actorId, actorEpoch,
-      targetEpoch: change.epoch, kind: 'account-recovery', tokenDigest: digest,
+      targetEpoch: change.epoch, targetRevision: change.revision, kind: 'account-recovery', tokenDigest: digest,
       issuedAt: time, expiresAt: new Date(time.getTime() + recoveryLifetimeMs), consumedAt: null, revokedAt: null,
     };
     const { _id, ...fields } = grant;
@@ -162,10 +196,10 @@ async function finishAccountChange(db: Db, installationId: string, account: Acco
       resourceType: 'account', action: 'account.' + change.kind, createdAt: time.toISOString() },
   }, false, async () => {});
 
-  if (change.approvalId) {
+  if (approval) {
     const consumed = await approvals(db).updateOne({
-      ...scope, _id: workspaceKey(generationId, change.approvalId), id: change.approvalId,
-      kind: 'account-approval', actorId: change.actorId, userId, targetRevision: change.revision - 1,
+      ...grantIdentity(approval), kind: approval.kind, actorId: approval.actorId, actorEpoch: approval.actorEpoch,
+      userId, targetRevision: approval.targetRevision, targetEpoch: approval.targetEpoch,
       $or: [{ consumedAt: { $type: 'null' } }, { consumedAt: time }],
     }, { $set: { consumedAt: time } }, durable);
     assertChanged(consumed.matchedCount);
@@ -186,7 +220,7 @@ export async function recoverAccountChanges(database: Db, installationId: string
   if (account) await finishAccountChange(database, installationId, account);
 }
 
-type ChangeInput = Pick<AccountChange, 'id' | 'actorId' | 'kind' | 'origin' | 'appliedAt' | 'approvalId' | 'recovery' | 'recoveryId'>;
+type ChangeInput = Pick<AccountChange, 'id' | 'actorId' | 'kind' | 'origin' | 'appliedAt' | 'approval' | 'recovery' | 'recoveryId'>;
 
 export function createAccountCredentials(
   database: Db, installationId: string, gate: CommandGate, hasher: PasswordHasher,
@@ -199,7 +233,7 @@ export function createAccountCredentials(
   }
 
   async function commit(target: AccountRecord, input: ChangeInput, values: Partial<Pick<AccountRecord, 'role' | 'disabledAt' | 'localAuth'>>) {
-    const revision = revisionSchema.parse(target.revision + 1);
+    const revision = nextAccountRevision(target.revision);
     const epoch = values.localAuth?.credentialsVersion ?? accountEpoch(target);
     const accountChange = { ...input, revision, epoch };
     const updated = await accounts(database).findOneAndUpdate({
@@ -238,6 +272,7 @@ export function createAccountCredentials(
         requireSiteAdmin(actor);
         const target = await accountById(database, generationId, targetId);
         if (target.revision !== revision) throw new AccountActionError('revision');
+        nextAccountRevision(revision);
         if ((change.action === 'role' && change.role === target.role)
             || (change.action === 'availability' && change.disabled === (target.disabledAt !== null))
             || (change.action === 'recovery' && target.disabledAt !== null)) throw new AccountActionError('forbidden');
@@ -260,7 +295,8 @@ export function createAccountCredentials(
       return gate.runCommand(async () => {
         const { approval, target, time } = await pendingApproval(id);
         const { change } = approval;
-        const identity = { id, approvalId: id, actorId: approval.actorId, origin: 'operator', appliedAt: time } as const;
+        const claim = { id, actorEpoch: approval.actorEpoch, targetEpoch: approval.targetEpoch, change };
+        const identity = { id, approval: claim, actorId: approval.actorId, origin: 'operator', appliedAt: time } as const;
         const result = { outcome: 'applied', approval: describeApproval(approval) } as const;
         if (change.action === 'role') {
           await commit(target, { ...identity, kind: 'role' }, { role: change.role });
@@ -300,7 +336,8 @@ export function createAccountCredentials(
         checkGrant(grant, recoveryLifetimeMs);
         const target = await accounts(database).findOne(accountLookup(generationId, grant.userId));
         const issuer = await accounts(database).findOne(accountLookup(generationId, grant.actorId));
-        if (!target || target.disabledAt !== null || accountEpoch(target) !== grant.targetEpoch || !issuer
+        if (!target || target.disabledAt !== null || accountEpoch(target) !== grant.targetEpoch
+            || target.revision !== grant.targetRevision || !issuer
             || issuer.role !== 'admin' || (issuer.id !== target.id && !usableAdmin(issuer))
             || accountEpoch(issuer) !== (issuer.id === target.id ? grant.targetEpoch : grant.actorEpoch)) throw new AccountActionError('grant');
         const passwordVerifier = await hasher.encode(input.password);
@@ -317,7 +354,9 @@ export function createAccountCredentials(
 
 function nextAuth(account: AccountRecord, passwordVerifier = account.localAuth?.passwordVerifier ?? null) {
   const mfa = account.requiresMfaEnrollment ? 'enrollment-required' : account.localAuth?.mfa ?? 'none';
-  return { ...account.localAuth, passwordVerifier, credentialsVersion: accountEpoch(account) + 1, mfa };
+  const credentialsVersion = accountEpoch(account) + 1;
+  if (!Number.isSafeInteger(credentialsVersion)) throw new AccountActionError('revision');
+  return { ...account.localAuth, passwordVerifier, credentialsVersion, mfa };
 }
 
 export type AccountCredentials = ReturnType<typeof createAccountCredentials>;

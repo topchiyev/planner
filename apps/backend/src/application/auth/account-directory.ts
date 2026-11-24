@@ -2,13 +2,15 @@ import {
   accountDirectorySchema, accountPreferencesSchema, type AccountDirectoryQuery, type AccountProvision,
   type PreferencesUpdate, type ProfileUpdate,
 } from '@planner/contracts';
+import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { newPublicId } from '../../storage/identity.js';
 import type { CommandGate } from '../command-gate/gate.js';
+import { InvalidPageCursor, pageCursors } from '../pagination/cursor.js';
 import { CommandJournal } from '../command-journal/journal.js';
 import type { JournalOperation, JournalValue } from '../command-journal/operation.js';
 import {
-  accountIdentity, AccountActionError, adminAccountOf, checkAccountIdentity, profileOf, requireSiteAdmin,
+  accountIdentity, AccountActionError, adminAccountOf, checkAccountIdentity, nextAccountRevision, profileOf, requireSiteAdmin,
 } from './account-policy.js';
 import { accounts, defaultPreferences } from './accounts.js';
 import { normalizeIdentifier } from './credentials.js';
@@ -46,21 +48,27 @@ export function createAccountDirectory(
         const { stored, generationId } = await current(token, actorId);
         const admin = stored.role === 'admin';
         if (!admin && stored.role !== 'projectOwner') throw new AccountActionError('forbidden');
-        const prefix = normalizeIdentifier(query.q ?? '').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        const lookup = normalizeIdentifier(query.q ?? '');
+        const prefix = lookup.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        const limit = query.limit ?? 25;
+        const cursorScope = { actorId, generationId, operation: 'account.directory', query: [stored.role, lookup, String(limit)],
+          order: 'id-ascending' };
+        const position = query.cursor ? publicIdSchema.safeParse(pageCursors.decode(cursorScope, query.cursor)) : undefined;
+        if (position && !position.success) throw new InvalidPageCursor('The account page position is invalid.');
         const rows = await accounts(database).find({
           generationId, ...(!admin && { disabledAt: { $type: 'null' as const } }),
-          ...(query.after && { id: { $gt: query.after } }),
-          ...(prefix && { $or: [
+          ...(position && { id: { $gt: position.data } }),
+          ...(prefix && (admin ? { $or: [
             { name: { $regex: '^' + prefix, $options: 'i' } },
             { normalizedEmail: { $regex: '^' + prefix } },
             { normalizedUsername: { $regex: '^' + prefix } },
-          ] }),
-        }, { sort: { id: 1 }, limit: 51 }).toArray();
-        const page = rows.slice(0, 50);
+          ] } : { name: { $regex: '^' + prefix, $options: 'i' } })),
+        }, { sort: { id: 1 }, limit: limit + 1, ...(!admin && { projection: { _id: 0, id: 1, name: 1, role: 1 } }) }).toArray();
+        const page = rows.slice(0, limit);
         return accountDirectorySchema.parse({
           access: admin ? 'administration' : 'directory',
           accounts: admin ? page.map(adminAccountOf) : page.map(({ id, name, role }) => ({ id, name, role })),
-          next: rows.length > 50 ? page[49].id : null,
+          next: rows.length > limit ? pageCursors.encode(cursorScope, page[limit - 1].id) : null,
         });
       });
     },
@@ -83,7 +91,7 @@ export function createAccountDirectory(
           await checkAccountIdentity(database, generationId, identity, actorId);
           return {
             effects: [{ kind: 'update', collection: 'users', id: actorId, revision, fields: { ...changes, ...identity } }],
-            result: profileOf({ ...stored, ...changes, ...identity, revision: revision + 1 }),
+            result: profileOf({ ...stored, ...changes, ...identity, revision: nextAccountRevision(revision) }),
             audit: { resourceId: actorId, resourceType: 'account', origin: 'web', action: 'account.profile' },
           };
         },
@@ -99,7 +107,7 @@ export function createAccountDirectory(
           const preferences = { ...defaultPreferences, ...stored.preferences, ...input.preferences };
           return {
             effects: [{ kind: 'update', collection: 'users', id: actorId, revision: input.revision, fields: { preferences } }],
-            result: { revision: input.revision + 1, preferences },
+            result: { revision: nextAccountRevision(input.revision), preferences },
             audit: { resourceId: actorId, resourceType: 'account', origin: 'web', action: 'account.preferences' },
           };
         },

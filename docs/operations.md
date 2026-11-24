@@ -131,6 +131,8 @@ Run the [storage upgrade acceptance test](../tests/release/native-storage.sh) in
 
 Run the [native command journal acceptance test](../tests/release/native-journal.sh) in a clean offline guest. Place the signed candidate and its public key at the root of the read-only ISO alongside `native-journal-fixture.mjs` and `tests/support/journal-operations.mjs` under the filename `journal-operations.mjs`. The test kills the guest-only writer after its first acknowledged domain write, then starts the installed systemd backend to finish the command. It also checks that a missing outbox record blocks enrollment until the record is restored and recovery completes.
 
+Run the [native account approval acceptance test](../tests/release/native-accounts.sh) in a clean offline guest with the signed candidate and its public key at the root of the read-only ISO. It exercises the installed CLI, the protected operator socket and the private browser proxy.
+
 ### Confirm an account change
 
 A signed-in site administrator can request a role change, disablement, reactivation or password reset from Manage accounts. Take the displayed approval ID to the Planner host. Inspect the initiating administrator, target account and exact action, then explicitly confirm:
