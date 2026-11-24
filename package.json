@@ -1,0 +1,31 @@
+{
+  "name": "planner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "npm@11.19.1",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
+  "workspaces": [
+    "packages/contracts",
+    "apps/server",
+    "apps/web",
+    "tools/cli"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "verify": "npm run typecheck && npm run build",
+    "verify:clean": "npm ci --strict-peer-deps && npm ls --all && npm run verify"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@playwright/test": "1.65.1",
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  }
+}
