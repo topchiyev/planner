@@ -10,6 +10,19 @@ export type FieldOwner = { id: string; revision: number; orderVersion: number; s
   boardId?: string; projectRevision?: number };
 type Close = () => void;
 
+function useObservedRevision(revision: number, projectRevision?: number) {
+  const [observed, setObserved] = useState({ revision, projectRevision });
+  return { ...observed, changed: observed.revision !== revision || observed.projectRevision !== projectRevision,
+    review: () => setObserved({ revision, projectRevision }) };
+}
+
+function FieldRevisionChange({ review, children }: { review: () => void; children: string }) {
+  return <div role="alert">
+    <p>{children}</p>
+    <button className="workspace-button" type="button" onClick={review}>Review current version</button>
+  </div>;
+}
+
 export function GroupForm({ owner, group, close }: { owner: FieldOwner; group?: FieldGroup; close: Close }) {
   const action = useFieldMutation();
   const [name, setName] = useState(group?.localName ?? '');
@@ -18,12 +31,13 @@ export function GroupForm({ owner, group, close }: { owner: FieldOwner; group?: 
   const valid = (name === group?.localName || ordinaryName.length <= 128) && (!!ordinaryName || !!template || !!group?.linked);
   const project = owner.scope === 'project';
   const base = project ? 'field template' : 'field group';
+  const observed = useObservedRevision(group?.revision ?? owner.revision);
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!valid) return;
+    if (!valid || observed.changed) return;
     if (group && (name === group.localName || (ordinaryName || null) === group.localName)) { close(); return; }
     const operation = group ? 'fields.updateGroup' : project ? 'fields.createTemplate' : 'fields.createGroup';
-    const options = { id: group?.id ?? owner.id, revision: group?.revision ?? owner.revision,
+    const options = { id: group?.id ?? owner.id, revision: observed.revision,
       scope: owner.scope === 'project' ? undefined : owner.scope, body: { name: ordinaryName || null, ...(!group && !project && { templateGroupId: template || null }) } };
     void action.run([operation, options], (csrf, key) => fieldCommand(operation, csrf, key, options), close);
   }
@@ -35,8 +49,11 @@ export function GroupForm({ owner, group, close }: { owner: FieldOwner; group?: 
           maxLength={Math.max(128, group?.localName?.length ?? 0)} />
       </label>
       {(group?.linked || template) && <p>Leave the name empty to use the project template name.</p>}
-      {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
-      <button type="submit" className="workspace-button workspace-button-primary" disabled={action.busy || !valid}>
+      {observed.changed && <FieldRevisionChange review={() => { action.clearProblem(); observed.review(); }}>
+        {group ? 'The group changed. Current name: ' + group.name : 'The group’s parent changed while this form was open.'}
+      </FieldRevisionChange>}
+      {action.problem && !observed.changed && <p className="workspace-problem" role="alert">{action.problem}</p>}
+      <button type="submit" className="workspace-button workspace-button-primary" disabled={action.busy || !valid || observed.changed}>
         {group ? 'Save name' : project ? 'Create template' : 'Create group'}</button>
     </form>
   </WorkspaceDialog>;
@@ -44,14 +61,17 @@ export function GroupForm({ owner, group, close }: { owner: FieldOwner; group?: 
 
 export function DefinitionForm({ group, field, close }: { group: FieldGroup; field?: Definition; close: Close }) {
   const action = useFieldMutation();
-  const [name, setName] = useState(field?.name ?? '');
-  const [front, setFront] = useState(field?.showOnFront ?? false);
+  const [draftName, setName] = useState<string>();
+  const [draftFront, setFront] = useState<boolean>();
+  const name = draftName ?? field?.name ?? '';
+  const front = draftFront ?? field?.showOnFront ?? false;
+  const observed = useObservedRevision(field?.revision ?? group.revision);
   const valid = name === field?.name || (name.trim().length > 0 && name.trim().length <= 128);
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!valid) return;
+    if (!valid || observed.changed) return;
     const operation = field ? 'fields.update' : 'fields.create';
-    const options = { id: field?.id ?? group.id, revision: field?.revision ?? group.revision, body: {
+    const options = { id: field?.id ?? group.id, revision: observed.revision, body: {
       ...(field && { groupId: group.id }), ...((!field || (name !== field.name && name.trim() !== field.name)) && { name: name.trim() }),
       ...((!field || front !== field.showOnFront) && { showOnFront: front }),
     } };
@@ -64,8 +84,12 @@ export function DefinitionForm({ group, field, close }: { group: FieldGroup; fie
         maxLength={Math.max(128, field?.name.length ?? 0)} /></label>
       <label className="board-checkbox"><input type="checkbox" checked={front} onChange={(event) => setFront(event.target.checked)} />
         Show on card front</label>
-      {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
-      <button type="submit" className="workspace-button workspace-button-primary" disabled={!valid || action.busy}>{field ? 'Save field' : 'Create field'}</button>
+      {observed.changed && <FieldRevisionChange review={() => { action.clearProblem(); observed.review(); }}>
+        {field ? 'The field changed. Current name: ' + field.name + (field.showOnFront ? '. Shown on card front.' : '. Inspector only.')
+          : 'The field group changed while this form was open.'}
+      </FieldRevisionChange>}
+      {action.problem && !observed.changed && <p className="workspace-problem" role="alert">{action.problem}</p>}
+      <button type="submit" className="workspace-button workspace-button-primary" disabled={!valid || action.busy || observed.changed}>{field ? 'Save field' : 'Create field'}</button>
     </form>
   </WorkspaceDialog>;
 }
@@ -85,15 +109,20 @@ export function FieldConfirmation({ kind, owner, group, field, close }: {
   const [title, detail] = confirmation[kind];
   const operation = kind === 'deleteField' ? 'fields.delete' : kind === 'deleteGroup' ? 'fields.deleteGroup'
     : kind === 'detach' ? 'fields.detachGroup' : 'fields.promoteGroup';
-  const options = { id: field?.id ?? group.id, revision: field?.revision ?? group.revision, body: {
+  const observed = useObservedRevision(field?.revision ?? group.revision, kind === 'promote' ? owner.projectRevision : undefined);
+  const options = { id: field?.id ?? group.id, revision: observed.revision, body: {
     ...(field && { groupId: group.id }), ...(kind === 'deleteGroup' && { confirm: true }),
-    ...(kind === 'promote' && { projectRevision: owner.projectRevision }),
+    ...(kind === 'promote' && { projectRevision: observed.projectRevision }),
   } };
   return <WorkspaceDialog title={title} busy={action.busy} onClose={close}>
+    <p className="field-value">{field?.name ?? group.name}</p>
     <p>{detail}</p>
-    {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
+    {observed.changed && <FieldRevisionChange review={() => { action.clearProblem(); observed.review(); }}>
+      The field or its parent changed while this confirmation was open.
+    </FieldRevisionChange>}
+    {action.problem && !observed.changed && <p className="workspace-problem" role="alert">{action.problem}</p>}
     <button className={'workspace-button ' + (kind.startsWith('delete') ? 'workspace-button-danger' : 'workspace-button-primary')}
-      type="button" disabled={action.busy} onClick={() =>
+      type="button" disabled={action.busy || observed.changed} onClick={() =>
         void action.run([operation, options], (csrf, key) => fieldCommand(operation, csrf, key, options), close)}>
       {kind.startsWith('delete') ? 'Confirm deletion' : title}
     </button>
