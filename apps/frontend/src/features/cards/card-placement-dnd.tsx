@@ -44,9 +44,9 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     const nextFocus: Focus = { id: card.id };
     void action.run(['cards.move', card.id, card.revision, body], (csrf, key) =>
       relationshipCommand('cards.move', csrf, key, { id: card.id, revision: card.revision, body }),
-    (result) => {
+    async (result) => {
       if (result && result.data.card.boardId !== workspace.board.id) {
-        void navigate(transferredCardHref(result.data.card), { state: { transferNotice: transferNotice('Card moved.', result.data.remaps) } });
+        await navigate(transferredCardHref(result.data.card), { state: { transferNotice: transferNotice('Card moved.', result.data.remaps) } });
         return;
       }
       if (result) nextFocus.expected = result.data.card;

@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { mediaOperations } from '@planner/contracts';
+import { boardEventFrameSchema, mediaOperations } from '@planner/contracts';
 import { csrfToken, readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { createMediaDecoder } from '../../apps/backend/dist/application/media/decoder.js';
@@ -69,6 +69,31 @@ const data = async (pending, status = 200) => (await expected(pending, status)).
 const destination = (toListId = ids.sharedClosedList, beforeCardId = null, sourceOrderVersion = 1, destinationOrderVersion = 1) =>
   ({ toListId, beforeCardId, sourceOrderVersion, destinationOrderVersion });
 
+async function replayFrame(f, actor, boardId, cursor, kind) {
+  const path = board(boardId) + '/events?after=' + encodeURIComponent(cursor);
+  const response = await new Promise((resolve, reject) => {
+    const req = request({ socketPath: f.socketPath, path, headers: { ...proxyHeaders(origin), Cookie: actor },
+      signal: AbortSignal.timeout(15_000) }, resolve);
+    req.once('error', reject).end();
+  });
+  assert.equal(response.statusCode, 200);
+  let outstanding = '';
+  try {
+    for await (const chunk of response.setEncoding('utf8')) {
+      outstanding += chunk;
+      let boundary;
+      while ((boundary = outstanding.indexOf('\n\n')) >= 0) {
+        const lines = outstanding.slice(0, boundary).split('\n');
+        outstanding = outstanding.slice(boundary + 2);
+        const event = lines.find((line) => line.startsWith('event: '))?.slice(7);
+        if (event === kind) return boardEventFrameSchema.parse({ event,
+          data: JSON.parse(lines.find((line) => line.startsWith('data: ')).slice(6)) });
+      }
+    }
+    assert.fail('The source board did not receive its removal event.');
+  } finally { response.destroy(); }
+}
+
 test('cross-board card move remaps exact affiliations and fields while source-only callers receive only removal', { timeout: 140_000 }, async () => {
   await workspace(async (f) => {
     const editor = await signIn(f, ids.firstEditor);
@@ -81,6 +106,9 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     const checkPath = '/api/v1/checklists/' + ids.checklist;
     const checkBody = { showOnFront: true };
     const checklistEdit = await data(change(f, editor, 'PATCH', checkPath, 1, checkBody, checklistKey));
+    await f.gate.runCommand(() => f.db.collection('commands').updateOne({ ...f.scope, idempotencyKey: checklistKey },
+      { $unset: { replayScope: '', replayScopeHash: '' } }));
+    assert.deepEqual(await data(change(f, editor, 'PATCH', checkPath, 1, checkBody, checklistKey)), checklistEdit);
     current = await data(f.call(card(), editor));
     assert.equal(current.revision, checklistEdit.cardRevision);
 
@@ -116,6 +144,10 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     assert.deepEqual(await data(f.call(board(ids.privateBoard) + '/transfer-destinations', sourceEditor)), []);
     await expected(f.call(board(ids.privateBoard) + '/transfer-destinations', reader), 403);
 
+    const payload = Buffer.from('Keep this exact reference while moving.');
+    const attachment = (await expected(upload(f, editor, current.revision, 'transfer.dat', payload), 201)).data.data.reference;
+    const sourceCursor = (await data(f.call(board(ids.privateBoard) + '/workspace', reader))).eventCursor;
+    current = await data(f.call(card(), editor));
     const route = card() + '/move';
     const denied = await expected(change(f, sourceEditor, 'POST', route, current.revision, destination()), 409, 'CARD_ORDER_CONFLICT');
     assert.equal(denied.data.error.fields, undefined);
@@ -148,6 +180,11 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     const sourceAccess = await resolveBrowserWorkspace(f.db, f.installationId, sourceToken, f.now());
     await assert.rejects(sourceAccess.requireComment(comment), { statusCode: 404 });
     await expected(f.call(card(), reader), 404);
+    assert.deepEqual(next.attachments.map(({ id }) => id), [attachment.id]);
+    assert.equal((await bytesRequest(f, sourceEditor, download(attachment.id), 'HEAD')).status, 404);
+    assert.deepEqual((await bytesRequest(f, editor, download(attachment.id))).bytes, payload);
+    assert.deepEqual(await replayFrame(f, reader, ids.privateBoard, sourceCursor, 'card.removed'),
+      { event: 'card.removed', data: { boardId: ids.privateBoard, id: sourceCard } });
     const sourceDetails = await data(f.call(card(referencing) + '/checklists', reader));
     const neutral = sourceDetails[0].tasks[0];
     assert.equal(neutral.kind, 'unavailable');
@@ -168,7 +205,7 @@ test('cross-board card move remaps exact affiliations and fields while source-on
       { $unset: { replayScope: '', replayScopeHash: '' } }));
     await expected(change(f, editor, 'PATCH', card(), 1, updateBody, updateKey), 404);
     assert.equal((await data(f.call(card(), editor))).boardId, ids.sharedBoard);
-  });
+  }, true);
 });
 
 function bytesRequest(f, actor, path, method = 'GET', extra = {}, body) {
@@ -344,6 +381,8 @@ test('historical transfer reserves the destination sequence and preserves an exa
     const id = await f.insert('fieldValues', fixtureId(27008), {
       cardId: sourceCard, fieldGroupId: source, fieldDefinitionId: definition, value: '',
     });
+    const local = await f.insert('fieldDefinitions', fixtureId(27009), { name: 'Local earlier field', fieldGroupId: source, rank: '-1' });
+    await f.insert('fieldValues', fixtureId(27010), { cardId: sourceCard, fieldGroupId: source, fieldDefinitionId: local, value: '00' });
     const key = randomUUID();
     await expected(change(f, actor, 'POST', card() + '/move', 1, destination(archive, ids.activeCard)), 422, 'INVALID_CARD_TRANSITION');
     const moved = await data(change(f, actor, 'POST', card() + '/move', 1, destination(archive), key));
@@ -357,9 +396,58 @@ test('historical transfer reserves the destination sequence and preserves an exa
     const instance = await stored(f, 'fieldGroups', value.fieldGroupId);
     assert.deepEqual([instance.scopeType, instance.scopeId, instance.templateGroupId], ['card', sourceCard, template]);
     assert.notEqual(instance.id, source);
+    const detail = await data(f.call(card(), actor));
+    assert.deepEqual(detail.fields.find(({ id }) => id === instance.id).definitions.map(({ name, rank, inherited }) =>
+      [name, rank, inherited]), [['Local earlier field', '-1', false], ['Exact blank value', '1', true]]);
     await expected(change(f, actor, 'POST', card() + '/restore', moved.card.revision, { sourceOrderVersion: 2 }), 422, 'RESTORE_TARGET_REQUIRED');
     const restored = await data(change(f, actor, 'POST', card() + '/restore', moved.card.revision, destination(finite, null, 2, 1)));
     assert.equal(restored.card.listId, finite);
     assert.equal(restored.card.closed, false);
+  });
+});
+
+test('creation and promotion receipts require current access to the result as well as the original scope', { timeout: 125_000 }, async () => {
+  await workspace(async (f) => {
+    const actor = await signIn(f, ids.firstEditor);
+    const manager = await signIn(f, ids.privateOwner);
+    const made = { name: 'Created before transfer' };
+    const madeKey = randomUUID();
+    const createPath = list(ids.privateActiveList) + '/cards';
+    const created = await data(change(f, actor, 'POST', createPath, 1, made, madeKey), 201);
+    const originalPlacement = destination(ids.privateClosedList, null, 2, 1);
+    const copyKey = randomUUID();
+    const copied = await data(change(f, actor, 'POST', card() + '/duplicate', 1, originalPlacement, copyKey), 201);
+    const listKey = randomUUID();
+    const listPath = board(ids.privateBoard) + '/lists';
+    const listBody = { name: 'Created lane before transfer', kind: 'active' };
+    const newList = await data(change(f, actor, 'POST', listPath, 1, listBody, listKey), 201);
+    await data(change(f, actor, 'POST', card(created.card.id) + '/move', 1, destination(ids.sharedActiveList, null, 2, 1)));
+    await data(change(f, actor, 'POST', card(copied.card.id) + '/move', 1, destination(ids.sharedActiveList, null, 2, 2)));
+    await data(change(f, actor, 'POST', list(newList.list.id) + '/move', 1, {
+      toBoardId: ids.sharedBoard, beforeListId: null, sourceOrderVersion: 2, destinationOrderVersion: 1,
+    }));
+    assert.deepEqual(await data(change(f, actor, 'POST', createPath, 1, made, madeKey), 201), created);
+    assert.deepEqual(await data(change(f, actor, 'POST', card() + '/duplicate', 1, originalPlacement, copyKey), 201), copied);
+    assert.deepEqual(await data(change(f, actor, 'POST', listPath, 1, listBody, listKey), 201), newList);
+
+    await f.gate.runCommand(() => f.db.collection('boardMembers').deleteOne({ ...f.scope, boardId: ids.sharedBoard, userId: ids.firstEditor }));
+    await expected(change(f, actor, 'POST', createPath, 1, made, madeKey), 404);
+    await expected(change(f, actor, 'POST', card() + '/duplicate', 1, originalPlacement, copyKey), 404);
+    await expected(change(f, actor, 'POST', listPath, 1, listBody, listKey), 404);
+    await expected(f.call(card(created.card.id), actor), 404);
+
+    const group = await f.insert('fieldGroups', fixtureId(27100), { name: 'Promotion remains tied to its project',
+      scopeType: 'card', scopeId: sourceCard, rank: '1' });
+    await f.insert('projectManagers', fixtureId(27101), { projectId: ids.sharedProject, userId: ids.privateOwner });
+    await f.insert('boardMembers', fixtureId(27102), { boardId: ids.sharedBoard, userId: ids.privateOwner, role: 'editor', canComment: null });
+    const promoteKey = randomUUID();
+    const promotePath = '/api/v1/field-groups/' + group + '/promote';
+    const promote = { projectRevision: 1 };
+    const template = await data(change(f, manager, 'POST', promotePath, 1, promote, promoteKey), 201);
+    await data(change(f, manager, 'POST', card() + '/move', 1, destination(ids.sharedClosedList, null, 3, 1)));
+    assert.deepEqual(await data(change(f, manager, 'POST', promotePath, 1, promote, promoteKey), 201), template);
+    await f.gate.runCommand(() => f.db.collection('projectManagers').deleteOne({ ...f.scope, projectId: ids.privateProject, userId: ids.privateOwner }));
+    await expected(change(f, manager, 'POST', promotePath, 1, promote, promoteKey), 404);
+    assert.ok((await data(f.call(card(), manager))).fields.some(({ id }) => id === group));
   });
 });

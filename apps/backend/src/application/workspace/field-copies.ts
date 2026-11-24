@@ -25,7 +25,7 @@ async function effectiveGroup(records: WorkspaceRecords, group: FieldGroup, proj
   return { name, template, definitions };
 }
 
-function copyDefinitions(group: FieldGroup, destinationId: string, definitions: FieldDefinition[], timestamp: string, retainLocal: boolean) {
+function copyDefinitions(group: FieldGroup, destinationId: string, definitions: FieldDefinition[], timestamp: string, retainLocal: boolean, preserveRanks = false) {
   const remap = new Map<string, string>();
   const effects: PlannedEffect[] = [];
   const rows = definitions.map((definition, index) => {
@@ -38,11 +38,12 @@ function copyDefinitions(group: FieldGroup, destinationId: string, definitions: 
     }
     const id = randomUUID();
     remap.set(definition.id, id);
+    const storedRank = preserveRanks ? definition.rank ?? null : encodeRank(rank);
     const fields = { fieldGroupId: destinationId, name: definition.name, showOnFront: definition.showOnFront === true,
-      rank: rank.toString(), createdAt: timestamp, updatedAt: null };
+      rank: storedRank == null ? null : decodeRank(storedRank).toString(), createdAt: timestamp, updatedAt: null };
     effects.push({ kind: 'insert', collection: 'fieldDefinitions', id, fields });
     return { ...fields, _id: workspaceKey(group.generationId, id), generationId: group.generationId, id, revision: 1,
-      rank: encodeRank(rank), createdAt: new Date(timestamp) };
+      rank: storedRank, createdAt: new Date(timestamp) };
   });
   return { definitions: rows, remap, effects };
 }
@@ -115,10 +116,18 @@ async function transferFieldCopy(records: WorkspaceRecords, source: FieldGroup,
   { id: cardId, projectId, rank, destinationCardId = cardId, destinationProjectId }: TransferFieldTarget,
   timestamp: string) {
   const effective = await effectiveGroup(records, source, projectId);
-  const template = destinationProjectId === projectId ? effective.template : null;
+  const local = effective.definitions.filter(({ fieldGroupId }) => fieldGroupId === source.id);
+  const positionKey = ({ rank }: FieldDefinition) => rank == null ? null : decodeRank(rank).toString();
+  const counts = new Map<string | null, number>();
+  for (const definition of effective.definitions) {
+    const key = positionKey(definition);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  // With tied local ranks a fresh ID could change the inherited display order, so materialize the full order.
+  const template = destinationProjectId === projectId && local.every((definition) => counts.get(positionKey(definition)) === 1)
+    ? effective.template : null;
   const id = randomUUID();
-  const local = template ? effective.definitions.filter(({ fieldGroupId }) => fieldGroupId === source.id) : effective.definitions;
-  const copy = copyDefinitions(source, id, local, timestamp, false);
+  const copy = copyDefinitions(source, id, template ? local : effective.definitions, timestamp, false, !!template);
   if (template) for (const definition of effective.definitions) {
     if (definition.fieldGroupId === template.id) copy.remap.set(definition.id, definition.id);
   }

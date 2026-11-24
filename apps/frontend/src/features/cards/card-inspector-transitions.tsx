@@ -38,13 +38,13 @@ export function CardInspectorTransitions({ card, workspace }: { card: Card; work
         if (error instanceof WorkspaceRequestError && error.code === 'RESTORE_TARGET_REQUIRED') setDialog({ state: placement, mode: 'restore' });
         throw error;
       }
-    }, (result) => {
+    }, async (result) => {
       if (!result) return;
       const next = result.data.card;
       const notice = operation === 'cards.archive' ? 'Card archived.' : operation === 'cards.trash' ? 'Card moved to trash.'
         : operation === 'cards.restore' ? 'Card restored.' : operation === 'cards.duplicate' ? 'Card duplicated.' : 'Card moved.';
       if (operation === 'cards.duplicate' || next.boardId !== workspace.board.id) {
-        void navigate(transferredCardHref(next), { state: { transferNotice: transferNotice(notice, result.data.remaps) } });
+        await navigate(transferredCardHref(next), { state: { transferNotice: transferNotice(notice, result.data.remaps) } });
       } else setMessage(notice);
     }).then(() => setRestoreFocus(true));
   }

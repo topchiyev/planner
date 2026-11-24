@@ -32,9 +32,9 @@ interface Records {
     boardId: string; defaultView?: BoardView; defaultCardType?: CardType | null; restrictedCardType?: CardType | null;
     showCreator?: boolean; showCardAge?: boolean; showCardCount?: boolean; expandChecklists?: boolean;
   };
-  lists: Ordered & { boardId: string; kind: ListKind; orderVersion?: number; color?: ListColor | null };
+  lists: Ordered & { boardId: string; kind: ListKind; transferredAcrossBoards?: boolean; orderVersion?: number; color?: ListColor | null };
   cards: Ordered & {
-    fieldGroupOrderVersion?: number; boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
+    fieldGroupOrderVersion?: number; transferredAcrossBoards?: boolean; boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
     description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
     dueDateCompleted?: boolean | null; isDueCompleted?: boolean | null; stopwatch?: unknown; checklistOrderVersion?: number;
     listChangedAt?: Date | null; historySequence?: Long; coverAttachmentId?: string | null;

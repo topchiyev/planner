@@ -123,9 +123,9 @@ export function BoardLists({ workspace, lists, renderContents, wrapDragContents 
     setMessage('');
     void action.run(['lists.move', list.id, list.revision, body], (csrf, key) =>
       relationshipCommand('lists.move', csrf, key, { id: list.id, revision: list.revision, body }),
-    (result) => {
+    async (result) => {
       if (result && result.data.list.boardId !== boardId) {
-        void navigate(boardHref(result.data.list.boardId), { state: { transferNotice: transferNotice('List moved.', result.data.remaps) } });
+        await navigate(boardHref(result.data.list.boardId), { state: { transferNotice: transferNotice('List moved.', result.data.remaps) } });
       } else setMessage('Moved ' + list.name + '.');
     }).then(() => setRestoreFocus(list.id));
   }

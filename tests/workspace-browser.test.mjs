@@ -1490,7 +1490,7 @@ test('keyboard destination picker duplicates and transfers cards and a populated
 
     async function selectBoard(dialog) {
       await dialog.getByText('Choose another board', { exact: true }).press('Enter');
-      await dialog.getByLabel('Destination board').selectOption({ label: 'Shared fixture project · Transfer destination' });
+      await dialog.getByRole('combobox', { name: /^Destination board/u }).selectOption({ label: 'Shared fixture project · Transfer destination' });
     }
 
     await signIn(manager, origin, 'private-owner');

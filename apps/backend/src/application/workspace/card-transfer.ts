@@ -87,7 +87,7 @@ export async function planCrossBoardCardMove(records: WorkspaceRecords, access: 
   graph.invalidated.add(destinationBoard.id);
   return {
     effects: mergeTransferEffects([...effects, ...graph.effects, sourceChange, destinationChange,
-      { ...cardChange, fields: { ...cardChange.fields, ...fields, boardId: destinationBoard.id,
+      { ...cardChange, fields: { ...cardChange.fields, ...fields, boardId: destinationBoard.id, transferredAcrossBoards: true,
         ...(graph.fieldOrderChanged.has(card.id) && { fieldGroupOrderVersion: nextFieldOrder(fieldGroupOrder(card)) }) } },
       { kind: 'insert', collection: 'activities', id: randomUUID(), fields: {
         boardId: destinationBoard.id, cardId: card.id, actorId, commandId, kind: 'moveCard', toListId: destination.id, createdAt: timestamp,
