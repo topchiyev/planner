@@ -24,7 +24,8 @@ export const listDeleteReceipt = workspaceData(z.strictObject({
 export const cardTransitionCommands = {
   'cards.move': {
     id: 'cards.move', kind: 'command', method: 'POST', path: '/api/v1/cards/:id/move', status: 200, target: 'parent',
-    input: target.extend({ ...versions, toListId: publicIdSchema, beforeCardId: publicIdSchema.nullable() }), output: receipt,
+    input: target.extend({ ...versions, toListId: publicIdSchema, destinationBoardId: publicIdSchema.optional(),
+      beforeCardId: publicIdSchema.nullable() }), output: receipt,
   },
   'cards.archive': {
     id: 'cards.archive', kind: 'command', method: 'POST', path: '/api/v1/cards/:id/archive', status: 200, target: 'parent',

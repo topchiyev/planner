@@ -1539,6 +1539,9 @@ test('keyboard destination picker duplicates and transfers cards and a populated
   await workspaceBrowser(async ({ fixture, origin, page }) => {
     await fixture.db.collection('boardMembers').deleteOne({ ...fixture.scope, boardId: ids.privateBoard, userId: ids.privateOwner });
     await fixture.insert('boardMembers', fixtureId(26000), { boardId: ids.sharedBoard, userId: ids.privateOwner, role: 'editor', canComment: null });
+    const third = await fixture.insert('boards', fixtureId(26003), { name: 'Third editor board', projectId: ids.sharedProject, rank: '4000' });
+    await fixture.insert('boardMembers', fixtureId(26004), { boardId: third, userId: ids.firstEditor, role: 'editor', canComment: null });
+    const relocating = await fixture.insert('lists', fixtureId(26005), { boardId: ids.sharedBoard, name: 'Relocating lane', kind: 'active', rank: '5000' });
     const lane = await fixture.insert('lists', fixtureId(26001), { boardId: ids.privateBoard, name: 'Shipping lane', kind: 'active', rank: '4000' });
     const occupied = await fixture.insert('cards', fixtureId(26002), { boardId: ids.privateBoard, listId: lane,
       name: 'A moving occupant', kind: 'board', type: 'project', rank: '1024' });
@@ -1574,6 +1577,27 @@ test('keyboard destination picker duplicates and transfers cards and a populated
     await expect(reader.getByRole('button', { name: 'Duplicate card' })).toHaveCount(0);
     await signIn(editor, origin, 'first-editor');
     await editor.goto(source);
+    await editor.getByRole('region', { name: 'Card placement' }).getByRole('button', { name: 'Move card' }).click();
+    dialog = editor.getByRole('dialog', { name: 'Move card' });
+    await selectBoard(dialog);
+    await dialog.getByLabel('Destination list').selectOption(relocating);
+    const session = await (await editor.request.get(origin + '/api/v1/session')).json();
+    const displaced = await editor.request.post(origin + '/api/v1/lists/' + relocating + '/move', {
+      headers: { Origin: origin, 'X-CSRF-Token': session.csrfToken, 'Idempotency-Key': randomUUID(), 'If-Match': '"1"' },
+      data: { toBoardId: third, beforeListId: null, sourceOrderVersion: 1, destinationOrderVersion: 1 },
+    });
+    assert.equal(displaced.status(), 200, await displaced.text());
+    const stale = editor.waitForResponse((response) =>
+      response.request().method() === 'POST' && response.url().endsWith('/cards/' + ids.activeCard + '/move'));
+    await dialog.getByRole('button', { name: 'Move card', exact: true }).click();
+    const failure = await stale;
+    assert.equal(failure.status(), 409);
+    const rejected = await failure.json();
+    assert.equal(rejected.error.code, 'CARD_ORDER_CONFLICT');
+    assert.equal(rejected.error.fields, undefined);
+    await expect(editor).toHaveURL(source);
+    await expect(editor.getByRole('region', { name: 'Card placement' }).getByRole('alert')).toBeVisible();
+
     await editor.getByRole('region', { name: 'Card placement' }).getByRole('button', { name: 'Move card' }).click();
     dialog = editor.getByRole('dialog', { name: 'Move card' });
     await selectBoard(dialog);
@@ -1626,7 +1650,18 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
     await comments.getByLabel('Find a board member').fill('second-editor');
     await comments.getByRole('button', { name: 'Find members' }).click();
     await comments.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
+    const submitted = Promise.withResolvers();
+    const acknowledgment = Promise.withResolvers();
+    await author.route('**/api/v1/cards/' + ids.activeCard + '/comments', async (route) => {
+      if (route.request().method() === 'POST') { submitted.resolve(); await acknowledgment.promise; }
+      await route.continue();
+    });
     await comments.getByRole('button', { name: 'Post comment' }).click();
+    await submitted.promise;
+    try {
+      await expect(comments.getByLabel('Write a comment')).toBeDisabled();
+      await expect(comments.getByRole('button', { name: 'Mention a board member' })).toBeDisabled();
+    } finally { acknowledgment.resolve(); }
     const posted = comments.getByRole('listitem').filter({ hasText: 'Recheck <strong>this measurement</strong>' });
     await expect(posted.getByText('@Fixture second-editor', { exact: true })).toBeVisible();
     await expect(posted.locator('.comment-body strong')).toHaveCount(0);
@@ -1647,7 +1682,10 @@ test('native comments and inbox honor commenter, recipient and moderation roles 
 
     await posted.getByRole('button', { name: 'Edit comment' }).click();
     const edit = author.getByRole('dialog', { name: 'Edit comment' });
-    await edit.getByLabel('Comment', { exact: true }).fill('Edited without another notice');
+    await expect(edit).toBeVisible();
+    const editableComment = edit.getByRole('textbox', { name: 'Comment', exact: true });
+    await expect(editableComment).toHaveValue(/Recheck/u);
+    await editableComment.fill('Edited without another notice');
     await edit.getByRole('button', { name: 'Save comment' }).click();
     await expect(comments.getByText('Edited without another notice')).toBeVisible();
     await recipient.reload();

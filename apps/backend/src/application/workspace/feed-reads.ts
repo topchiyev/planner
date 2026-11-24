@@ -29,12 +29,7 @@ const dateFields = ({ id, createdAt, updatedAt }: Activity | Notice) => ({ id, c
 const nullField = (field: string) => ({ $in: [{ $type: '$' + field }, ['missing', 'null']] });
 export const unreadNotice = { readAt: null, $expr: nullField('readAt') };
 
-function boardHistory(current: string, transferred: string) {
-  return { $or: [equal('boardId', current), nullField('boardId'), { $eq: [transferred, true] }] };
-}
-
 const currentBoard = '$currentCard.boardId';
-const cardWasTransferred = '$currentCard.transferredAcrossBoards';
 const isCurrentBoard = equal('boardId', currentBoard);
 const cardProjection = { id: '$currentCard.id', name: '$currentCard.name', boardId: currentBoard, kind: '$currentCard.kind' };
 
@@ -42,10 +37,7 @@ function withCurrentCard(access: WorkspaceAuthorization, boardId?: string): Docu
   return [
     access.readableCardLookup('currentCard', '$cardId', true),
     { $unwind: '$currentCard' },
-    { $match: { $expr: { $and: [
-      boardHistory(currentBoard, cardWasTransferred),
-      ...(boardId ? [{ $eq: [currentBoard, boardId] }] : []),
-    ] } } },
+    ...(boardId ? [{ $match: { 'currentCard.boardId': boardId } }] : []),
   ];
 }
 
@@ -71,9 +63,9 @@ export function visibleNoticeStages(records: WorkspaceRecords, access: Workspace
       { $expr: { $and: [canonical, equal('id', '$$id'), equal('cardId', '$$card'), equal('boardId', '$$board'), { $in: ['$$kind', commentKinds] }] } },
       [{ $limit: 1 }, { $project: { _id: 1 } }]),
     records.lookup('activities', 'liveActivity', {
-      id: '$activityId', card: '$currentCard.id', board: currentBoard, transferred: cardWasTransferred, notice: '$kind',
+      id: '$activityId', card: '$currentCard.id', notice: '$kind',
     },
-      { $expr: { $and: [canonical, equal('id', '$$id'), equal('cardId', '$$card'), boardHistory('$$board', '$$transferred'),
+      { $expr: { $and: [canonical, equal('id', '$$id'), equal('cardId', '$$card'),
         { $in: ['$$notice', activityNoticeKinds] }, {
           $or: [
             { $and: [{ $eq: ['$$notice', 'moveCard'] }, equal('kind', 'moveCard')] },

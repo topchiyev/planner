@@ -4,6 +4,7 @@
 .workspace-feed summary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .activity-feed { margin-block-start: .8rem; }
 .comment-form { margin-block: .35rem; }
+.comment-composer { display: grid; gap: .55rem; padding: 0; margin: 0; border: 0; min-width: 0; }
 .comment-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .feed-entries { display: grid; gap: .45rem; padding: 0; margin: 0; list-style: none; }
 .feed-entries > li { display: grid; gap: .35rem; min-width: 0; padding: .6rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }

@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { cardMentionToken, commentMentions, maximumCommentLength, type WorkspaceReadOutput } from '@planner/contracts';
 import { MemberPicker, type Mention } from '../affiliations/member-picker.js';
 import { relationshipCommand } from '../projects/project-api.js';
@@ -23,10 +23,11 @@ function CommentText({ value }: { value: string }) {
   return <p className="comment-body">{fragments}{value.slice(index)}</p>;
 }
 
-function CommentInput({ text, change, boardId, label, focus }: {
-  text: string; change: (value: string) => void; boardId: string; label: string; focus?: boolean;
+function CommentInput({ text, change, boardId, label, focus, disabled }: {
+  text: string; change: (value: string) => void; boardId: string; label: string; focus?: boolean; disabled: boolean;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
+  const inputId = useId();
   function insert(person: Mention) {
     const area = input.current;
     if (!area) return;
@@ -37,11 +38,12 @@ function CommentInput({ text, change, boardId, label, focus }: {
     change(value);
     window.requestAnimationFrame(() => { area.focus(); area.setSelectionRange(start + token.length, start + token.length); });
   }
-  return <>
-    <label>{label}<textarea ref={input} value={text} onChange={(event) => change(event.target.value)} rows={4}
-      maxLength={Math.max(maximumCommentLength, text.length)} autoFocus={focus} required /></label>
+  return <fieldset className="comment-composer" disabled={disabled}>
+    <label htmlFor={inputId}>{label}</label>
+    <textarea id={inputId} ref={input} value={text} onChange={(event) => change(event.target.value)} rows={4}
+      maxLength={Math.max(maximumCommentLength, text.length)} autoFocus={focus} required />
     <MemberPicker boardId={boardId} select={insert} />
-  </>;
+  </fieldset>;
 }
 
 export function CardComments({ card }: { card: Card }) {
@@ -63,7 +65,7 @@ export function CardComments({ card }: { card: Card }) {
   return <section className="workspace-feed" aria-label="Comments">
     <h3>Comments</h3>
     {card.permissions.canComment && <form className="project-form comment-form" onSubmit={post}>
-      <CommentInput text={draft} change={setDraft} boardId={card.boardId} label="Write a comment" />
+      <CommentInput text={draft} change={setDraft} boardId={card.boardId} label="Write a comment" disabled={action.busy} />
       {action.problem && <p className="workspace-problem" role="alert">{action.problem}</p>}
       <button className="workspace-button workspace-button-primary" type="submit"
         disabled={!draft.trim() || action.busy}>Post comment</button>
@@ -110,7 +112,7 @@ function CommentDialog({ card, comment, action, revision, text, change, close }:
   }
   return <WorkspaceDialog title={title} onClose={close} busy={mutation.busy}>
     <form className="project-form" onSubmit={submit}>
-      {updating ? <CommentInput text={text} change={change} boardId={card.boardId} label="Comment" focus />
+      {updating ? <CommentInput text={text} change={change} boardId={card.boardId} label="Comment" disabled={mutation.busy || stale} focus />
         : <p>Permanently remove this comment?</p>}
       {(stale || mutation.problem) && <p className="workspace-problem" role="alert">
         {stale ? 'This comment changed. Close and reopen to review the current comment.' : mutation.problem}
