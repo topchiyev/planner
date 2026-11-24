@@ -1882,11 +1882,11 @@ test('a late card page cannot replace a newer recipe or survive current board ac
     await editor.getByRole('alert').getByRole('button', { name: 'Retry' }).click();
     await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toBeVisible();
 
-    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
-      ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor,
-    }));
-    await filters.getByRole('searchbox').fill('Prior recipe');
-    await filters.getByRole('button', { name: 'Apply filters' }).click();
+    const manager = await fixture.login(ids.privateOwner);
+    const removed = await fixture.call('/api/v1' + board(ids.privateBoard) + '/members/' + ids.firstEditor, cookieOf(manager), {
+      method: 'DELETE', headers: { Origin: origin, 'X-CSRF-Token': manager.data.csrfToken, 'If-Match': '"1"', 'Idempotency-Key': randomUUID() },
+    });
+    assert.equal(removed.status, 204, JSON.stringify(removed.data));
     await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
     await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toHaveCount(0);
     await expect(filters).toHaveCount(0);
