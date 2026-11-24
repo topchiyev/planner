@@ -84,7 +84,7 @@ export function createRelationshipReads(database: Db, scope: WorkspaceAuthorizat
   async function eligibleMembers(operation: 'boards.mentionMembers' | 'boards.filterMembers',
     input: RelationshipReadInput<'boards.mentionMembers'>) {
     const { permissions } = await scope.requireBoard(input.id);
-    if (operation === 'boards.mentionMembers') requireCapability(permissions.canEdit);
+    if (operation === 'boards.mentionMembers') requireCapability(permissions.canEdit || permissions.canComment);
     const search = textQuery(input.q, ['name', 'username']);
     const paging = page(operation, input, [search.binding]);
     const rows = await eligibleBoardPeople(records, generationId, input.id, search.filter, paging.stages);
