@@ -7,6 +7,7 @@ import { inspectDirectory, inspectObjects, parseObjectService, reconcileAssets }
 import { assetManifestLimit, captureManifestLimit, MigrationError, readAssetManifest, readCaptureManifest, sha256 } from './manifest.js';
 import { openMigrationFile } from './prepare.js';
 import { finishSourceFingerprint, fingerprintRows, startAssetFingerprint, type SourceFingerprint } from './source-fingerprint.js';
+import { readSourceBatch, type SourceBatch, type SourceTable } from './source-projections.js';
 import { sourcePreflightInSnapshot, withSourceSnapshot } from './source-reader.js';
 import { migrationServiceName, parseSourceService } from './source-service.js';
 
@@ -97,7 +98,10 @@ async function whileReadingAssets<T>(client: Client, verify: () => Promise<T>) {
 }
 
 const admittedSnapshots = new WeakSet<VerifiedSourceSnapshot>();
-export type VerifiedSourceSnapshot = { readonly fingerprint: SourceFingerprint };
+export type VerifiedSourceSnapshot = {
+  readonly fingerprint: SourceFingerprint;
+  readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number): Promise<SourceBatch<T>>;
+};
 
 export function assertVerifiedSourceSnapshot(snapshot: VerifiedSourceSnapshot) {
   if (!admittedSnapshots.has(snapshot))
@@ -107,7 +111,7 @@ export function assertVerifiedSourceSnapshot(snapshot: VerifiedSourceSnapshot) {
 export async function withMigrationSnapshot<T>(
   input: MigrationInput, owner: Owner, sourceConfig: string, objectConfig: string | undefined,
   options: { expectedFingerprint?: string; batchSize?: number },
-  read: (client: Client, snapshot: VerifiedSourceSnapshot) => Promise<T>,
+  read: (snapshot: VerifiedSourceSnapshot) => Promise<T>,
 ) {
   try {
     const raw = await smallFile(input.manifest, owner, captureManifestLimit);
@@ -134,11 +138,29 @@ export async function withMigrationSnapshot<T>(
         throw new MigrationError('source-changed', 'The source snapshot changed. Start a new import run.');
       const rows = Object.values(source.rows).reduce((sum, count) => sum + BigInt(count), 0n);
       Object.freeze(fingerprint.components);
-      const snapshot = Object.freeze({ fingerprint: Object.freeze(fingerprint) });
+      const pendingReads = new Set<Promise<unknown>>();
+      let readFailure: unknown;
+      const snapshot: VerifiedSourceSnapshot = Object.freeze({
+        fingerprint: Object.freeze(fingerprint),
+        readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number) {
+          assertVerifiedSourceSnapshot(snapshot);
+          const result = readSourceBatch(client, table, lastSourceId, limit);
+          pendingReads.add(result);
+          void result.then(
+            () => pendingReads.delete(result),
+            (error: unknown) => { readFailure ??= error; pendingReads.delete(result); },
+          );
+          return result;
+        },
+      });
       admittedSnapshots.add(snapshot);
       let value: T;
-      try { value = await read(client, snapshot); }
-      finally { admittedSnapshots.delete(snapshot); }
+      try { value = await read(snapshot); }
+      finally {
+        admittedSnapshots.delete(snapshot);
+        await Promise.allSettled(pendingReads);
+      }
+      if (readFailure !== undefined) throw readFailure;
       return {
         manifestSha256, capture, dump, fingerprint, rows: source.rows,
         estimates: { sourceBytes: source.dataBytes, sourceIndexes: source.indexBytes, sourceRows: rows, assetBytes: assetSummary.bytes },

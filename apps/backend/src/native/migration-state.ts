@@ -97,6 +97,7 @@ export async function publishMigrationPreflight(
     await db.collection<ImportRun>('importRuns').insertOne({
       ...importRunKey({ generationId, installationId, runId }), state: 'preflighted', checkpoint: null,
       manifestSha256: receipt.manifestSha256, fingerprint: receipt.fingerprint, createdAt: now, updatedAt: now,
+      source: { instanceId: source.instanceId, release: source.release, edition: source.edition },
     }, durable);
     await link(pending, join(fdPath(dir), runId + '.json'));
     await unlink(pending);

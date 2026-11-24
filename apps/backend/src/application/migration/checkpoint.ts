@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { migrationDigestSchema } from '@planner/contracts';
+import { migrationDigestSchema, type MigrationCapture } from '@planner/contracts';
 import { generationIdSchema, publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Filter } from 'mongodb';
 import { readInstallation } from '../../storage/schema.js';
@@ -24,6 +24,7 @@ export type ImportRun = {
   _id: string; id: string; installationId: string; generationId: string;
   state: 'preflighted' | 'staging'; fingerprint: SourceFingerprint;
   manifestSha256: string; createdAt: Date; updatedAt: Date; checkpoint: Checkpoint | null;
+  source: Pick<MigrationCapture['source'], 'instanceId' | 'release' | 'edition'>;
 };
 
 function invalid() {
@@ -84,7 +85,7 @@ export async function writeMigrationBatch(lease: WriterLease, db: Db, identity: 
   if (!isDeepStrictEqual(snapshot.fingerprint, identity.fingerprint))
     throw new MigrationError('source-changed', 'The source snapshot changed. Start a new import run.');
   const checkpoint = (position: Position): Checkpoint => ({
-    ...position,
+    pass: position.pass, table: position.table, lastSourceId: position.lastSourceId,
     token: cursors.seal({ runId: identity.runId, generationId: identity.generationId, fingerprint: identity.fingerprint.sha256,
       pass: position.pass, table: position.table }, position.lastSourceId),
   });
@@ -104,8 +105,11 @@ export async function writeMigrationBatch(lease: WriterLease, db: Db, identity: 
   await apply();
   lease.assertHeld();
   assertVerifiedSourceSnapshot(snapshot);
-  const match: Filter<ImportRun> = { ...key, state: current.state, 'fingerprint.sha256': identity.fingerprint.sha256,
-    checkpoint: before ?? { $type: 'null' } };
+  const match: Filter<ImportRun> = {
+    ...key, state: current.state, 'fingerprint.sha256': identity.fingerprint.sha256,
+    ...(before ? { 'checkpoint.token': before.token, 'checkpoint.pass': before.pass, 'checkpoint.table': before.table,
+      'checkpoint.lastSourceId': before.lastSourceId ?? { $type: 'null' } } : { checkpoint: { $type: 'null' } }),
+  };
   const advanced = await records.updateOne(match, { $set: { state: 'staging', checkpoint: next, updatedAt: new Date() } }, durable);
   if (advanced.matchedCount !== 1) throw invalid();
   return next;

@@ -110,7 +110,31 @@ assert receipt.stat().st_mode & 0o777 == 0o600
 saved = json.loads(receipt.read_text())
 assert saved['manifestSha256'] == result['manifestSha256'] and saved['assets'] == result['assets']
 assert 'password' not in receipt.read_text()
+assert len(result['fingerprintSha256']) == 64 and result['fingerprintSha256'] == saved['fingerprint']['sha256']
+assert saved['fingerprint']['version'] == 1
+assert set(saved['fingerprint']['components']) == {'manifest', 'catalog', 'ledger', 'rows', 'assets'}
+assert len(saved['checkpointKey']) == 43 and 'checkpointKey' not in result
 PY
+    local run_id fingerprint
+    read -r run_id fingerprint < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["runId"], v["fingerprintSha256"])' "$1")
+    runuser -u planner -- "$node" --input-type=module - "$run_id" "$fingerprint" <<'JS'
+import assert from 'node:assert/strict';
+const { connectConfiguredNativeMongo } = await import('file:///opt/planner/current/apps/backend/dist/native/mongo-readiness.js');
+const { databaseName } = await import('file:///opt/planner/current/apps/backend/dist/native/mongo-identity.js');
+const client = await connectConfiguredNativeMongo();
+try {
+    const db = client.db(databaseName);
+    const run = await db.collection('importRuns').findOne({ id: process.argv[2] });
+    assert.ok(run);
+    assert.equal(run.state, 'preflighted');
+    assert.equal(run.checkpoint, null);
+    assert.equal(run._id, run.generationId + '/' + run.id);
+    assert.equal(run.fingerprint.sha256, process.argv[3]);
+    assert.equal(Object.hasOwn(run, 'checkpointKey'), false);
+    assert.equal(Object.hasOwn(run, 'inputs'), false);
+    assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, null);
+} finally { await client.close(); }
+JS
 }
 
 for release in 2.3.0 2.3.1; do
