@@ -1279,10 +1279,15 @@ test('project, board and card fields share templates and preserve exact values t
     await dialog.getByRole('button', { name: 'Create group' }).click();
     const boardFields = fields.getByRole('region', { name: 'Release window', exact: true });
     const local = fields.getByRole('region', { name: 'Local release window', exact: true });
+    await expect(local.getByLabel('Deployment note value')).toBeVisible();
     await expect(boardFields.getByRole('button', { name: 'Edit field Deployment note' })).toHaveCount(0);
     const original = '  blue / λ  ';
     await boardFields.getByLabel('Deployment note value').fill(original);
+    const written = editor.waitForResponse((response) =>
+      response.request().method() === 'PUT' && response.url().includes('/field-values/'));
     await boardFields.getByRole('button', { name: 'Save value' }).click();
+    const response = await written;
+    assert.equal(response.status(), 200, await response.text());
     await expect(boardFields.getByRole('button', { name: 'Clear value' })).toBeVisible();
     await local.getByLabel('Deployment note value').fill('0\n');
     await local.getByRole('button', { name: 'Save value' }).click();

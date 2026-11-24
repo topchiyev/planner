@@ -8,7 +8,7 @@ import {
   fieldAudit, fieldEvents, ownedFieldCards, templateInstances, type GroupEdit,
 } from './field-planning.js';
 import { fieldDefinitionRows, fieldValueRows, resolveFieldTemplate, type FieldDefinition, type FieldGroup } from './field-state.js';
-import { changeDefinitionParent, requireLiveField } from './field-structures.js';
+import { changeDefinitionParent } from './field-structures.js';
 import type { WorkspaceRecords, WorkspaceRow } from './records.js';
 import { requireRevision, rowRevision, touchRevision } from './relationship-policy.js';
 
@@ -52,7 +52,8 @@ async function dependentValues(records: WorkspaceRecords, { group, owner }: Grou
 
 export async function planFieldGroupDelete(records: WorkspaceRecords, edit: GroupEdit | undefined, input: GroupDelete,
   { generationId, timestamp }: CommandPlanningContext): Promise<CommandPlan> {
-  const original = requireLiveField(edit);
+  if (!edit) throw new WorkspaceAccessError('missing');
+  const original = edit;
   const { group, owner } = original;
   requireRevision(group, input.expectedRevision);
   const instances = group.scopeType === 'project' ? await templateInstances(records, generationId, group) : [];
@@ -60,8 +61,9 @@ export async function planFieldGroupDelete(records: WorkspaceRecords, edit: Grou
   const baseId = group.scopeType === 'project' ? group.id : template?.id;
   const base = baseId ? (await fieldDefinitionRows(records, generationId, [baseId])).map(({ id }) => id) : [];
   const parents = new Map<string, ReturnType<typeof changeFieldOwner>>();
+  const ownerKey = ({ collection, row }: GroupEdit['owner']) => collection + '/' + row.id;
   const affected = new Map<string, WorkspaceRow<'cards'>>();
-  const boardIds = new Set<string>();
+  const boardIds = new Set(await affectedFieldBoards(records, generationId, owner));
   const effects: PlannedEffect[] = [];
   let removedValues = 0;
   for (const scope of [original, ...instances]) {
@@ -70,14 +72,13 @@ export async function planFieldGroupDelete(records: WorkspaceRecords, edit: Grou
     const values = await dependentValues(records, scope, [...base, ...definitions.map(({ id }) => id)]);
     removedValues += values.effects.length;
     effects.push(...values.effects, ...definitions.map((row) => deleteRow('fieldDefinitions', row)), deleteRow('fieldGroups', member));
-    if (scope.owner.boardId) boardIds.add(scope.owner.boardId);
     for (const card of values.cards) affected.set(card.id, card);
-    parents.set(scope.owner.row.id, changeFieldOwner(scope.owner, timestamp, true));
+    parents.set(ownerKey(scope.owner), changeFieldOwner(scope.owner, timestamp, true));
   }
-  const parent = parents.get(owner.row.id)!;
+  const parent = parents.get(ownerKey(owner))!;
   return {
     effects: [...effects, ...[...parents.values()].map(({ effect }) => effect),
-      ...[...affected.values()].filter(({ id }) => !parents.has(id)).map((card) => touchRevision('cards', card, timestamp))],
+      ...[...affected.values()].filter(({ id }) => !parents.has('cards/' + id)).map((card) => touchRevision('cards', card, timestamp))],
     result: { data: { id: group.id, scopeType: group.scopeType, scopeId: group.scopeId, parentRevision: parent.revision,
       removedGroups: instances.length + 1, removedValues } },
     audit: { ...fieldAudit('fields.deleteGroup', group.id), detail: { removedGroups: instances.length + 1, removedValues } },
@@ -87,7 +88,8 @@ export async function planFieldGroupDelete(records: WorkspaceRecords, edit: Grou
 
 export async function planFieldDefinitionDelete(records: WorkspaceRecords, edit: DefinitionEdit | undefined,
   input: DefinitionDelete, { generationId, timestamp }: CommandPlanningContext): Promise<CommandPlan> {
-  const original = requireLiveField(edit);
+  if (!edit) throw new WorkspaceAccessError('missing');
+  const original = edit;
   const { group, owner, definition } = original;
   requireRevision(definition, input.expectedRevision);
   const instances = group.scopeType === 'project' ? await templateInstances(records, generationId, group) : [];

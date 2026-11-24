@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { RelationshipCommandInput } from '@planner/contracts';
-import { encodeRank } from '../../storage/identity.js';
+import { encodeRank, workspaceKey } from '../../storage/identity.js';
 import type { CommandPlan, CommandPlanningContext, JournalFields, PlannedEffect } from '../command-journal/operation.js';
 import {
-  affectedFieldBoards, changeFieldOwner, fieldAudit, fieldEvents, missingField, nextFieldOrder,
+  affectedFieldBoards, changeFieldOwner, fieldAudit, fieldEvents, nextFieldOrder,
   placeField, validTemplateChoice, type FieldOwner, type GroupEdit,
 } from './field-planning.js';
 import {
@@ -39,7 +39,7 @@ export async function planFieldGroupCreate(records: WorkspaceRecords, owner: Fie
   const parent = changeFieldOwner(owner, timestamp, true);
   const fields = { scopeType, scopeId, name, templateGroupId: templateId, fieldOrderVersion: 1, rank: placement.rank,
     createdAt: timestamp, updatedAt: null };
-  const group: FieldGroup = { ...fields, _id: generationId + '/' + id, generationId, id, revision: 1,
+  const group: FieldGroup = { ...fields, _id: workspaceKey(generationId, id), generationId, id, revision: 1,
     createdAt: new Date(timestamp), rank: encodeRank(placement.rank) };
   return {
     effects: [{ kind: 'insert', collection: 'fieldGroups', id, fields }, ...placement.effects, parent.effect],
@@ -96,7 +96,7 @@ export async function planFieldDefinitionCreate(records: WorkspaceRecords, { gro
   const changedGroup = changeDefinitionParent(group, timestamp, true);
   const fields = { fieldGroupId: group.id, name: input.name, showOnFront: input.showOnFront, rank: placement.rank,
     createdAt: timestamp, updatedAt: null };
-  const definition: FieldDefinition = { ...fields, _id: generationId + '/' + id, generationId, id, revision: 1,
+  const definition: FieldDefinition = { ...fields, _id: workspaceKey(generationId, id), generationId, id, revision: 1,
     createdAt: new Date(timestamp), rank: encodeRank(placement.rank) };
   return {
     effects: [{ kind: 'insert', collection: 'fieldDefinitions', id, fields }, ...placement.effects, changedGroup.effect,
@@ -132,5 +132,3 @@ export async function planFieldDefinitionUpdate(records: WorkspaceRecords, { def
     events: fieldEvents(await affectedFieldBoards(records, generationId, owner)),
   };
 }
-
-export function requireLiveField<T>(edit: T | undefined): T { return edit ?? missingField(); }

@@ -173,12 +173,22 @@ test('project templates, local ordering, promotion and confirmed deletion preser
     const foreign = await f.insert('fieldGroups', fixtureId(575), {
       scopeType: 'board', scopeId: ids.sharedBoard, templateGroupId: template, name: 'Foreign sentinel', rank: '1',
     });
+    const collidingBoard = await f.insert('boards', ids.privateProject, {
+      projectId: ids.privateProject, name: 'Same UUID in another collection', rank: '2048',
+    });
+    const collisionGroup = await f.insert('fieldGroups', fixtureId(574), {
+      scopeType: 'board', scopeId: collidingBoard, templateGroupId: template, name: null, rank: '1',
+    });
+    const unusedBoard = await f.insert('boards', fixtureId(576), {
+      projectId: ids.privateProject, name: 'Template chooser only', rank: '3072',
+    });
     await expectResponse(change(f, manager, 'DELETE', group(template), 1, {}), 422);
     const key = randomUUID();
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await expectResponse(change(f, manager, 'DELETE', group(template), 1, { confirm: true }, key), 204);
-      assert.equal(result.headers['x-planner-removed-groups'], '3');
+      assert.equal(result.headers['x-planner-removed-groups'], '4');
       assert.equal(result.headers['x-planner-removed-values'], '3');
+      assert.equal(result.headers[relationshipParentRevisionHeader], '4');
       assert.equal(result.data, '');
     }
     const refreshed = await data(f.call(card(), editor));
@@ -187,6 +197,14 @@ test('project templates, local ordering, promotion and confirmed deletion preser
     assert.equal(await row(f, 'fieldValues', val), null);
     assert.ok(await row(f, 'fieldGroups', foreign));
     assert.ok(await row(f, 'fieldGroups', promoted.id));
+    assert.equal(await row(f, 'fieldGroups', collisionGroup), null);
+    const projectAfter = await row(f, 'projects', ids.privateProject);
+    const boardAfter = await row(f, 'boards', collidingBoard);
+    assert.deepEqual([projectAfter.revision, projectAfter.fieldGroupOrderVersion, boardAfter.revision, boardAfter.fieldGroupOrderVersion], [4, 4, 2, 2]);
+    const removal = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey: key });
+    const events = await f.db.collection('events').find({ ...f.scope, commandId: removal.id }).toArray();
+    assert.deepEqual(events.map(({ boardId }) => boardId).sort(), [ids.privateBoard, collidingBoard, unusedBoard].sort());
+    assert.ok(events.every(({ kind, payload }) => kind === 'board.invalidated' && Object.keys(payload).length === 0));
     await expectResponse(change(f, editor, 'DELETE', group(template), 1, { confirm: true }, key), 404);
   });
 });
