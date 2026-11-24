@@ -1,7 +1,7 @@
 import { revisionSchema } from '@planner/contracts/storage';
 import type { Document } from 'mongodb';
 import type { PlannedEffect } from '../command-journal/operation.js';
-import { RelationshipError, rowRevision } from './relationship-policy.js';
+import { RelationshipError, rowRevision, touchRevision } from './relationship-policy.js';
 import { canonicalRow, equal, together, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
 const stableIds = { $sort: { id: 1 } };
@@ -19,13 +19,15 @@ export async function planMembershipCleanup(
         boardId, $expr: { $and: [equal('id', '$$sourceListId'), equal('boardId', boardId), exact] },
       }, [{ $limit: 1 }, { $project: { _id: 1 } }]),
       { $match: { 'owningList.0': { $exists: true } } },
-      { $limit: 1 }, { $project: { _id: 1 } },
+      { $limit: 1 }, targets,
     ]);
   }
   const hasCard = { $match: { 'ownedCard.0': { $exists: true } } };
   const links = <T extends 'cardFollows' | 'cardAssignees'>(collection: T) =>
-    records.aggregate<WorkspaceRow<T>>(collection, { userId, $expr: { $and: [exact, equal('userId', userId)] } },
-      [owningCard(), hasCard, stableIds, targets]);
+    records.aggregate<WorkspaceRow<T> & { ownedCard: WorkspaceRow<'cards'>[] }>(
+      collection, { userId, $expr: { $and: [exact, equal('userId', userId)] } },
+      [owningCard(), hasCard, stableIds, { $project: { ...targets.$project, ownedCard: 1 } }],
+    );
   const [boardFollows, cardFollows, assignments, tasks] = await together([
     records.aggregate<WorkspaceRow<'boardFollows'>>('boardFollows', {
       boardId, userId, $expr: { $and: [exact, equal('boardId', boardId), equal('userId', userId)] },
@@ -43,6 +45,8 @@ export async function planMembershipCleanup(
   for (const [collection, rows] of [['boardFollows', boardFollows], ['cardFollows', cardFollows], ['cardAssignees', assignments]] as const) {
     for (const row of rows) effects.push({ kind: 'delete', collection, id: row.id, revision: rowRevision(row) });
   }
+  const assignedCards = new Map(assignments.map(({ ownedCard: [card] }) => [card.id, card]));
+  for (const card of assignedCards.values()) effects.push(touchRevision('cards', card, timestamp));
   for (const row of tasks) {
     const revision = rowRevision(row);
     if (!revisionSchema.safeParse((revision ?? 0) + 1).success) throw new RelationshipError('stale');

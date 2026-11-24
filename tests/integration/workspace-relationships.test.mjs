@@ -88,7 +88,8 @@ test('project manager changes preserve ownership, authorize every field and reco
       assert.match(added.data.id, /^[\da-f-]+-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u);
       await expectResponse(mutate(f, owner, 'POST', manager(ids.privateProject), { userId: ids.createOnlyOwner }), 409, 'RELATIONSHIP_EXISTS');
       await expectResponse(f.call(board(sibling), newcomer), 200);
-      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 2, type: 'private' }), 409, 'OWNER_REQUIRES_SOLE_MANAGER');
+      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 2, type: 'private' }), 409, 'REVISION_CONFLICT');
+      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 3, type: 'private' }), 409, 'OWNER_REQUIRES_SOLE_MANAGER');
 
       await expectResponse(mutate(f, newcomer, 'POST', member(ids.privateBoard), { userId: ids.createOnlyOwner, role: 'viewer' }), 200);
       const removalKey = randomUUID();
@@ -96,19 +97,20 @@ test('project manager changes preserve ownership, authorize every field and reco
       await expectResponse(mutate(f, newcomer, 'DELETE', manager(ids.privateProject, ids.createOnlyOwner), { revision: 1 }, { key: removalKey }), 403);
       await expectResponse(f.call(board(sibling), newcomer), 404);
       await expectResponse(f.call(board(ids.privateBoard), newcomer), 200);
-      await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 2, type: 'private' }), 403);
+      await expectResponse(mutate(f, owner, 'PATCH', privatePath, { revision: 4, type: 'private' }), 403);
 
       await f.insert('projectManagers', disabledManager, { projectId: ids.privateProject, userId: ids.disabledMember });
       await expectResponse(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.privateOwner), { revision: 1 }), 200);
-      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 2, type: 'private' }), 409, 'OWNER_REQUIRES_SOLE_MANAGER');
+      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 5, type: 'private' }), 409, 'OWNER_REQUIRES_SOLE_MANAGER');
       await expectResponse(mutate(f, admin, 'POST', manager(ids.privateProject), { userId: ids.privateOwner }), 200);
       await expectResponse(mutate(f, admin, 'DELETE', manager(ids.privateProject, ids.disabledMember), { revision: 1 }), 200);
       const sole = await list(f, admin, manager(ids.privateProject), 'projects.managers');
       assert.equal(sole.data.length, 1);
       const ownerEdge = sole.data[0].id;
-      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 2, type: 'private' }), 200);
+      await expectResponse(mutate(f, admin, 'PATCH', privatePath, { revision: 7, type: 'private' }), 200);
       const converted = await f.db.collection('projects').findOne({ ...f.scope, id: ids.privateProject });
       assert.equal(converted.ownerProjectManagerId, ownerEdge);
+      assert.equal(converted.revision, 8);
       await expectResponse(f.call(board(sibling), admin), 404);
       await expectResponse(f.call(board(sibling), owner), 200);
       await expectResponse(f.call(card(ids.activeCard), viewer), 200);
@@ -166,6 +168,7 @@ test('board membership scope respects low-role self-add, exact roster scope and 
       const replay = await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer', canComment: false }, { key }), 200);
       assert.deepEqual(replay, added);
       await expectResponse(mutate(f, low, 'POST', endpoint, { userId: ids.commentingViewer, role: 'viewer', canComment: true }, { key }), 409, 'IDEMPOTENCY_CONFLICT');
+      assert.equal((await expectResponse(f.call(board(ids.sharedBoard), low), 200)).data.revision, 2);
       const roster = await list(f, low, endpoint, 'boards.members');
       assert.deepEqual(roster.data.find(({ id }) => id === added.data.id), {
         id: added.data.id, userId: ids.commentingViewer, person: { id: ids.commentingViewer, name: 'Fixture commenting-viewer', username: 'commenting-viewer' },
@@ -191,6 +194,7 @@ test('board membership scope respects low-role self-add, exact roster scope and 
       const removal = await expectResponse(mutate(f, low, 'DELETE', endpoint + '/' + ids.commentingViewer, { revision: 1 }), 200);
       assert.deepEqual(removal.data, { id: added.data.id });
       const surviving = await expectResponse(f.call(board(ids.sharedBoard), low), 200);
+      assert.equal(surviving.data.revision, 5);
       assert.equal(surviving.data.permissions.canManage, true);
       assert.equal(surviving.data.permissions.canFollow, false);
       const adminEdge = await expectResponse(mutate(f, managerCookie, 'POST', endpoint, { userId: ids.admin, role: 'viewer' }), 200);
@@ -288,7 +292,13 @@ test('interrupted multi-batch removal replays exact cleanup without returning st
       await assert.rejects(f.gate.readSnapshot(async () =>
         (await resolveBrowserWorkspace(f.db, f.installationId, token, f.now())).requireAttachment(attachment)),
       (error) => error.statusCode === 404);
-      await expectResponse(f.call(card(ids.activeCard), owner), 200);
+      const own = await expectResponse(f.call(card(ids.activeCard), owner), 200);
+      assert.equal(own.data.revision, 2);
+      assert.equal((await expectResponse(f.call(board(ids.privateBoard), owner), 200)).data.revision, 2);
+      const cards = await f.db.collection('cards').find({ ...f.scope,
+        id: { $in: [...cardLinks, ids.sharedTarget, siblingCard] } }).toArray();
+      assert.equal(cards.length, 5);
+      for (const { id, revision } of cards) assert.equal(revision, cardLinks.includes(id) ? 2 : 1);
 
       assert.equal(await f.db.collection('boardFollows').countDocuments({ ...departing, boardId: ids.privateBoard }), 0);
       assert.equal(await f.db.collection('boardFollows').countDocuments({ ...departing, boardId: ids.sharedBoard }), 1);

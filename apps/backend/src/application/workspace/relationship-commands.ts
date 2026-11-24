@@ -5,7 +5,7 @@ import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
-  availableAccount, managerEdges, memberPermissions, RelationshipError, requireBoardManagement, requireRevision, soleEligibleManager,
+  availableAccount, managerEdges, memberPermissions, RelationshipError, requireBoardManagement, requireRevision, soleEligibleManager, touchRevision,
 } from './relationship-policy.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecords } from './records.js';
 
@@ -111,65 +111,77 @@ export function createRelationshipJournalOperations(
       };
     }),
     'projects.addManager': define('projects.addManager', (scope, input) => managerAccess(scope, input.id),
-      async (records, _access, input, context) => {
+      async (records, access, input, context) => {
         if (!availableAccount(await records.get('users', input.userId), 'manager')) throw new RelationshipError('target');
         if (await records.first('projectManagers', edgeFilter('projectId', input.id, input.userId))) throw new RelationshipError('duplicate');
         const id = randomUUID();
         return {
-          effects: [{ kind: 'insert', collection: 'projectManagers', id, revision: 1,
-            fields: { projectId: input.id, userId: input.userId, createdAt: context.timestamp } }],
+          effects: [
+            { kind: 'insert', collection: 'projectManagers', id, revision: 1,
+              fields: { projectId: input.id, userId: input.userId, createdAt: context.timestamp } },
+            touchRevision('projects', access.project, context.timestamp),
+          ],
           result: { data: { id, revision: 1 } },
           audit: { action: 'projects.addManager', resourceId: input.id, resourceType: 'project', detail: { userId: input.userId } },
           events: await projectEvents(records, context.generationId, input.id),
         };
       }),
     'projects.removeManager': define('projects.removeManager', (scope, input) => managerAccess(scope, input.id),
-      async (records, _access, input, context) => {
+      async (records, access, input, context) => {
         const edge = await records.first('projectManagers', edgeFilter('projectId', input.id, input.userId));
         if (!edge) throw new WorkspaceAccessError('missing');
         const revision = requireRevision(edge, input.revision);
         if ((await managerEdges(records, context.generationId, input.id)).length < 2) throw new RelationshipError('lastManager');
         return {
-          effects: [{ kind: 'delete', collection: 'projectManagers', id: edge.id, revision }],
+          effects: [
+            { kind: 'delete', collection: 'projectManagers', id: edge.id, revision },
+            touchRevision('projects', access.project, context.timestamp),
+          ],
           result: { data: { id: edge.id } },
           audit: { action: 'projects.removeManager', resourceId: input.id, resourceType: 'project', detail: { userId: input.userId } },
           events: await projectEvents(records, context.generationId, input.id),
         };
       }),
     'boards.addMember': define('boards.addMember', (scope, input) => boardManagement(scope, input.id, input.userId),
-      async (records, _access, input, context) => {
+      async (records, access, input, context) => {
         if (!availableAccount(await records.get('users', input.userId), 'member')) throw new RelationshipError('target');
         if (await records.first('boardMembers', edgeFilter('boardId', input.id, input.userId))) throw new RelationshipError('duplicate');
         const id = randomUUID();
         return {
-          effects: [{ kind: 'insert', collection: 'boardMembers', id, revision: 1, fields: {
-            boardId: input.id, userId: input.userId, role: input.role, canComment: input.canComment, createdAt: context.timestamp,
-          } }],
+          effects: [
+            { kind: 'insert', collection: 'boardMembers', id, revision: 1, fields: {
+              boardId: input.id, userId: input.userId, role: input.role, canComment: input.canComment, createdAt: context.timestamp,
+            } },
+            touchRevision('boards', access.board, context.timestamp),
+          ],
           result: { data: { id, revision: 1 } },
           audit: { action: 'boards.addMember', resourceId: input.id, resourceType: 'board', detail: { userId: input.userId } },
           events: [invalidate(input.id)],
         };
       }),
     'boards.updateMember': define('boards.updateMember', (scope, input) => boardManagement(scope, input.id),
-      async (records, _access, input, context) => {
+      async (records, access, input, context) => {
         const edge = await memberEdge(records, input.id, input.userId);
         const revision = requireRevision(edge, input.revision, true);
         const membership = memberPermissions(input.role ?? edge.role, input.canComment, edge.role === 'viewer' && edge.canComment === true);
         return {
-          effects: [{ kind: 'update', collection: 'boardMembers', id: edge.id, revision, fields: { ...membership, updatedAt: context.timestamp } }],
+          effects: [
+            { kind: 'update', collection: 'boardMembers', id: edge.id, revision, fields: { ...membership, updatedAt: context.timestamp } },
+            touchRevision('boards', access.board, context.timestamp),
+          ],
           result: { data: { id: edge.id, revision: (revision ?? 0) + 1 } },
           audit: { action: 'boards.updateMember', resourceId: input.id, resourceType: 'board', detail: { userId: input.userId } },
           events: [invalidate(input.id)],
         };
       }),
     'boards.removeMember': define('boards.removeMember', boardRemoval,
-      async (records, _access, input, context) => {
+      async (records, access, input, context) => {
         const edge = await memberEdge(records, input.id, input.userId);
         const revision = requireRevision(edge, input.revision);
         const cleanup = await planMembershipCleanup(records, context.generationId, input.id, input.userId, context.timestamp);
         const removal: PlannedEffect = { kind: 'delete', collection: 'boardMembers', id: edge.id, revision };
         return {
-          effects: [removal, ...cleanup],
+          effects: [removal, touchRevision('boards', access.board, context.timestamp), ...cleanup],
           result: { data: { id: edge.id } },
           audit: { action: 'boards.removeMember', resourceId: input.id, resourceType: 'board', detail: { userId: input.userId } },
           events: [invalidate(input.id)],

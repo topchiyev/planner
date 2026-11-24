@@ -1,6 +1,7 @@
 import { publicIdSchema, revisionSchema } from '@planner/contracts/storage';
 import { workspaceKey } from '../../storage/identity.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
+import type { PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { canonicalRow, equal, publicIdField, type WorkspaceRecords, type WorkspaceRow } from './records.js';
 
@@ -76,4 +77,11 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
     throw new RelationshipError('stale');
   }
   return revision;
+}
+
+export function touchRevision(
+  collection: 'projects' | 'boards' | 'cards', row: Parameters<typeof rowRevision>[0] & { revision: number }, timestamp: string,
+): PlannedEffect {
+  const revision = requireRevision(row, row.revision, true);
+  return { kind: 'update', collection, id: row.id, revision, fields: { updatedAt: timestamp } };
 }
