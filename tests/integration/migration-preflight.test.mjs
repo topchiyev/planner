@@ -19,7 +19,8 @@ import { inspectMigration, withMigrationSnapshot } from '../../apps/backend/dist
 import { parseSourceService } from '../../apps/backend/dist/application/migration/source-service.js';
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { prepareMigration } from '../../apps/backend/dist/application/migration/prepare.js';
-import { assertMigrationCapacity } from '../../apps/backend/dist/native/migration-state.js';
+import { anchoredDirectory } from '../../apps/backend/dist/application/backup/archive.js';
+import { assertMigrationCapacity, persistMigrationPreflight } from '../../apps/backend/dist/native/migration-state.js';
 import { legacyPublicId, workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
@@ -174,6 +175,10 @@ test('both synthetic restored tags match the native-source preflight through a t
               last = batch.lastSourceId;
             }
           }
+          const lastPage = await snapshot.readBatch('card', '9007199254740996', 2);
+          assert.deepEqual(lastPage.rows.map(({ id }) => id), ['9007199254740997', '9007199254740998']);
+          assert.equal(lastPage.hasMore, false);
+          assert.equal((await snapshot.readBatch('card', '9007199254740995', 2)).hasMore, true);
           return output;
         });
       assert.deepEqual(reading.fingerprint, accepted.fingerprint);
@@ -327,8 +332,6 @@ test('both synthetic restored tags match the native-source preflight through a t
 async function testBatchRecovery({ request, config, receipt, postgres, database }) {
   await withFixtureMongo(async ({ db, directory }) => {
     const installationId = randomUUID();
-    const generationId = randomUUID();
-    const runId = randomUUID();
     const writerPath = join(directory, 'writer');
     await mkdir(writerPath, { mode: 0o750 });
     await chmod(writerPath, 0o750);
@@ -336,9 +339,46 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
     await install.insertOne({ _id: 'installation', installationId, schemaVersion: 0, activeGenerationId: null,
       setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: null } });
     await migrateStorageSchema(db, installationId);
+    const preflightPath = join(directory, 'migration');
+    await mkdir(preflightPath, { mode: 0o700 });
+    const records = db.collection('importRuns');
+    const capture = { mongoBytes: '1', blobBytes: '2', stagingBytes: '3' };
+    let interrupted;
+    let intentBytes;
+    async function publish(hook) {
+      const ownedDirectory = await anchoredDirectory(preflightPath, owner, 0o700);
+      const publication = acquireWriterDirectory(writerPath, owner, owner);
+      try {
+        return await persistMigrationPreflight(publication, db, installationId, ownedDirectory, owner,
+          request, receipt, capture, hook);
+      } finally { publication.release(); await ownedDirectory.close(); }
+    }
+    await assert.rejects(publish(async () => {
+      interrupted = await records.findOne({ installationId });
+      const names = await readdir(preflightPath);
+      assert.equal(names.length, 1);
+      assert.match(names[0], /^\.intent-/u);
+      intentBytes = await readFile(join(preflightPath, names[0]));
+      assert.equal(interrupted.id, JSON.parse(intentBytes).runId);
+      throw new Error('Interrupted after acknowledged Mongo write.');
+    }), refuses('target-write'));
+    assert.equal(await records.countDocuments(), 1);
+    assert.ok(interrupted && intentBytes);
+    await records.updateOne({ _id: interrupted._id }, { $set: { 'fingerprint.sha256': '0'.repeat(64) } }, durable);
+    await assert.rejects(publish(), refuses('target-write'));
+    assert.equal((await readdir(preflightPath)).length, 1);
+    await records.updateOne({ _id: interrupted._id }, { $set: { fingerprint: interrupted.fingerprint } }, durable);
+    const completed = await publish();
+    assert.equal(completed.runId, interrupted.id);
+    assert.deepEqual(await readFile(join(preflightPath, completed.runId + '.json')), intentBytes);
+    assert.deepEqual(await publish(), completed);
+    assert.equal(await records.countDocuments(), 1);
+    assert.equal(Object.hasOwn(completed, 'checkpointKey'), false);
+    assert.equal(Object.hasOwn(interrupted, 'checkpointKey'), false);
+
+    const { id: runId, generationId } = interrupted;
     const identity = { installationId, generationId, runId, fingerprint: receipt.fingerprint };
     const key = importRunKey(identity);
-    const records = db.collection('importRuns');
     const staged = db.collection('cards');
     const cursorScope = { generationId, runId, fingerprint: receipt.fingerprint.sha256, pass: 'reserve', table: 'card' };
     const cursors = migrationCursors(randomBytes(32));
@@ -353,9 +393,6 @@ async function testBatchRecovery({ request, config, receipt, postgres, database 
     const tampered = atStart[0] === 'A' ? 'B' + atStart.slice(1) : 'A' + atStart.slice(1);
     assert.throws(() => cursors.open(cursorScope, tampered), refuses('target-write'));
 
-    await records.insertOne({ ...key, state: 'preflighted', fingerprint: identity.fingerprint,
-      manifestSha256: receipt.manifestSha256, checkpoint: null, createdAt: new Date(), updatedAt: new Date(),
-      source: { instanceId: receipt.capture.source.instanceId, edition: 'community', release: receipt.capture.source.release } }, durable);
     const lease = acquireWriterDirectory(writerPath, owner, owner);
     let expiredProof;
     const run = (callback) => withMigrationSnapshot(request, owner, config, undefined,

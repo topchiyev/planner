@@ -178,23 +178,28 @@ export async function readSourceBatch<T extends SourceTable>(client: Client, tab
   const collation = table === 'uploaded_file' ? ' COLLATE "C"' : '';
   const where = lastSourceId === null ? '' : `WHERE src.id${collation} > $4::${table === 'uploaded_file' ? 'text' : 'bigint'}${collation}`;
   if (lastSourceId !== null) parameters.push(sourceKey(table, lastSourceId));
-  const result = await client.query<{ key: string; payload: string | null; bytes: number }>(`
-    WITH encoded AS MATERIALIZED (
-      SELECT src.id AS key, pg_catalog.json_build_array(${fields.map(([name, field]) => fieldSql(name, field)).join(', ')} )::text AS payload
-      FROM public."${table}" AS src
+  const result = await client.query<{ key: string; payload: string | null; bytes: number; has_more: boolean }>(`
+    WITH candidates AS MATERIALIZED (
+      SELECT src.id AS key FROM public."${table}" AS src
       ${where}
-      ORDER BY src.id${collation} LIMIT $1::integer
+      ORDER BY src.id${collation} LIMIT ($1::integer + 1)
+    ), selected AS (
+      SELECT key FROM candidates ORDER BY key${collation} LIMIT $1::integer
+    ), encoded AS MATERIALIZED (
+      SELECT selected.key, pg_catalog.json_build_array(${fields.map(([name, field]) => fieldSql(name, field)).join(', ')})::text AS payload
+      FROM selected JOIN public."${table}" AS src ON src.id${collation} = selected.key${collation}
     ), sized AS (
       SELECT key, payload, pg_catalog.octet_length(payload) AS bytes,
         sum(pg_catalog.octet_length(payload)) OVER (ORDER BY key${collation}) AS running
       FROM encoded
     )
-    SELECT key::text, bytes, CASE WHEN running <= $2::integer AND bytes <= $3::integer THEN payload END AS payload
+    SELECT key::text, bytes, CASE WHEN running <= $2::integer AND bytes <= $3::integer THEN payload END AS payload,
+      (SELECT count(*) > $1::integer FROM candidates) AS has_more
     FROM sized ORDER BY sized.key${collation}
   `, parameters);
   const rows: SourceRow<T>[] = [];
   let after = lastSourceId;
-  let hasMore = result.rows.length === limit;
+  let hasMore = result.rows[0]?.has_more ?? false;
   for (const { key, payload, bytes } of result.rows) {
     if (!Number.isInteger(bytes) || bytes > maximumRowBytes) throw invalid();
     if (payload === null) { hasMore = true; break; }

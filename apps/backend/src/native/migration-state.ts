@@ -1,20 +1,24 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
-import { lstat, open, mkdir, link, unlink, statfs } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, mkdir, rename, unlink, statfs, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { publicIdSchema, generationIdSchema, utcInstantSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
-import { anchoredDirectory, fdPath } from '../application/backup/archive.js';
+import { anchoredDirectory, childPath, fdPath, fileChunks, type Owner } from '../application/backup/archive.js';
 import type { WriterLease } from '../application/command-gate/writer-lease.js';
 import { durable } from '../application/command-journal/records.js';
 import { importRunKey, type ImportRun } from '../application/migration/checkpoint.js';
-import { MigrationError } from '../application/migration/manifest.js';
+import { MigrationError, sha256 } from '../application/migration/manifest.js';
 import type { inspectMigration, MigrationInput } from '../application/migration/preflight.js';
 import { readInstallation, verifyStorageSchema } from '../storage/schema.js';
 
 const root = { uid: 0, gid: 0 };
 const stateDirectory = '/var/lib/planner/migration';
 const reserve = 512n * 1024n * 1024n;
-type Estimate = Awaited<ReturnType<typeof inspectMigration>>['estimates'];
+type Preflight = Awaited<ReturnType<typeof inspectMigration>>;
+type Estimate = Preflight['estimates'];
+type Capacity = ReturnType<typeof assertMigrationCapacity>;
 type Volume = { id: bigint; free: bigint };
 
 export function assertMigrationCapacity(estimate: Estimate, volumes: { mongo: Volume; blobs: Volume; staging: Volume }) {
@@ -53,16 +57,49 @@ export async function assertMigrationTarget(db: Db, installationId: string) {
     throw new MigrationError('target-setup', 'Complete import-mode setup on an inactive installation before migration preflight.');
 }
 
-export async function publishMigrationPreflight(
-  lease: WriterLease, db: Db, installationId: string, input: MigrationInput, receipt: Awaited<ReturnType<typeof inspectMigration>>,
-) {
-  lease.assertHeld();
-  await assertMigrationTarget(db, installationId);
-  const capacity = await checkMigrationCapacity(receipt.estimates);
-  const runId = randomUUID();
-  const generationId = randomUUID();
-  const now = new Date();
-  const output = {
+function publishFailure() {
+  return new MigrationError('target-write', 'The protected migration preflight receipt could not be published.');
+}
+
+function errno(error: unknown, code: string) {
+  return error && typeof error === 'object' && 'code' in error && error.code === code;
+}
+
+async function readRecord(directory: FileHandle, name: string, owner: Owner) {
+  let file: FileHandle;
+  try { file = await open(childPath(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (error) {
+    if (errno(error, 'ENOENT')) return undefined;
+    throw error;
+  }
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.uid !== owner.uid || before.gid !== owner.gid
+      || (before.mode & 0o7777) !== 0o600 || before.nlink !== 1 || !before.size || before.size > 64 * 1024) throw publishFailure();
+    const chunks: Buffer[] = [];
+    for await (const chunk of fileChunks(file, before.size)) chunks.push(chunk);
+    const after = await file.stat();
+    if (before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw publishFailure();
+    return Buffer.concat(chunks, before.size);
+  } finally { await file.close(); }
+}
+
+async function writeRecord(directory: FileHandle, name: string, bytes: Buffer) {
+  const temp = childPath(directory, '.write-' + randomUUID());
+  const file = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    try {
+      await file.writeFile(bytes);
+      await file.sync();
+    } finally { await file.close(); }
+    await rename(temp, childPath(directory, name));
+  } finally {
+    await unlink(temp).catch((error: unknown) => { if (!errno(error, 'ENOENT')) throw error; });
+  }
+}
+
+function publicReceipt(runId: string, receipt: Preflight, capacity: Capacity) {
+  return {
     runId, manifestSha256: receipt.manifestSha256, state: 'preflighted',
     fingerprintSha256: receipt.fingerprint.sha256,
     sourceRelease: receipt.capture.source.release, sourceEdition: receipt.capture.source.edition,
@@ -70,48 +107,78 @@ export async function publishMigrationPreflight(
     assets: receipt.assets, eligibleUnderDefaultPolicy: receipt.assets.missingOriginals === 0,
     rows: receipt.rows, capacity,
   };
+}
+
+export async function persistMigrationPreflight(
+  lease: WriterLease, db: Db, installationId: string, directory: FileHandle, owner: Owner,
+  input: MigrationInput, receipt: Preflight, capacity: Capacity, afterMongo?: () => Promise<void>,
+) {
   const { source, asset, capturedAt } = receipt.capture;
-  const record = JSON.stringify({ formatVersion: 1, installationId, generationId, createdAt: now.toISOString(),
-    checkpointKey: randomBytes(32).toString('base64url'), fingerprint: receipt.fingerprint,
-    capture: { source, asset, capturedAt, dump: receipt.dump }, inputs: input, ...output }) + '\n';
+  const capture = { source, asset, capturedAt, dump: receipt.dump };
+  const id = sha256(Buffer.from(JSON.stringify([
+    installationId, receipt.manifestSha256, receipt.fingerprint.sha256,
+    input.manifest, input.sourceService, input.assetsRoot ?? null, input.assetService ?? null,
+  ])));
+  const intent = '.intent-' + id + '.json';
+  try {
+    lease.assertHeld();
+    let bytes = await readRecord(directory, intent, owner);
+    if (!bytes) {
+      bytes = Buffer.from(JSON.stringify({
+        formatVersion: 1, installationId, generationId: randomUUID(), createdAt: new Date().toISOString(),
+        checkpointKey: randomBytes(32).toString('base64url'), fingerprint: receipt.fingerprint, capture, inputs: input,
+        ...publicReceipt(randomUUID(), receipt, capacity),
+      }) + '\n');
+      // Keep this private intent discoverable until and after both stores acknowledge the same identities.
+      lease.assertHeld();
+      await writeRecord(directory, intent, bytes);
+    }
+    const saved = JSON.parse(bytes.toString());
+    const runId = publicIdSchema.parse(saved.runId);
+    const generationId = generationIdSchema.parse(saved.generationId);
+    const createdAt = new Date(utcInstantSchema.parse(saved.createdAt));
+    if (runId === generationId || saved.formatVersion !== 1 || saved.installationId !== installationId
+      || saved.manifestSha256 !== receipt.manifestSha256 || saved.fingerprintSha256 !== receipt.fingerprint.sha256
+      || !isDeepStrictEqual(saved.fingerprint, receipt.fingerprint) || !isDeepStrictEqual(saved.capture, capture)
+      || !isDeepStrictEqual(saved.inputs, input) || typeof saved.checkpointKey !== 'string'
+      || !/^[\w-]{43}$/u.test(saved.checkpointKey)
+      || Buffer.from(saved.checkpointKey, 'base64url').toString('base64url') !== saved.checkpointKey) throw publishFailure();
+    const name = runId + '.json';
+    const published = await readRecord(directory, name, owner);
+    if (published && !published.equals(bytes)) throw publishFailure();
+
+    const key = importRunKey({ generationId, installationId, runId });
+    const row: ImportRun = {
+      ...key, state: 'preflighted', checkpoint: null, manifestSha256: receipt.manifestSha256,
+      fingerprint: receipt.fingerprint, createdAt, updatedAt: createdAt,
+      source: { instanceId: source.instanceId, release: source.release, edition: source.edition },
+    };
+    lease.assertHeld();
+    await directory.sync();
+    const runs = db.collection<ImportRun>('importRuns');
+    await runs.updateOne(key, { $setOnInsert: row }, { ...durable, upsert: true });
+    if (!isDeepStrictEqual(await runs.findOne(key), row)) throw publishFailure();
+    await afterMongo?.();
+    lease.assertHeld();
+    if (!published) await writeRecord(directory, name, bytes);
+    await directory.sync();
+    return publicReceipt(runId, receipt, capacity);
+  } catch { throw publishFailure(); }
+}
+
+export async function publishMigrationPreflight(
+  lease: WriterLease, db: Db, installationId: string, input: MigrationInput, receipt: Preflight,
+) {
+  lease.assertHeld();
+  await assertMigrationTarget(db, installationId);
+  const capacity = await checkMigrationCapacity(receipt.estimates);
   const parent = await anchoredDirectory('/var/lib/planner', root, 0o711);
   try {
-    try {
-      await mkdir(join(fdPath(parent), 'migration'), { mode: 0o700 });
-      await parent.sync();
-    } catch (error) {
-      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST')) throw error;
-    }
+    try { await mkdir(join(fdPath(parent), 'migration'), { mode: 0o700 }); }
+    catch (error) { if (!errno(error, 'EEXIST')) throw error; }
+    await parent.sync();
   } finally { await parent.close(); }
-  const dir = await anchoredDirectory(stateDirectory, root, 0o700);
-  const pending = join(fdPath(dir), '.preflight-' + runId);
-  let owned: Stats | undefined;
-  try {
-    const file = await open(pending, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try {
-      owned = await file.stat();
-      await file.writeFile(record);
-      await file.sync();
-    } finally { await file.close(); }
-    lease.assertHeld();
-    await db.collection<ImportRun>('importRuns').insertOne({
-      ...importRunKey({ generationId, installationId, runId }), state: 'preflighted', checkpoint: null,
-      manifestSha256: receipt.manifestSha256, fingerprint: receipt.fingerprint, createdAt: now, updatedAt: now,
-      source: { instanceId: source.instanceId, release: source.release, edition: source.edition },
-    }, durable);
-    await link(pending, join(fdPath(dir), runId + '.json'));
-    await unlink(pending);
-    owned = undefined;
-    await dir.sync();
-  } catch {
-    throw new MigrationError('target-write', 'The protected migration preflight receipt could not be published.');
-  } finally {
-    try {
-      if (owned) {
-        const candidate = await lstat(pending).catch(() => undefined);
-        if (candidate?.ino === owned.ino && candidate.dev === owned.dev) await unlink(pending);
-      }
-    } finally { await dir.close(); }
-  }
-  return output;
+  const directory = await anchoredDirectory(stateDirectory, root, 0o700);
+  try { return await persistMigrationPreflight(lease, db, installationId, directory, root, input, receipt, capacity); }
+  finally { await directory.close(); }
 }
