@@ -10,14 +10,16 @@ import { MigrationError } from './manifest.js';
 import { assertVerifiedSourceSnapshot, type VerifiedSourceSnapshot } from './preflight.js';
 import { maximumSourceBatch, projectedSourceTables } from './source-projections.js';
 import { openImportRecords, type ImportedEntity } from './staged-records.js';
+import { relationshipRankTables, workspaceRelationshipTables, writeWorkspaceRelationship } from './workspace-relationships.js';
 
 const reservable = (table: typeof projectedSourceTables[number]): table is ImportedEntity => table !== 'internal_config' && table !== 'storage_usage';
 const stageTables = [
   { pass: 'reserve', tables: projectedSourceTables.filter(reservable) },
   { pass: 'base', tables: baseWorkspaceTables },
   { pass: 'edges', tables: baseRelationshipTables },
+  { pass: 'deferred', tables: workspaceRelationshipTables },
 ] as const;
-const rankTables = new Set(['project', 'board', 'list', 'card']);
+const rankTables = new Set(['project', 'board', 'list', 'card', ...relationshipRankTables]);
 const passOrdinal = ['reserve', 'base', 'edges', 'deferred', 'projections'];
 
 /** Stage the account and core workspace graph without enabling access or producing domain events. */
@@ -47,7 +49,7 @@ export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: I
         || projectedSourceTables.indexOf(checkpoint.table) - projectedSourceTables.indexOf(table));
       if (previous !== null && (previous > 0 || (previous === 0 && checkpoint?.lastSourceId === null))) continue;
       let after = previous === 0 ? checkpoint?.lastSourceId ?? null : null;
-      const rank = pass === 'base' && rankTables.has(table)
+      const rank = (pass === 'base' || pass === 'deferred') && rankTables.has(table)
         ? openBaseOrder(db, generationId, table as Parameters<typeof openBaseOrder>[2], after, 'rank') : null;
       const history = pass === 'base' && table === 'card' ? openBaseOrder(db, generationId, table, after, 'history') : null;
       try {
@@ -64,6 +66,9 @@ export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: I
                   await reserveSourceRecord(records, { table, row });
                 } else if (pass === 'edges') {
                   await writeBaseRelationship(records, capturedAt, { table, row } as Parameters<typeof writeBaseRelationship>[2]);
+                } else if (pass === 'deferred') {
+                  await writeWorkspaceRelationship(records, capturedAt, { table, row } as Parameters<typeof writeWorkspaceRelationship>[2],
+                    await rank?.take(row.id) ?? null);
                 } else {
                   if (table === 'board') await assertBoardSystemLists(db, generationId, row.id);
                   const position = await rank?.take(row.id) ?? null;

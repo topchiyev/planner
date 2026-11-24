@@ -8,6 +8,8 @@ import type { WorkspaceCollection } from '../../storage/catalog.js';
 import { legacyPublicId, workspaceKey } from '../../storage/identity.js';
 import { verifyStorageSchema } from '../../storage/schema.js';
 import { workspaceInsertFields, type WorkspaceFields } from '../../storage/scoped.js';
+import { eligibleBoardPeople } from '../workspace/eligible-members.js';
+import { createWorkspaceRecords, type WorkspaceRecordName } from '../workspace/records.js';
 import type { ImportIdentity } from './checkpoint.js';
 import { MigrationError } from './manifest.js';
 import { sourceKey, type SourceTable } from './source-projections.js';
@@ -30,6 +32,7 @@ export type ImportProvenance = SourceTimes & {
   backgroundGradient?: string | null;
   unrecognizedGradient?: true;
   unsupportedPreferences?: string[];
+  linkedTask?: { sourceCardId: string; name: string; completed: boolean; missingTarget: boolean };
 };
 
 export type ImportReference = { parent: string; kind?: string };
@@ -54,6 +57,7 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
   }
   lease.assertHeld();
   const ids = db.collection<ImportMap>('importIds');
+  const staged = createWorkspaceRecords(db, generationId);
   const key = (id: string) => ({ _id: workspaceKey(generationId, id), generationId, id });
   const publicId = (entity: ImportedEntity, id: string) => legacyPublicId(sourceInstanceId, entity, sourceKey(entity, id));
 
@@ -89,6 +93,14 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
   return {
     publicId,
     mapping,
+    get<K extends WorkspaceRecordName>(collection: K, id: string) {
+      lease.assertHeld();
+      return staged.get(collection, id);
+    },
+    async eligibleBoardMember(boardId: string, userId: string) {
+      lease.assertHeld();
+      return (await eligibleBoardPeople(staged, generationId, boardId, { id: userId })).length === 1;
+    },
     resolve,
     async require(entity: ImportedEntity, sourceId: string) {
       const id = await resolve(entity, sourceId);

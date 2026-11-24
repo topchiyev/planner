@@ -2,8 +2,9 @@ import { maximumSignedInt64, rankSpacing } from '@planner/contracts/storage';
 import { Long, type Db, type Document } from 'mongodb';
 import { invalidBaseRow } from './base-fields.js';
 import { compareSourceKeys } from './source-projections.js';
+import type { relationshipRankTables } from './workspace-relationships.js';
 
-type OrderedTable = 'project' | 'board' | 'list' | 'card';
+type OrderedTable = 'project' | 'board' | 'list' | 'card' | typeof relationshipRankTables[number];
 type OrderRow = { sourceId: string; ordinal: Long | number };
 
 function ordinal(row: OrderRow, spacing: bigint) {
