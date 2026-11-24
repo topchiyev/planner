@@ -695,3 +695,135 @@ test('project deletion confirms and sends an exact imported name with spaces and
     assert.equal(await fixture.db.collection('projects').findOne({ ...fixture.scope, id }), null);
   });
 });
+
+test('desktop editors create a closed card and use rich text, ID-backed mentions and a local-only stopwatch', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture: f, origin, page }) => {
+    for (let index = 0; index < 12; index++) {
+      const userId = fixtureId(12000 + index);
+      await f.insert('users', userId, { normalizedEmail: `alias-${index}@planner.invalid`, normalizedUsername: null,
+        name: 'Shared alias', username: null, role: 'boardUser', disabledAt: null });
+      await f.insert('boardMembers', fixtureId(13000 + index), { boardId: ids.privateBoard, userId, role: 'viewer', canComment: false });
+    }
+    const editor = await page({ width: 1440, height: 900 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(origin + board(ids.privateBoard) + '?view=grid');
+    await editor.getByRole('button', { name: 'Add card to Done', exact: true }).click();
+    const create = editor.getByRole('dialog', { name: 'Add card' });
+    await create.getByLabel('Card name').fill('Closed orbit fixture');
+    await create.getByRole('button', { name: 'Create card' }).click();
+    const inspector = editor.getByRole('complementary', { name: 'Closed orbit fixture' });
+    await expect(inspector.getByRole('heading', { name: 'Closed orbit fixture' })).toBeVisible();
+    await expect(inspector.getByLabel('Card closed')).toBeChecked();
+    assert.equal(new URL(editor.url()).searchParams.get('view'), 'grid');
+    const cardId = new URL(editor.url()).pathname.split('/').at(-1);
+
+    const modes = inspector.getByRole('group', { name: 'Description editor mode' });
+    await expect(modes.getByRole('button', { name: 'Rich text' })).toHaveAttribute('aria-pressed', 'true');
+    const description = inspector.getByRole('textbox', { name: 'Description' });
+    await description.fill('Spectral log 🌱 ');
+    await inspector.getByRole('button', { name: 'Mention a board member' }).click();
+    await inspector.getByLabel('Find a board member').fill('second-editor');
+    await inspector.getByRole('button', { name: 'Find members' }).click();
+    await inspector.getByRole('button', { name: 'Mention Fixture second-editor' }).click();
+    await expect(inspector.locator('.card-mention')).toHaveText('@Fixture second-editor');
+    await inspector.getByRole('button', { name: 'Mention a board member' }).click();
+    await inspector.getByLabel('Find a board member').fill('Shared alias');
+    await inspector.getByRole('button', { name: 'Find members' }).click();
+    await expect(inspector.getByRole('button', { name: 'Mention Shared alias' })).toHaveCount(10);
+    await inspector.getByRole('button', { name: 'Next members page' }).click();
+    await expect(inspector.getByRole('button', { name: 'Mention Shared alias' })).toHaveCount(2);
+    await inspector.getByRole('button', { name: 'Mention Shared alias' }).last().click();
+    await modes.getByRole('button', { name: 'Markdown' }).click();
+    await expect(inspector.getByRole('textbox', { name: 'Description' })).toHaveValue(
+      new RegExp('Spectral log 🌱 .*\\[Fixture second-editor\\]\\(' + ids.secondEditor + '\\)'));
+    await inspector.getByLabel('Due date and time (UTC)').fill('2026-03-19T13:13');
+    const saved = editor.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith('/api/v1/cards/' + cardId));
+    await inspector.getByRole('button', { name: 'Save card', exact: true }).click();
+    const receipt = await saved;
+    assert.equal(receipt.status(), 200);
+    assert.equal(receipt.request().postDataJSON().dueDate, '2026-03-19T13:13:00.000Z');
+    await expect(inspector.getByRole('button', { name: 'Save card', exact: true })).toBeDisabled();
+    const persisted = await f.db.collection('cards').findOne({ ...f.scope, id: cardId });
+    assert.equal(persisted.dueDate.toISOString(), '2026-03-19T13:13:00.000Z');
+    assert.equal(persisted.dueDateCompleted, false);
+    assert.ok(persisted.description.includes(`@[Fixture second-editor](${ids.secondEditor})`));
+    assert.ok(persisted.description.includes(`@[Shared alias](${fixtureId(12011)})`));
+
+    await inspector.getByRole('button', { name: 'Start stopwatch' }).click();
+    await expect(inspector.getByRole('button', { name: 'Stop stopwatch' })).toBeEnabled();
+    const elapsed = inspector.getByLabel('Elapsed time');
+    const watchRequests = [];
+    editor.on('request', (request) => { if (request.url().includes('/api/v1/cards/' + cardId)) watchRequests.push(request.method()); });
+    const running = await f.db.collection('cards').findOne({ ...f.scope, id: cardId });
+    await expect(elapsed).not.toHaveText('00:00:00');
+    assert.deepEqual(watchRequests, []);
+    assert.deepEqual((await f.db.collection('cards').findOne({ ...f.scope, id: cardId })).stopwatch, running.stopwatch);
+    await inspector.getByRole('button', { name: 'Stop stopwatch' }).click();
+    await expect(inspector.getByRole('button', { name: 'Start stopwatch' })).toBeEnabled();
+    await inspector.getByRole('button', { name: 'Reset stopwatch' }).click();
+    await expect(elapsed).toHaveText('00:00:00');
+    await expect(inspector.getByRole('button', { name: 'Reset stopwatch' })).toBeDisabled();
+    await inspector.getByRole('link', { name: 'Close card' }).click();
+    await expect(editor).toHaveURL(origin + board(ids.privateBoard) + '?view=grid');
+    await expect(editor.getByRole('link', { name: 'Closed orbit fixture' })).toBeVisible();
+    await editor.goBack();
+    await expect(inspector.getByRole('heading', { name: 'Closed orbit fixture' })).toBeVisible();
+  });
+});
+
+test('narrow card inspector retains exact imported Markdown and stale drafts, then clears the editor on access loss', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture: f, origin, page }) => {
+    const raw = '  <span>Imported text</span>\r\n\r\n<div data-fixture-html>Imported block</div>\r\n\r\nUnicode 🌱 [Unsafe](javascript:example) and `a < b`\r\n\r\n```js\r\nif (a < b) work()\r\n```  ';
+    await f.db.collection('cards').updateOne({ ...f.scope, id: ids.activeCard }, { $set: { description: raw, stopwatch: { startedAt: null, total: 19 } } });
+    await f.db.collection('users').updateOne({ ...f.scope, id: ids.firstEditor }, { $set: { 'preferences.editorMode': 'markup' } });
+    const first = await page({ width: 390, height: 844 });
+    const second = await page({ width: 390, height: 844 });
+    await signIn(first, origin, 'first-editor');
+    await signIn(second, origin, 'second-editor');
+    const target = origin + board(ids.privateBoard) + '/cards/' + ids.activeCard;
+    await first.goto(target);
+    await second.goto(target);
+    const editor = first.getByRole('complementary', { name: 'Moving an assigned card' });
+    const mode = editor.getByRole('group', { name: 'Description editor mode' });
+    await expect(mode.getByRole('button', { name: 'Markdown' })).toHaveAttribute('aria-pressed', 'true');
+    await mode.getByRole('button', { name: 'Rich text' }).click();
+    await expect(editor.getByRole('textbox', { name: 'Description' })).toContainText('Imported text');
+    await expect(editor.locator('a[href^="javascript:"]')).toHaveCount(0);
+    await expect(editor.locator('[data-fixture-html]')).toHaveCount(0);
+    await expect(editor.getByRole('textbox', { name: 'Description' })).toContainText('Imported block');
+    await expect(editor.locator('code').filter({ hasText: /^a < b$/u })).toBeVisible();
+    await expect(editor.locator('pre code')).toContainText('if (a < b) work()');
+    await mode.getByRole('button', { name: 'Markdown' }).click();
+    await editor.getByLabel('Card type').selectOption('story');
+    await expect(editor.getByLabel('Due date and time (UTC)')).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Save card', exact: true }).click();
+    await expect(editor.getByRole('region', { name: 'Stopwatch' })).toHaveCount(0);
+    assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: ids.activeCard })).description, raw);
+    await editor.getByLabel('Card type').selectOption('project');
+    await editor.getByRole('button', { name: 'Save card', exact: true }).click();
+    await expect(editor.getByLabel('Elapsed time')).toHaveText('00:00:19');
+
+    await second.reload();
+    await editor.getByRole('textbox', { name: 'Description', exact: true }).fill('Keep this local draft 🌱');
+    const competing = second.getByRole('complementary', { name: 'Moving an assigned card' });
+    await competing.getByLabel('Card name').fill('Name from another editor');
+    await competing.getByRole('button', { name: 'Save card', exact: true }).click();
+    await expect(second.getByRole('heading', { name: 'Name from another editor' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Save card', exact: true }).click();
+    const current = first.getByRole('complementary', { name: 'Name from another editor' });
+    await expect(current.getByText('The card changed while you were editing.')).toBeVisible();
+    await expect(current.getByRole('textbox', { name: 'Description', exact: true })).toHaveValue('Keep this local draft 🌱');
+    await current.getByRole('button', { name: 'Keep edits and use current revision' }).click();
+    await f.gate.runCommand(() => f.db.collection('boardMembers').updateOne({ ...f.scope, boardId: ids.privateBoard, userId: ids.firstEditor },
+      { $set: { role: 'viewer', canComment: false }, $inc: { revision: 1 } }));
+    await current.getByRole('button', { name: 'Save card', exact: true }).click();
+    await expect(current.getByRole('button', { name: 'Save card', exact: true })).toHaveCount(0);
+    await expect(current.getByText('Keep this local draft 🌱')).toHaveCount(0);
+    assert.equal((await f.db.collection('cards').findOne({ ...f.scope, id: ids.activeCard })).description, raw);
+    await f.gate.runCommand(() => f.db.collection('sessions').updateMany({ ...f.scope, userId: ids.secondEditor },
+      { $set: { expiresAt: new Date('2025-01-01T00:00:00.000Z') } }));
+    await second.getByRole('button', { name: 'Mention a board member' }).click();
+    await expect(second).toHaveURL((url) => url.pathname === '/sign-in' &&
+      url.searchParams.get('returnTo') === new URL(target).pathname);
+  });
+});

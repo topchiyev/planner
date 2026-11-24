@@ -1,0 +1,5 @@
+.board-cards { display: grid; gap: .45rem; list-style: none; padding: 0; margin: .4rem 0; }
+.workspace-list-summary .board-cards > li { display: flex; align-items: center; justify-content: space-between; padding: .5rem .65rem; }
+.board-cards > li > a { min-width: 0; overflow-wrap: anywhere; }
+.board-cards > li > span { flex-shrink: 0; font-size: .75rem; color: var(--muted); }
+.board-add-card { justify-self: start; }

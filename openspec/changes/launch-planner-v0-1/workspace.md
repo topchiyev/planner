@@ -25,6 +25,8 @@ Project detail returns visible board summaries. A manager also receives the mana
 
 Board creation matches the project's revision. Board movement matches the board's revision and takes `beforeBoardId` (null appends) and `projectBoardOrderVersion`. Project summaries expose `boardOrderVersion`, initialized at 1 for earlier projects. It changes with board creation, removal and actual reordering independently of the board's list order. Creation and movement return the affected board and project versions. Board deletion matches the board revision and the full stored name. The frontend shows whitespace and control characters explicitly when needed for confirmation. The empty response includes `Planner-Parent-Revision` while the actor still has project read access. Board deletion is available through the browser API.
 
+Card creation matches the finite list revision and returns the card, list revision and list card-order version. Card editing accepts an explicit `stopwatchAction` of `start`, `stop` or `reset`. The timer uses command time and writes only when an explicit action changes it. A due date and its completion are independent of card closure. Card cover selection is part of attachment management and requires a validated same-card image reference.
+
 ## Workspace and card operations
 
 Prefixes below are relative to `/api/v1`. Compound requests and edits use the field rules in the rows that follow.

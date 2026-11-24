@@ -1,0 +1,26 @@
+.card-description-editor, .card-rich-input, .card-mention-picker { display: grid; gap: .55rem; }
+.card-rich-input, .card-rendered-description { min-width: 0; overflow-wrap: anywhere; }
+.card-rich-input { min-height: 7rem; }
+.card-rich-input[contenteditable] {
+  display: block;
+  border: 1px solid #cad9d0;
+  background: #fff;
+  padding: .6rem .7rem;
+  border-radius: .35rem;
+}
+.card-rich-input :is(ul, ol), .card-rendered-description :is(ul, ol) { padding-inline-start: 1.5rem; }
+.card-rich-input :is(p, pre, blockquote), .card-rendered-description :is(p, pre, blockquote) { margin-block: .4rem; }
+.card-mention { color: #155347; border-radius: .25rem; background: #e4f2e9; padding-inline: .2rem; }
+.card-mention-picker ul { display: grid; gap: .35rem; padding: 0; list-style: none; }
+.card-mention-picker > div { margin-block-start: .4rem; }
+.card-mention-picker button { justify-self: start; }
+.card-mention-picker ul button { white-space: normal; text-align: left; }
+.card-editing, .card-readonly-content { display: grid; gap: 1rem; padding-block: .85rem; min-width: 0; }
+.card-readonly-content dl, .card-readonly-content dl > div { display: grid; gap: .3rem; }
+.card-readonly-content dl > div { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+.card-readonly-content dd { margin: 0; }
+.card-stopwatch { display: grid; gap: .5rem; border-block-start: 1px solid var(--line); padding-block-start: .7rem; }
+.card-elapsed { font-variant-numeric: tabular-nums; }
+
+.card-editing-fields { display: grid; gap: .75rem; border: 0; padding: 0; margin: 0; min-width: 0; }
+.card-rich-input pre, .card-rendered-description pre { max-width: 100%; overflow: auto; }

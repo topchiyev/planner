@@ -9,6 +9,7 @@ import { authorizeProjectDelete, planProjectCreate, planProjectDelete } from './
 import {
   authorizeBoardCreate, authorizeBoardDelete, authorizeBoardManage, planBoardCreate, planBoardDelete, planBoardMove, planBoardUpdate,
 } from './board-lifecycle.js';
+import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdate } from './card-lifecycle.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -120,6 +121,8 @@ export function createRelationshipJournalOperations(
     'lists.create': define('lists.create', (scope, input) => authorizeListCreate(scope, input.id), planListCreate),
     'lists.update': define('lists.update', (scope, input) => authorizeListEdit(scope, input.id), planListUpdate),
     'lists.move': define('lists.move', authorizeListMove, planListMove),
+    'cards.create': define('cards.create', (scope, input) => authorizeCardCreate(scope, input.id), planCardCreate),
+    'cards.update': define('cards.update', (scope, input) => authorizeCardUpdate(scope, input.id), planCardUpdate),
     'boards.create': define('boards.create', (scope, input) => authorizeBoardCreate(scope, input.id),
       (_records, project, input, context, scope) => planBoardCreate(project, input, context, scope)),
     'boards.move': define('boards.move', (scope, input) => authorizeBoardManage(scope, input.id),
