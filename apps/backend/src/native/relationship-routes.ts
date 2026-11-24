@@ -50,7 +50,7 @@ export function createWorkspaceRelationships(
             throw new WorkspaceAccessError('session');
           }
           return scope;
-        }),
+        }, 'web', idempotencyKey),
       });
       const result = await journal.execute({ actorId, operationId: operation, idempotencyKey, input });
       onCommitted?.();
@@ -113,7 +113,7 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
           if (!request.plannerConnection?.clientAddress || !actor || !token) {
             return fail(request, reply, 401, 'UNAUTHENTICATED', 'Sign in to continue.');
           }
-          const params = request.params;
+          const params = request.params ?? {};
           const values = operation.kind === 'read' ? request.query : request.body === undefined ? {} : request.body;
           if (!object(params) || !object(values) || Object.keys(params).some((field) => Object.hasOwn(values, field))) {
             return badInput(request, reply);
@@ -128,11 +128,18 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             const key = publicIdSchema.safeParse(request.headers['idempotency-key']);
             const header = request.headers['if-match'];
             const quoted = typeof header === 'string' ? /^"(0|[1-9]\d{0,15})"$/u.exec(header) : null;
-            if (!key.success || !quoted || Object.hasOwn(values, 'expectedRevision')) return badInput(request, reply);
-            const revision = Number(quoted[1]);
-            const expectedRevision = revision === 0 && operation.target === 'edge' ? null : revision;
-            if (expectedRevision !== null && !revisionSchema.safeParse(expectedRevision).success) return badInput(request, reply);
-            const input = operation.input.safeParse({ ...params, ...values, expectedRevision });
+            if (!key.success || Object.hasOwn(values, 'expectedRevision')) return badInput(request, reply);
+            const argumentsForCommand = { ...params, ...values };
+            if (operation.target === 'create') {
+              if (header !== undefined) return badInput(request, reply);
+            } else {
+              if (!quoted) return badInput(request, reply);
+              const revision = Number(quoted[1]);
+              const expectedRevision = revision === 0 && operation.target === 'edge' ? null : revision;
+              if (expectedRevision !== null && !revisionSchema.safeParse(expectedRevision).success) return badInput(request, reply);
+              argumentsForCommand.expectedRevision = expectedRevision;
+            }
+            const input = operation.input.safeParse(argumentsForCommand);
             if (!input.success) return badInput(request, reply);
             const result = await relationships.execute(token, actor.id, operation.id, key.data,
               input.data as RelationshipCommandInput<RelationshipCommand>);

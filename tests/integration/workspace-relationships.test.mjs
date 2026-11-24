@@ -411,3 +411,99 @@ test('relationship commands recheck the session epoch and active generation befo
     } finally { await f.close(); }
   });
 });
+
+test('creates ranked projects with explicit ownership and permits only exact terminal deletion replay', { timeout: 100_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await makeWorkspaceAccessFixture(mongo);
+    try {
+      const owner = await signIn(f, ids.createOnlyOwner);
+      const viewer = await signIn(f, ids.viewer);
+      const admin = await signIn(f, ids.admin);
+      const create = (cookie, body, key = randomUUID(), headers = {}) => f.call('/api/v1/projects', cookie, { method: 'POST', body,
+        headers: { Origin: origin, 'X-CSRF-Token': csrfToken(readSessionCookie(cookie)), 'Idempotency-Key': key, ...headers } });
+      await expectResponse(await create(viewer, { name: 'Denied', type: 'private' }), 403);
+      await expectResponse(await create(owner, { name: 'Missing visibility' }), 422);
+      await expectResponse(await create(owner, { name: 'No client revision', type: 'private' }, randomUUID(), { 'If-Match': '"1"' }), 422);
+      const key = randomUUID();
+      const created = await create(owner, { name: '  Project with an owner  ', type: 'private' }, key);
+      await expectResponse(created, 201);
+      const id = created.data.data.id;
+      assert.match(id, /^[a-f0-9-]{14}4[a-f0-9-]{21}$/u);
+      assert.deepEqual((await create(owner, { name: 'Project with an owner', description: null, type: 'private' }, key)).data, created.data);
+      await expectResponse(await create(owner, { name: 'Different', type: 'private' }, key), 409, 'IDEMPOTENCY_CONFLICT');
+      const parallel = await Promise.all(['One', 'Two'].map((name) => create(admin, { name, type: 'shared' })));
+      for (const response of parallel) await expectResponse(response, 201);
+      const rows = await f.db.collection('projects').find({ ...f.scope }, { promoteLongs: false }).sort({ rank: -1 }).limit(3).toArray();
+      assert.deepEqual(new Set(rows.map(({ id: value }) => value)), new Set([id, ...parallel.map((r) => r.data.data.id)]));
+      assert.equal(rows[0].rank.toBigInt() - rows[1].rank.toBigInt(), 1024n);
+      assert.equal(rows[0].ownerProjectManagerId, null);
+      const edge = await f.db.collection('projectManagers').findOne({ ...f.scope, projectId: id });
+      assert.equal(edge.userId, ids.createOnlyOwner);
+      const saved = await f.db.collection('projects').findOne({ ...f.scope, id });
+      assert.equal(saved.ownerProjectManagerId, edge.id);
+      assert.equal(saved.revision, 1);
+      assert.equal(saved.hidden, false);
+      assert.equal(saved.backgroundId, null);
+      await expectResponse(await f.call(project(id), admin), 404);
+      await expectResponse(await mutate(f, owner, 'DELETE', project(id), { name: 'wrong' }), 422, 'PROJECT_NAME_MISMATCH');
+      await expectResponse(await mutate(f, owner, 'DELETE', project(id), { revision: 2, name: saved.name }), 409, 'REVISION_CONFLICT');
+      const blockingBoard = fixtureId(9500);
+      await f.insert('boards', blockingBoard, { projectId: id, name: 'Must block deletion' });
+      await expectResponse(await mutate(f, owner, 'DELETE', project(id), { name: saved.name }), 409, 'PROJECT_NOT_EMPTY');
+      await f.db.collection('boards').deleteOne({ ...f.scope, id: blockingBoard });
+      await f.insert('boards', blockingBoard, { projectId: id, name: 'Other generation' }, f.stagedGenerationId);
+      const importedName = 'Legacy preserved title '.repeat(11);
+      await f.db.collection('projects').updateOne({ ...f.scope, id }, { $set: { name: importedName } });
+      const template = fixtureId(9501);
+      const bg = fixtureId(9502);
+      const definition = fixtureId(9503);
+      const favorite = fixtureId(9504);
+      await f.insert('fieldGroups', template, { scopeType: 'project', scopeId: id, name: 'Template', rank: '1' });
+      await f.insert('fieldDefinitions', definition, { fieldGroupId: template, name: 'Definition', rank: '1' });
+      await f.insert('projectBackgrounds', bg, { projectId: id, name: 'Unconfirmed media', kind: 'file', availability: 'unavailable' });
+      await f.insert('projectFavorites', favorite, { projectId: id, userId: ids.viewer });
+      await f.insert('projectFavorites', favorite, { projectId: id, userId: ids.viewer }, f.stagedGenerationId);
+      const deletionKey = randomUUID();
+      const result = () => mutate(f, owner, 'DELETE', project(id), { name: importedName }, { key: deletionKey });
+      await removed(result());
+      await removed(result());
+      await expectResponse(await mutate(f, admin, 'DELETE', project(id), { name: importedName }, { key: deletionKey }), 404);
+      await expectResponse(await mutate(f, owner, 'DELETE', project(id), { name: importedName }), 404);
+      await expectResponse(await mutate(f, owner, 'DELETE', project(id), { name: importedName.trim() }, { key: deletionKey }), 404);
+      for (const [collection, target] of [['projects', id], ['projectManagers', edge.id], ['projectBackgrounds', bg],
+        ['projectFavorites', favorite], ['fieldGroups', template], ['fieldDefinitions', definition]]) {
+        assert.equal(await f.db.collection(collection).countDocuments({ ...f.scope, id: target }), 0);
+      }
+      assert.equal(await f.db.collection('projectFavorites').countDocuments({ generationId: f.stagedGenerationId, id: favorite }), 1);
+      assert.equal(await f.db.collection('auditEntries').countDocuments({ ...f.scope, resourceId: id, action: 'projects.delete' }), 1);
+      assert.equal(await f.db.collection('auditEntries').countDocuments({ ...f.scope, resourceId: id, action: 'projects.create' }), 1);
+    } finally { await f.close(); }
+  });
+});
+
+test('recovers interrupted empty-project deletion without exposing a partial project', { timeout: 100_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await makeWorkspaceAccessFixture(mongo);
+    try {
+      const owner = await signIn(f, ids.privateOwner);
+      const token = readSessionCookie(owner);
+      const id = fixtureId(9510);
+      const edge = fixtureId(9511);
+      await f.insert('projects', id, { name: 'Interrupted project', ownerProjectManagerId: edge, type: 'private', hidden: false });
+      await f.insert('projectManagers', edge, { projectId: id, userId: ids.privateOwner });
+      const key = randomUUID();
+      const journal = new CommandJournal(f.gate, f.db, f.installationId, {
+        operations: createRelationshipJournalOperations(f.db, () => resolveBrowserWorkspace(f.db, f.installationId, token, f.now()), 'web', key),
+        checkpoint(point, step) { if (point === 'effectApplied' && step === 0) throw new Error('test interruption'); },
+      });
+      await assert.rejects(journal.execute({ operationId: 'projects.delete', actorId: ids.privateOwner, idempotencyKey: key,
+        input: { id, expectedRevision: 1, name: 'Interrupted project' } }), /test interruption/);
+      assert.equal(f.gate.ready, false);
+      await expectResponse(await f.call(project(id), owner), 503);
+      await new CommandJournal(f.gate, f.db, f.installationId).recover();
+      await expectResponse(await f.call(project(id), owner), 404);
+      await removed(mutate(f, owner, 'DELETE', project(id), { name: 'Interrupted project' }, { key }));
+      assert.equal(await f.db.collection('auditEntries').countDocuments({ ...f.scope, resourceId: id }), 1);
+    } finally { await f.close(); }
+  });
+});

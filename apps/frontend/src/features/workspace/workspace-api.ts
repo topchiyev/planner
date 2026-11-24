@@ -15,7 +15,7 @@ export class WorkspaceRequestError extends Error {
   }
 }
 
-async function workspaceResponse(path: string, init?: RequestInit) {
+export async function workspaceResponse(path: string, init?: RequestInit) {
   const response = await fetch(path, { ...init, cache: 'no-store' });
   if (!response.ok) {
     const body = await response.json().catch(() => undefined);

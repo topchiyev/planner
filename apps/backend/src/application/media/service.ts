@@ -224,7 +224,7 @@ export function createMediaService(
           const { project } = parent.value;
           if (project.revision !== intent.expectedRevision) throw new MediaRejection('revision');
           parentRevision = revisionAfter(project.revision);
-          const projectFields = { updatedAt: timestamp } as { updatedAt: string; backgroundId?: null };
+          const projectFields: { updatedAt: string; backgroundId?: null; backgroundPreset?: null } = { updatedAt: timestamp };
           if (media) {
             effects.push(...await ensureCatalog(generationId, media, timestamp));
             const mediaId = newPublicId();
@@ -235,7 +235,10 @@ export function createMediaService(
           } else {
             if (!live(parent.reference)) throw missing();
             effects.push({ kind: 'delete', collection: 'projectBackgrounds', id: parent.reference.id, revision: parent.reference.revision });
-            if (project.backgroundId === parent.reference.id) projectFields.backgroundId = null;
+            if (project.backgroundId === parent.reference.id) {
+              projectFields.backgroundId = null;
+              projectFields.backgroundPreset = null;
+            }
           }
           effects.push({ kind: 'update', collection: 'projects', id, revision: project.revision, fields: projectFields });
         } else {
