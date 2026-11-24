@@ -6,7 +6,7 @@ import { workspaceKey } from '../../storage/identity.js';
 import { getLocalAccount } from './accounts.js';
 import { tokenDigest } from './credentials.js';
 import {
-  applyFactorChange, getFactor, mfaAccounts, mfaActorScope, readStagedMfaEnrollment, verifyCurrentFactor,
+  applyFactorChange, canChangeFactor, getFactor, mfaAccounts, mfaActorScope, readStagedMfaEnrollment, verifyCurrentFactor,
 } from './mfa-account.js';
 import { createTotpSecret, issueRecoveryCodes, matchTotpCounter } from './mfa-crypto.js';
 import {
@@ -52,7 +52,8 @@ export function createMfaManagement(
       _id: workspaceKey(active, proof.userId), generationId: active, id: proof.userId,
     });
     const local = getLocalAccount(user);
-    if (!user || !local || local.auth.credentialsVersion !== proof.credentialsVersion) return null;
+    if (!user || !local || !canChangeFactor(user, true)
+        || local.auth.credentialsVersion !== proof.credentialsVersion) return null;
     if (proof.source === 'password') {
       if (local.auth.mfa !== 'enrollment-required') return null;
     } else {
@@ -73,7 +74,7 @@ export function createMfaManagement(
       if (!session || session.account.actor.id !== candidate.account.actor.id || session.generationId !== candidate.generationId
           || session.account.auth.credentialsVersion !== candidate.account.auth.credentialsVersion) return null;
       const factor = getFactor(session.stored);
-      if (!factor) return null;
+      if (!factor || !canChangeFactor(session.stored, action === 'disabled')) return null;
       const accepted = verifyCurrentFactor(key, installationId, session.stored, factor, input, time);
       if (!accepted) return null;
       const issued = action === 'recovery-codes-renewed' ? issueRecoveryCodes() : null;
@@ -90,7 +91,7 @@ export function createMfaManagement(
         const time = now();
         if (!access.enrollmentId && access.sessionToken) {
           const session = await currentSession(access.sessionToken, time);
-          if (!session || session.account.auth.mfa !== 'none') return null;
+          if (!session || session.account.auth.mfa !== 'none' || !canChangeFactor(session.stored, true)) return null;
           const enrollmentId = await issueMfaProof(database, mfaActorScope(installationId, session.stored), {
             kind: 'mfa-enrollment', source: 'session', sessionDigest: tokenDigest(access.sessionToken),
           }, time);

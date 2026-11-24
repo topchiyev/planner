@@ -44,6 +44,12 @@ export function mfaActorScope(installationId: string, account: AccountRecord) {
   return { installationId, generationId: account.generationId, userId: account.id, credentialsVersion: credentialsVersion! };
 }
 
+export function canChangeFactor(account: AccountRecord, advanceEpoch: boolean) {
+  const version = account.localAuth?.credentialsVersion ?? -1;
+  return version > 0 && Number.isSafeInteger(version) && Number.isSafeInteger(version + Number(advanceEpoch))
+    && revisionSchema.safeParse(account.revision).success && revisionSchema.safeParse(account.revision + 1).success;
+}
+
 function accountMatch(account: AccountRecord) {
   return {
     _id: workspaceKey(account.generationId, account.id), generationId: account.generationId, id: account.id,
@@ -86,7 +92,7 @@ export async function applyFactorChange(
   const version = mfaActorScope(installationId, account).credentialsVersion;
   const credentialsVersion = action === 'recovery-codes-renewed' ? version : version + 1;
   const revision = account.revision + 1;
-  if (!revisionSchema.safeParse(revision).success || !Number.isSafeInteger(credentialsVersion)) {
+  if (!canChangeFactor(account, action !== 'recovery-codes-renewed')) {
     throw new CommandRecoveryError('The account multifactor version cannot advance.');
   }
   const audit: FactorAudit = { id: randomUUID(), action, time, revision, credentialsVersion };
@@ -173,7 +179,7 @@ export async function readStagedMfaEnrollment(database: Db, installationId: stri
     _id: workspaceKey(scope.generationId, scope.userId), generationId: scope.generationId, id: scope.userId,
     disabledAt: { $type: 'null' }, 'localAuth.credentialsVersion': scope.credentialsVersion,
   });
-  return account?.role === 'admin' && account.requiresMfaEnrollment ? { scope, account } : null;
+  return account?.role === 'admin' && account.requiresMfaEnrollment && canChangeFactor(account, true) ? { scope, account } : null;
 }
 
 // During native startup no ordinary operations are admitted while protected effects are replayed.

@@ -86,6 +86,12 @@ test('standalone Mongo atomically binds factor changes, consumes challenge and f
       const first = await sessions.login({ identifier: 'mfa@example.test', password });
       assert.equal(first.status, 'authenticated');
       assert.deepEqual(await manage.list(first.token), { mfaEnabled: false, devices: [] });
+      const own = { _id: workspaceKey(generationId, fixture.userId) };
+      await fixture.users.updateOne(own, { $set: { revision: Number.MAX_SAFE_INTEGER } });
+      assert.equal(await manage.begin({ sessionToken: first.token }), null);
+      assert.equal(gate.ready, true);
+      assert.equal(await grants.countDocuments({ kind: 'mfa-enrollment' }), 0);
+      await fixture.users.updateOne(own, { $set: { revision: 1 } });
       const enrolled = await manage.begin({ sessionToken: first.token });
       assert.ok(enrolled);
       const totp = totpFrom(enrolled.secret);
