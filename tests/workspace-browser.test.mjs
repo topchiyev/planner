@@ -366,8 +366,10 @@ test('project settings preserve a stale draft and refresh manager authority thro
 
     const shared = project(ids.sharedProject);
     await admin.goto(origin + shared);
+    const managers = admin.getByRole('button', { name: 'Managers', exact: true });
+    await expect(managers).toBeVisible();
     await admin.context().clearCookies();
-    await admin.getByRole('button', { name: 'Managers', exact: true }).click();
+    await managers.click();
     await expect(admin.getByRole('heading', { name: 'Sign in', level: 1 })).toBeVisible();
     assert.equal(new URL(admin.url()).searchParams.get('returnTo'), shared);
   });
