@@ -34,6 +34,11 @@ export function availableAccount(user: WorkspaceRow<'users'> | null, kind: 'mana
     ? managerRoles.some((role) => role === user.role) : memberRoles.some((role) => role === user.role));
 }
 
+export function projectFavoriteFilter(generationId: string, projectId: string, userId: string) {
+  return { projectId, userId,
+    $expr: { $and: [canonicalRow(generationId), equal('projectId', projectId), equal('userId', userId)] } };
+}
+
 export function projectManagerFilter(generationId: string, projectId: string) {
   return { projectId, $expr: { $and: [equal('projectId', projectId), canonicalRow(generationId), publicIdField('userId')] } };
 }

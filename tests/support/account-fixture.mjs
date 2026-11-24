@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createSecretKey, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir } from 'node:fs/promises';
 import { request } from 'node:http';
 import { join } from 'node:path';
@@ -8,12 +8,14 @@ import { createAccountDirectory } from '../../apps/backend/dist/application/auth
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
+import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { buildApp } from '../../apps/backend/dist/build-app.js';
 import { startAdminSocket } from '../../apps/backend/dist/native/admin-socket.js';
 import { startProxySocket } from '../../apps/backend/dist/native/proxy-socket.js';
+import { createWorkspaceReader } from '../../apps/backend/dist/native/workspace-routes.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 
@@ -40,6 +42,7 @@ export async function accountFixture({ db, directory }) {
   const owner = { uid: process.getuid(), gid: process.getgid() };
   const writerGate = () => new CommandGate(acquireWriterDirectory(writer, owner, owner));
   let gate = writerGate();
+  const cursors = createBoardEventCursors(createSecretKey(randomBytes(32)));
 
   async function seed(email, options = {}) {
     const id = options.id ?? randomUUID();
@@ -70,7 +73,8 @@ export async function accountFixture({ db, directory }) {
     await chmod(proxyDir, 0o711);
     const app = buildApp({
       frontendRoot: fileURLToPath(new URL('../../apps/frontend/dist/', import.meta.url)),
-      native: { origin, proxyToken, readAccess, auth: { confirm: async () => false, ...sessions(), accountManagement: accountServices() } },
+      native: { origin, proxyToken, readAccess, workspace: createWorkspaceReader(db, installationId, gate, cursors, now),
+        auth: { confirm: async () => false, ...sessions(), accountManagement: accountServices() } },
     });
     const closeProxy = await startProxySocket(proxyDir, app);
     return { path: join(proxyDir, 'http.sock'), close: async () => { await closeProxy(); await app.close(); } };

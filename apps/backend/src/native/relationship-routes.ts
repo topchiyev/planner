@@ -137,8 +137,10 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             const result = await relationships.execute(token, actor.id, operation.id, key.data,
               input.data as RelationshipCommandInput<RelationshipCommand>);
             if (operation.status === 204) {
-              const { parentRevision } = removedRelationship.parse(result).data;
-              if (parentRevision !== null) reply.header(relationshipParentRevisionHeader, parentRevision);
+              if (operation.target === 'edge') {
+                const { parentRevision } = removedRelationship.parse(result).data;
+                if (parentRevision !== null) reply.header(relationshipParentRevisionHeader, parentRevision);
+              }
               return reply.code(204).send();
             }
             return reply.code(operation.status).send(result);

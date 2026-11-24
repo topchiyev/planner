@@ -12,7 +12,7 @@ import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { availableMedia, unavailableMedia } from '../media/records.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
-import { projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
+import { projectFavoriteFilter, projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
 
 const nameAnchor = (name: string) => createHash('sha256').update(name, 'utf8').digest('hex');
 const iso = (value?: Date | null) => value?.toISOString() ?? null;
@@ -50,7 +50,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
   async function projectSummary(context: ProjectAccessContext, visibleBoardCount?: number) {
     const { project, permissions } = context;
-    const favorite = await records.first('projectFavorites', { projectId: project.id, userId: actor.id });
+    const favorite = await records.first('projectFavorites', projectFavoriteFilter(generationId, project.id, actor.id));
     const boardCount = visibleBoardCount ?? (context.manager || context.sharedAdmin
       ? await records.count('boards', { projectId: project.id, $expr: { $and: [canonical, equal('projectId', project.id)] } }) : (await access.visibleBoards(context)).length);
     return {
@@ -172,7 +172,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const stages = access.visibleProjectStages();
       if (input.favorite) {
         stages.push(records.lookup('projectFavorites', 'actorFavorite', { projectId: '$id' }, {
-          userId: actor.id, $expr: { $eq: ['$projectId', '$$projectId'] },
+          userId: actor.id, $expr: { $and: [canonical, equal('userId', actor.id), { $eq: ['$projectId', '$$projectId'] }] },
         }, [{ $limit: 1 }]), { $match: { 'actorFavorite.0': { $exists: true } } });
       }
       const hidden = input.hidden === 'include' ? {} : { hidden: input.hidden === 'only' };
@@ -272,8 +272,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       return { data: selected.map((row) => cardDto(row, board, row.placement[0])), page, searchValidation: 'ok' as const };
     },
 
-    async cardGet({ id }: WorkspaceReadInput<'cardGet'>) {
-      const context = await access.requireCard(id);
+    async cardGet({ id, boardId: expectedBoard }: WorkspaceReadInput<'cardGet'>) {
+      const context = await access.requireCard(id, expectedBoard);
       const { card, board, list } = context;
       const boardId = board.board.id;
       const [links, assignments, attachments, previousListId, fields] = await together([

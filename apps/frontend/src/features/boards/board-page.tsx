@@ -1,5 +1,8 @@
-import { Link, Outlet, useLocation, useMatch, useSearchParams } from 'react-router';
-import { EmptyState, PageHeading } from '../../app/page-state.js';
+import { Link, Outlet, useLoaderData, useLocation, useMatch, useSearchParams } from 'react-router';
+import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
+
+import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
+import { projectHref } from '../workspace/workspace-navigation.js';
 
 const contexts = [
   { id: 'board', name: 'Board', emptyTitle: 'No cards to show' },
@@ -16,12 +19,13 @@ const views = [
 type View = (typeof views)[number]['id'];
 
 export function BoardPage() {
+  const board = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
   const [params] = useSearchParams();
   const { pathname } = useLocation();
   const inspectorOpen = useMatch('/boards/:boardId/cards/:cardId') !== null;
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
-  const defaultView = context.id === 'board' ? 'kanban' : 'list';
+  const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
   const view = availableViews.find(({ id }) => id === params.get('view'))?.id ?? defaultView;
 
   function boardLocation(nextContext: (typeof contexts)[number]['id'], nextView?: View) {
@@ -32,12 +36,18 @@ export function BoardPage() {
     return { pathname, search: `?${nextParams}` };
   }
 
+  if (board === null) return <RouteNotFound />;
+  const lists = board?.lists.filter(({ kind }) => context.id === 'board' ? kind === 'active' || kind === 'closed' : kind === context.id);
+
   return (
     <div className="board-layout" data-inspector-open={inspectorOpen}>
       <section className="page board-page" aria-labelledby="page-heading">
         <header className="page-header">
-          <nav aria-label="Breadcrumb"><Link to="/workspace">Projects</Link></nav>
-          <PageHeading focus={!inspectorOpen} id="page-heading">Board</PageHeading>
+          <nav aria-label="Breadcrumb" className="workspace-breadcrumb">
+            <Link to="/workspace">Projects</Link>
+            {board && <Link to={projectHref(board.project.id)}>{board.project.name}</Link>}
+          </nav>
+          <PageHeading focus={!inspectorOpen} id="page-heading">{board?.board.name ?? 'Board'}</PageHeading>
         </header>
         <div className="board-controls">
           <nav aria-label="Board context" className="context-nav">
@@ -51,7 +61,9 @@ export function BoardPage() {
             ))}
           </nav>
         </div>
-        <EmptyState title={context.emptyTitle} />
+        {lists?.length ? <ul aria-label="Board lists" className="workspace-list-summary">
+          {lists.map((list) => <li key={list.id}><strong>{list.name}</strong><span>{list.cardCount} {list.cardCount === 1 ? 'card' : 'cards'}</span></li>)}
+        </ul> : <EmptyState title={board ? 'No lists to show' : context.emptyTitle} />}
       </section>
       <Outlet />
     </div>

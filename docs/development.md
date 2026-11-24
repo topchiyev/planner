@@ -179,3 +179,9 @@ The board workspace response includes `latestEventSequence` as a decimal string 
 The stream replays at most 1,000 contiguous events. A cursor that cannot be replayed receives a `reset` event and the connection closes. On reset, close the EventSource, fetch a new board snapshot and open a stream using its cursor. Each event and the 20-second heartbeat recheck the session and board access without refreshing inactivity. The relationship command rechecks affected subscriptions before releasing the writer, so regranting access requires a new stream. A connection that falls behind its transport buffer closes and can reconnect using its last event ID.
 
 The shared `boardEventFrameSchema` defines the delivered payload. Emit `card.removed` with the source board and source-local card ID on a transfer away. A separate destination event can identify the card only while it belongs to that authorized destination board. Unknown effects invalidate the affected board through `board.invalidated`.
+
+### Projects in the browser
+
+The native workspace uses separate actor-scoped project and favorite queries. Search, visibility, favorites filtering, paging and the expanded group use the workspace URL. Group expansion fetches the authorized boards for that project. Display, sort and sidebar favorites settings save individual fields against the current account preference revision.
+
+Project favorites use the relationship registry at `PUT /api/v1/projects/:id/favorite` and `DELETE /api/v1/projects/:id/favorite`. Send the current quoted project revision, an idempotency key and the browser CSRF token. A favorite changes the actor's edge and keeps the shared project revision. Board, project and nested card links reload their own authorized data. Only workspace destinations and supported query fields survive password sign-in and MFA.
