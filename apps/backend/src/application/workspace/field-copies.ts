@@ -40,7 +40,8 @@ function copyDefinitions(group: FieldGroup, destinationId: string, definitions: 
     remap.set(definition.id, id);
     const storedRank = preserveRanks ? definition.rank ?? null : encodeRank(rank);
     const fields = { fieldGroupId: destinationId, name: definition.name, showOnFront: definition.showOnFront === true,
-      rank: storedRank == null ? null : decodeRank(storedRank).toString(), createdAt: timestamp, updatedAt: null };
+      rank: storedRank == null ? null : decodeRank(storedRank).toString(), createdAt: timestamp, updatedAt: null,
+      ...(preserveRanks && { definitionOrderTieId: definition.definitionOrderTieId ?? definition.id }) };
     effects.push({ kind: 'insert', collection: 'fieldDefinitions', id, fields });
     return { ...fields, _id: workspaceKey(group.generationId, id), generationId: group.generationId, id, revision: 1,
       rank: storedRank, createdAt: new Date(timestamp) };
@@ -117,15 +118,7 @@ async function transferFieldCopy(records: WorkspaceRecords, source: FieldGroup,
   timestamp: string) {
   const effective = await effectiveGroup(records, source, projectId);
   const local = effective.definitions.filter(({ fieldGroupId }) => fieldGroupId === source.id);
-  const positionKey = ({ rank }: FieldDefinition) => rank == null ? null : decodeRank(rank).toString();
-  const counts = new Map<string | null, number>();
-  for (const definition of effective.definitions) {
-    const key = positionKey(definition);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  // With tied local ranks a fresh ID could change the inherited display order, so materialize the full order.
-  const template = destinationProjectId === projectId && local.every((definition) => counts.get(positionKey(definition)) === 1)
-    ? effective.template : null;
+  const template = destinationProjectId === projectId ? effective.template : null;
   const id = randomUUID();
   const copy = copyDefinitions(source, id, template ? local : effective.definitions, timestamp, false, !!template);
   if (template) for (const definition of effective.definitions) {

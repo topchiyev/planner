@@ -13,6 +13,7 @@ import { createMediaDecoder } from '../../apps/backend/dist/application/media/de
 import { createMediaService } from '../../apps/backend/dist/application/media/service.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../../apps/backend/dist/application/workspace/relationship-commands.js';
+import { openActiveWorkspace } from '../../apps/backend/dist/storage/scoped.js';
 import { createPrivateMediaStore } from '../../apps/backend/dist/storage/blobs/private-store.js';
 import { workspaceFixtureInstant } from '../fixtures/planner-workspace.ts';
 import { proxyHeaders } from '../support/account-fixture.mjs';
@@ -165,7 +166,7 @@ test('cross-board card move remaps exact affiliations and fields while source-on
     assert.deepEqual(moved.card, { id: sourceCard, boardId: ids.sharedBoard, listId: ids.sharedClosedList, kind: 'board', closed: true,
       revision: current.revision + 1 });
     assert.deepEqual(moved.remaps, { labelsRemapped: 2, labelsCreated: 1, removedAssignees: 1, removedFollows: 1,
-      clearedTaskAssignees: 1, fieldGroupsMaterialized: 1 });
+      clearedTaskAssignees: 1, fieldGroupsMaterialized: 2 });
     assert.deepEqual(await data(change(f, editor, 'POST', route, current.revision, destination(), key)), moved);
     const next = await data(f.call(card(), editor));
     assert.equal(next.type, 'project');
@@ -418,9 +419,17 @@ test('historical transfer reserves the destination sequence and preserves an exa
     assert.deepEqual(detail.fields.find(({ id }) => id === instance.id).definitions.map(({ name, rank, inherited }) =>
       [name, rank, inherited]), [['Local earlier field', '-1', false], ['Exact blank value', '1', true]]);
     const tied = await stored(f, 'fieldValues', tiedValue);
-    const detached = detail.fields.find(({ id }) => id === tied.fieldGroupId);
-    assert.deepEqual([detached.linked, detached.definitions.map(({ name }) => name), tied.value],
-      [false, ['Exact blank value', 'Tied local field'], '  tied  ']);
+    const compatible = detail.fields.find(({ id }) => id === tied.fieldGroupId);
+    assert.deepEqual([compatible.linked, compatible.definitions.map(({ name }) => name), tied.value],
+      [true, ['Exact blank value', 'Tied local field'], '  tied  ']);
+    assert.ok(!JSON.stringify(compatible).includes(tiedDefinition));
+    const ordinary = await openActiveWorkspace(f.db, f.installationId);
+    assert.equal(Object.hasOwn(await ordinary.read('fieldDefinitions', compatible.definitions[1].id), 'definitionOrderTieId'), false);
+    const manager = await signIn(f, ids.privateOwner);
+    await data(change(f, manager, 'PATCH', '/api/v1/fields/' + definition, 1, { groupId: template, name: 'Updated project field' }));
+    const current = await data(f.call(card(), actor));
+    assert.deepEqual(current.fields.find(({ id }) => id === compatible.id).definitions.map(({ name }) => name),
+      ['Updated project field', 'Tied local field']);
     await expected(change(f, actor, 'POST', card() + '/restore', moved.card.revision, { sourceOrderVersion: 2 }), 422, 'RESTORE_TARGET_REQUIRED');
     const restored = await data(change(f, actor, 'POST', card() + '/restore', moved.card.revision, destination(finite, null, 2, 1)));
     assert.equal(restored.card.listId, finite);

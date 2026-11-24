@@ -20,6 +20,7 @@ export async function planTransferFields(records: WorkspaceRecords, source: Boar
   const values = await fieldValueRows(records, generationId, shared.map(({ id }) => id), [sourceId]);
   const order: RankedRow[] = [];
   const effects: PlannedEffect[] = [];
+  let detachedGroups = 0;
   for (const [index, group] of local.entries()) {
     // Renumber cloned groups so a fresh public ID cannot change the order of tied ranks.
     const rank = duplicate ? BigInt(index + 1) * 1024n : group.rank == null ? null : decodeRank(group.rank);
@@ -29,11 +30,13 @@ export async function planTransferFields(records: WorkspaceRecords, source: Boar
       id: sourceId, destinationCardId: destinationId, boardId: source.id,
       projectId: source.projectId, destinationProjectId: destination.projectId, rank: rank?.toString() ?? '0',
     }, timestamp);
+    if (group.templateGroupId != null && changes.some((change) => change.kind !== 'delete'
+        && change.collection === 'fieldGroups' && change.fields.templateGroupId === null)) detachedGroups++;
     effects.push(...changes);
     order.push({ id: group.id, rank });
   }
 
-  let materialized = 0;
+  let newGroups = 0;
   const localRanks = new Map<string, bigint>();
   for (const group of shared) {
     const candidates = values.filter(({ fieldGroupId }) => fieldGroupId === group.id);
@@ -65,7 +68,7 @@ export async function planTransferFields(records: WorkspaceRecords, source: Boar
     }, timestamp);
     order.push({ id: copy.groupId, rank });
     effects.push(...copy.effects);
-    materialized++;
+    newGroups++;
   }
   for (const [id, rank] of localRanks) {
     const existing = effects.find((effect) => effect.collection === 'fieldGroups' && effect.id === id);
@@ -78,5 +81,5 @@ export async function planTransferFields(records: WorkspaceRecords, source: Boar
       }
     }
   }
-  return { effects, materialized };
+  return { effects, newGroups, materialized: newGroups + detachedGroups };
 }

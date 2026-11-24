@@ -51,7 +51,7 @@ interface Records {
   };
   fieldGroups: Omit<Ordered, 'name'> & { name?: string | null; scopeType: FieldScope; scopeId: string;
     templateGroupId?: string | null; fieldOrderVersion?: number };
-  fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean };
+  fieldDefinitions: Ordered & { fieldGroupId: string; showOnFront?: boolean; definitionOrderTieId?: string };
   fieldValues: { cardId: string; fieldGroupId: string; fieldDefinitionId: string; value: string };
   comments: { boardId: string; cardId: string; authorId?: string | null; text: string };
   activities: { boardId: string; cardId?: string | null };
