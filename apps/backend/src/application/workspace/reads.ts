@@ -12,6 +12,7 @@ import { boardDto, boardPreferences, projectBoardOrderVersion } from './board-st
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { availableMedia, unavailableMedia } from '../media/records.js';
+import { availableProjectImage, effectiveProjectBackground } from './project-background.js';
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, rankSort, together, type WorkspaceRow } from './records.js';
 import { projectFavoriteFilter, projectManagerFilter, soleEligibleManager } from './relationship-policy.js';
 
@@ -192,16 +193,17 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const boards = await visibleBoardSummaries(context);
       const summary = await projectSummary(context, boards.length);
       const description = context.project.description ?? null;
-      if (!context.manager) return { data: { ...summary, description, boards, managers: null, backgrounds: null, fieldTemplates: null } };
+      const background = await effectiveProjectBackground(database, generationId, context.project);
+      if (!context.manager) return { data: { ...summary, description, boards, managers: null, background, backgrounds: null, fieldTemplates: null } };
       const [managerRows, backgrounds, templates] = await together([
-        records.find('projectManagers', projectManagerFilter(generationId, id)), records.find('projectBackgrounds', { projectId: id }),
+        records.find('projectManagers', projectManagerFilter(generationId, id)), records.find('projectBackgrounds', { projectId: id, kind: 'file', deletedAt: null,
+          $expr: { $and: [canonical, equal('projectId', id)] } }, { createdAt: 1, id: 1 }),
         records.find('fieldGroups', { scopeType: 'project', scopeId: id }, rankSort),
       ]);
       const allowedBackgrounds = await together(backgrounds.map(async (background) =>
-        (background.kind === 'preset' || (background.availability === availableMedia && await blobAvailable(background.blobDigest)))
-          ? { ...entity(background), name: background.name } : null));
+        await availableProjectImage(database, generationId, id, background.id) ? { ...entity(background), name: background.name } : null));
       return { data: { ...summary, description, boards, managers: await visiblePeople(managerRows.map(({ userId }) => userId)),
-        backgrounds: allowedBackgrounds.filter((background) => background !== null), fieldTemplates: await together(templates.map((row) => fieldGroup(row))) } };
+        background, backgrounds: allowedBackgrounds.filter((background) => background !== null), fieldTemplates: await together(templates.map((row) => fieldGroup(row))) } };
     },
 
     async boardsList({ id }: WorkspaceReadInput<'boardsList'>) {

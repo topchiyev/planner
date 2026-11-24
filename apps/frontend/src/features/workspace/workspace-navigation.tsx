@@ -1,4 +1,5 @@
 import { Link, NavLink, useLocation, useMatches, useRouteLoaderData } from 'react-router';
+import { CreateProjectButton } from '../projects/project-create.js';
 import { type BoardSummary, type ProjectSummary } from './workspace-api.js';
 import {
   type loadNativeBoard, type loadNativeProject, type loadWorkspaceNavigation, workspaceBoardId, workspaceNavigationId, workspaceProjectId,
@@ -58,6 +59,7 @@ export function WorkspaceSidebar({ onFollow }: { onFollow: () => void }) {
   }
   return (
     <>
+      {navigation.projectsPage.permissions.canCreate && <CreateProjectButton onCreated={onFollow} />}
       {projects.length > 0 && <div aria-label="Project list" role="group">{projectLinks(projects, true)}</div>}
       {navigation.favoritesPage && (favorites.length > 0 || navigation.filters.favoriteCursor) && <div className="sidebar-favorites" aria-label="Favorites" role="group">
         <h2>Favorites</h2>

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link, useLoaderData, useLocation, useNavigation, useRevalidator, useRouteLoaderData, useSearchParams } from 'react-router';
 import { workspaceSignInPath } from '@planner/contracts';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
+import { ProjectBackgroundPreview, ProjectSettingsControls } from '../projects/project-settings.js';
 import type { loadBrowserSession } from '../auth/browser-session.js';
 import {
   type BoardSummary, type DisplayPreferences, type ProjectSummary, readWorkspace, saveDisplayPreference, saveProjectFavorite, WorkspaceRequestError,
@@ -221,6 +222,7 @@ function WorkspaceProjects({ data }: { data: NonNullable<ReturnType<typeof useWo
 export function NativeProjectPage() {
   const project = useLoaderData<Awaited<ReturnType<typeof loadNativeProject>>>();
   const favorite = useWorkspaceAction();
+  const revalidator = useRevalidator();
   if (!project) return <RouteNotFound />;
   return <section className="page workspace-page" aria-labelledby="page-heading">
     <header className="page-header">
@@ -231,7 +233,9 @@ export function NativeProjectPage() {
           void favorite.run((csrf) => saveProjectFavorite(project, !project.favorite, csrf))} />
       </div>
       {project.hidden && <p className="workspace-hidden">Hidden</p>}
+      <div className="project-actions"><ProjectSettingsControls key={project.id} project={project} /></div>
     </header>
+    {revalidator.state === 'idle' && <ProjectBackgroundPreview project={project} />}
     {favorite.problem && <p className="workspace-problem" role="alert">{favorite.problem}</p>}
     {project.description && <p className="workspace-description">{project.description}</p>}
     {project.boards.length ? <section aria-label="Boards" className="workspace-detail">

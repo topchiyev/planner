@@ -27,6 +27,14 @@ const data = <S extends z.ZodType>(schema: S) => z.strictObject({ data: schema }
 
 export { pageQuery as workspacePageQuery, page as workspacePage, data as workspaceData };
 
+export const projectGradientSchema = z.enum(['mist', 'harbor', 'fern', 'dusk']);
+export const projectBackgroundSchema = z.union([
+  z.null(),
+  z.strictObject({ kind: z.literal('preset'), preset: projectGradientSchema }),
+  z.strictObject({ kind: z.literal('image'), id: publicIdSchema }),
+]);
+export type ProjectBackground = z.infer<typeof projectBackgroundSchema>;
+
 export const projectAccessSchema = z.strictObject({
   canEdit: z.boolean(), canToggleHidden: z.boolean(), canChangeOwnership: z.boolean(), canCreateBoard: z.boolean(),
   canManageManagers: z.boolean(), canDelete: z.boolean(), canFavorite: z.boolean(),
@@ -52,7 +60,7 @@ export const projectDetailSchema = projectSummarySchema.extend({
   description: maybeText, boards: z.array(boardSummarySchema),
   managers: z.array(workspacePersonSchema).nullable(),
   fieldTemplates: z.array(fieldGroupSchema).nullable(),
-  backgrounds: z.array(named).nullable(),
+  background: projectBackgroundSchema, backgrounds: z.array(named).nullable(),
 });
 export const boardListSchema = ordered.extend({
   boardId: publicIdSchema, kind: workspaceListKind, orderVersion: revisionSchema, cardCount: nonnegative,

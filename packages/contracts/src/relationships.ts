@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { boardLifecycleCommands } from './board-lifecycle.js';
 import { publicIdSchema, revisionSchema } from './storage.js';
-import { workspaceData, workspacePage, workspacePageQuery, workspacePersonSchema, workspaceProjectType } from './workspace.js';
+import { projectBackgroundSchema, workspaceData, workspacePage, workspacePageQuery, workspacePersonSchema, workspaceProjectType } from './workspace.js';
 
 const id = z.strictObject({ id: publicIdSchema });
 const target = id.extend({ userId: publicIdSchema });
@@ -13,13 +13,18 @@ const role = z.enum(['editor', 'viewer']);
 const projectRevision = id.extend({ expectedRevision: revisionSchema });
 const changedFavorite = workspaceData(projectRevision.omit({ expectedRevision: true }).extend({ revision: revisionSchema, favorite: z.boolean() }));
 
+const projectName = z.string().trim().min(1).max(128);
+const projectDescription = z.string().max(8000).nullable();
+const projectCreate = z.strictObject({ name: projectName, description: projectDescription.default(null), type: workspaceProjectType });
+const projectDelete = projectRevision.extend({ name: z.string() });
 const projectUpdate = id.extend({
   expectedRevision: revisionSchema,
-  name: z.string().trim().min(1).max(128).optional(),
-  description: z.string().max(8000).nullable().optional(),
+  name: projectName.optional(),
+  description: projectDescription.optional(),
   hidden: z.boolean().optional(),
   type: workspaceProjectType.optional(),
-}).refine(({ name, description, hidden, type }) => [name, description, hidden, type].some((value) => value !== undefined));
+  background: projectBackgroundSchema.optional(),
+}).refine(({ name, description, hidden, type, background }) => [name, description, hidden, type, background].some((value) => value !== undefined));
 
 const boardMemberAdd = parentRevision.extend({ role, canComment: z.boolean().nullable().optional() })
   .refine((value) => value.role === 'viewer' ? value.canComment !== null : typeof value.canComment !== 'boolean')
@@ -37,7 +42,7 @@ export type RelationshipBoardInvalidation = z.infer<typeof relationshipBoardInva
 const changedProject = workspaceData(z.union([
   z.strictObject({
     id: publicIdSchema, name: z.string(), description: z.string().nullable(), type: workspaceProjectType,
-    hidden: z.boolean(), revision: revisionSchema,
+    hidden: z.boolean(), revision: revisionSchema, background: projectBackgroundSchema,
   }),
   id.extend({ applied: z.literal(true) }),
 ]));
@@ -53,7 +58,7 @@ const candidatesInput = rosterInput.extend({ q: z.string().trim().max(120).defau
 
 function command<const ID extends string, const Route extends string, const Method extends 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   const Status extends 200 | 201 | 204, I extends z.ZodType, O extends z.ZodType>(
-  id: ID, method: Method, path: Route, status: Status, target: 'parent' | 'edge', input: I, output: O,
+  id: ID, method: Method, path: Route, status: Status, target: 'parent' | 'edge' | 'create', input: I, output: O,
 ) {
   return { id, kind: 'command', method, path, status, target, input, output } as const;
 }
@@ -66,6 +71,8 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 
 export const relationshipCommands = {
   ...boardLifecycleCommands,
+  'projects.create': command('projects.create', 'POST', '/api/v1/projects', 201, 'create', projectCreate, workspaceData(id)),
+  'projects.delete': command('projects.delete', 'DELETE', '/api/v1/projects/:id', 204, 'parent', projectDelete, workspaceData(id)),
   'projects.favorite': command('projects.favorite', 'PUT', '/api/v1/projects/:id/favorite', 200, 'parent', projectRevision, changedFavorite),
   'projects.unfavorite': command('projects.unfavorite', 'DELETE', '/api/v1/projects/:id/favorite', 204, 'parent', projectRevision, changedFavorite),
   'projects.update': command('projects.update', 'PATCH', '/api/v1/projects/:id', 200, 'parent', projectUpdate, changedProject),
