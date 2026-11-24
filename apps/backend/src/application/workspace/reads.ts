@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { WorkspaceReadInput } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Document, Long } from 'mongodb';
@@ -9,6 +10,7 @@ import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { createWorkspaceRecords, rankSort, together, type WorkspaceRow } from './records.js';
 
+const nameAnchor = (name: string) => createHash('sha256').update(name, 'utf8').digest('hex');
 const iso = (value?: Date | null) => value?.toISOString() ?? null;
 const rank = (value?: Long | null) => value == null ? null : decodeRank(value).toString();
 type EntityProjection = Pick<WorkspaceRow<'cards'>, 'id' | 'revision' | 'createdAt' | 'updatedAt'>;
@@ -138,13 +140,19 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   }
 
   async function alphabeticalAnchor(scope: CursorScope, cursor: string): Promise<PagePosition> {
-    // Store only the ID in the cursor so an imported name can exceed the cursor size.
+    // Keep imported names intact while binding the anchor to its original sort value.
     const decoded = pageCursors.decode(scope, cursor);
-    const id = decoded && typeof decoded === 'object' && !Array.isArray(decoded) && Object.keys(decoded).length === 1
-      ? publicIdSchema.safeParse((decoded as { id?: unknown }).id) : undefined;
-    if (!id?.success) throw new InvalidPageCursor('The page cursor has an invalid position.');
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded) || Object.keys(decoded).length !== 2) {
+      throw new InvalidPageCursor('The page cursor has an invalid position.');
+    }
+    const position = decoded as { id?: unknown; nameDigest?: unknown };
+    const id = publicIdSchema.safeParse(position.id);
+    if (!id.success || typeof position.nameDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(position.nameDigest)) {
+      throw new InvalidPageCursor('The page cursor has an invalid position.');
+    }
     try {
       const { project } = await access.requireProject(id.data);
+      if (nameAnchor(project.name) !== position.nameDigest) throw new InvalidPageCursor('The page cursor no longer applies.');
       return { id: project.id, name: project.name };
     } catch (error) {
       if (error instanceof WorkspaceAccessError && error.statusCode === 404) {
@@ -174,7 +182,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const rows = await records.aggregate<WorkspaceRow<'projects'>>('projects', hidden,
         [...stages, { $match: search.filter }, ...pagination.stages]);
       const { selected, page } = pagination.result(rows, (row): PagePosition => {
-        if (alphabetical) return { id: row.id };
+        if (alphabetical) return { id: row.id, nameDigest: nameAnchor(row.name) };
         if (input.order === 'byCreationTime') return { createdAt: iso(row.createdAt), id: row.id };
         return { rank: rank(row.rank), id: row.id };
       });

@@ -119,6 +119,12 @@ test('protected workspace endpoints enforce ownership, hidden context, independe
       assert.ok(firstAlpha.page.nextCursor.length < 2048);
       const nextAlpha = await verified(f, alpha + '&cursor=' + encodeURIComponent(firstAlpha.page.nextCursor), admin, 'projectsList');
       assert.deepEqual(resultIds(nextAlpha), [ids.hiddenProject]);
+      await f.gate.runCommand(() => mongo.db.collection('projects').updateOne({ ...f.scope, id: longName },
+        { $set: { name: 'Zulu moved beyond the second page' }, $inc: { revision: 1 } }));
+      const renamed = await f.call(alpha + '&cursor=' + encodeURIComponent(firstAlpha.page.nextCursor), admin);
+      assert.equal(renamed.status, 422);
+      assert.equal(renamed.data.error.code, 'INVALID_CURSOR');
+      assert.deepEqual(resultIds(await verified(f, alpha, admin, 'projectsList')), [ids.hiddenProject]);
 
       await assert.rejects(f.gate.runCommand(async () => {
         const context = await resolveBrowserWorkspace(f.db, f.installationId, readSessionCookie(manager), f.now());
