@@ -8,7 +8,9 @@ import { createBoardEventStore } from '../board-events/store.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
-import { cardClosed, cardDto, cardStopwatch } from './card-state.js';
+import { cardDto, cardStopwatch } from './card-state.js';
+import { createChecklistReads } from './checklist-reads.js';
+import { checklistOrderVersion } from './checklist-state.js';
 import { personalFollow } from './affiliation-edges.js';
 import { eligibleBoardPeople } from './eligible-members.js';
 import { cardLabelJoinFilter, labelDto, scopedLabels } from './label-state.js';
@@ -38,6 +40,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
   const { generationId, actor } = access;
   const records = createWorkspaceRecords(database, generationId);
   const canonical = canonicalRow(generationId);
+  const checklistReads = createChecklistReads(records, access);
   function cursorScope(operation: string, order: string, query: readonly string[]) {
     return { generationId, actorId: actor.id, operation, order, query: [actor.role, ...query] };
   }
@@ -103,37 +106,11 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     return { fields, values };
   }
 
-  async function publicAssignee(id: string | null | undefined, boardId: string) {
-    if (!id || !publicIdSchema.safeParse(id).success) return null;
-    const [member] = await eligibleBoardPeople(records, generationId, boardId, { id });
-    return member ?? null;
-  }
-
   async function previousList(context: CardAccessContext) {
     const id = context.card.previousListId;
     if (!id || !publicIdSchema.safeParse(id).success) return null;
     const list = await records.get('lists', id);
     return list && list.boardId === context.board.board.id && (list.kind === 'active' || list.kind === 'closed') ? id : null;
-  }
-
-  async function linkedTask(row: WorkspaceRow<'tasks'>, boardId: string) {
-    const base = { ...entity(row), checklistId: row.checklistId, rank: rank(row.rank) };
-    if (row.linkedUnavailable) return { ...base, kind: 'unavailable' as const };
-    if (!row.linkedCardId) return { ...base, kind: 'task' as const, name: row.name ?? '',
-      completed: row.completed ?? false, assignee: await publicAssignee(row.assigneeId, boardId) };
-    try {
-      if (!publicIdSchema.safeParse(row.linkedCardId).success) return { ...base, kind: 'unavailable' as const };
-      const target = await access.requireCard(row.linkedCardId);
-      return {
-        ...base, kind: 'linked' as const,
-        linkedCard: { id: target.card.id, name: target.card.name, boardId: target.board.board.id,
-          completed: cardClosed(target.card, target.list) },
-        assignee: await publicAssignee(row.assigneeId, boardId),
-      };
-    } catch (error) {
-      if (error instanceof WorkspaceAccessError && error.statusCode === 404) return { ...base, kind: 'unavailable' as const };
-      throw error;
-    }
   }
 
   async function alphabeticalAnchor(scope: CursorScope, cursor: string): Promise<PagePosition> {
@@ -267,7 +244,9 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
         if (input.context === 'board') return { rank: rank(row.rank), id: row.id };
         return { listChangedAt: iso(row.listChangedAt), historySequence: rank(row.historySequence), id: row.id };
       });
-      return { data: selected.map((row) => cardDto(row, board, row.placement[0])), page, searchValidation: 'ok' as const };
+      const front = input.context === 'board' ? await checklistReads.front(selected.map(({ id }) => id), board.board.id) : null;
+      return { data: selected.map((row) => ({ ...cardDto(row, board, row.placement[0]), frontChecklists: front?.get(row.id) ?? [] })),
+        page, searchValidation: 'ok' as const };
     },
 
     async cardGet({ id, boardId: expectedBoard }: WorkspaceReadInput<'cardGet'>) {
@@ -288,7 +267,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file');
       const coverAttachmentId = cover && (cover.availability === unavailableMedia
         || (cover.availability === availableMedia && await blobAvailable(cover.blobDigest, true))) ? cover.id : null;
-      return { data: { ...cardDto(card, board, list), description: card.description ?? null, stopwatch: cardStopwatch(card.stopwatch), previousListId, labels: labels.map(labelDto),
+      return { data: { ...cardDto(card, board, list), description: card.description ?? null, stopwatch: cardStopwatch(card.stopwatch), checklistOrderVersion: checklistOrderVersion(card), previousListId, labels: labels.map(labelDto),
         assignees, following: !!follow, automaticFollow: !!follow && 'isPermanent' in follow && follow.isPermanent === false,
         attachments: visibleAttachments,
         coverAttachmentId, ...fields } };
@@ -301,11 +280,7 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
 
     async cardChecklists({ id }: WorkspaceReadInput<'cardChecklists'>) {
       const { card, board } = await access.requireCard(id);
-      const checklists = await records.find('checklists', { cardId: card.id }, rankSort);
-      return { data: await together(checklists.map(async (row) => ({
-        ...ordered(row), name: row.name, cardId: card.id, showOnFront: row.showOnFront ?? false, hideCompleted: row.hideCompleted ?? false,
-        tasks: await together((await records.find('tasks', { checklistId: row.id }, rankSort)).map((task) => linkedTask(task, board.board.id))),
-      }))) };
+      return { data: await checklistReads.list(card.id, board.board.id) };
     },
 
     async cardComments({ id, limit, cursor }: WorkspaceReadInput<'cardComments'>) {

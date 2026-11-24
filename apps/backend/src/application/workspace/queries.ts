@@ -79,10 +79,12 @@ export async function cardFilters(records: WorkspaceRecords, board: BoardAccessC
     stages.push(
       records.lookup('cardAssignees', 'matchedAssignees', { cardId: '$id' }, assignment(users), [{ $limit: 1 }]),
       records.lookup('checklists', 'matchedChecklists', { cardId: '$id' }, {
-        $expr: { $eq: ['$cardId', '$$cardId'] },
+        $expr: { $and: [canonical, equal('cardId', '$$cardId')] },
       }, [
         records.lookup('tasks', 'matchingTasks', { checklistId: '$id' }, {
-          assigneeId: { $in: users }, $expr: { $and: [canonical, equal('checklistId', '$$checklistId'), { $in: ['$assigneeId', users] }] },
+          assigneeId: { $in: users }, linkedCardId: null, linkedUnavailable: { $ne: true },
+          $expr: { $and: [canonical, equal('checklistId', '$$checklistId'), { $in: ['$assigneeId', users] },
+            { $in: [{ $type: '$linkedCardId' }, ['null', 'missing']] }] },
         }, [{ $limit: 1 }]),
         { $match: { 'matchingTasks.0': { $exists: true } } },
         { $limit: 1 },

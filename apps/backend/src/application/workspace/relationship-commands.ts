@@ -16,6 +16,12 @@ import { authorizeCardCreate, authorizeCardUpdate, planCardCreate, planCardUpdat
 import { authorizeCardTransition, planCardTransition } from './card-transitions.js';
 import { authorizeFiniteListDeletion, planFiniteListDeletion } from './finite-list-deletion.js';
 import { authorizeClearTrash, planArchiveCards, planClearTrash, planListSort } from './list-maintenance.js';
+import {
+  authorizeChecklistCreate, authorizeChecklistEdit, authorizeOwnedDeletion, planChecklistCreate, planChecklistDelete, planChecklistUpdate,
+} from './checklist-commands.js';
+import {
+  authorizeTaskCreate, authorizeTaskEdit, authorizeTaskMove, planTaskCreate, planTaskDelete, planTaskMove, planTaskUpdate,
+} from './task-commands.js';
 import { planMembershipCleanup } from './relationship-cleanup.js';
 import {
   availableAccount, managerEdges, memberPermissions, projectFavoriteFilter, RelationshipError, requireBoardManagement, requireRevision, rowRevision, soleEligibleManager, touchRevision,
@@ -124,6 +130,17 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'checklists.create': define('checklists.create', (scope, input) => authorizeChecklistCreate(scope, input.id), planChecklistCreate),
+    'checklists.update': define('checklists.update', (scope, input) => authorizeChecklistEdit(scope, input.id), planChecklistUpdate),
+    'checklists.delete': define('checklists.delete', (scope, input) =>
+      authorizeOwnedDeletion(database, scope, 'checklists.delete', input, idempotencyKey, () => authorizeChecklistEdit(scope, input.id)),
+    planChecklistDelete),
+    'tasks.create': define('tasks.create', authorizeTaskCreate, planTaskCreate),
+    'tasks.update': define('tasks.update', (scope, input) => authorizeTaskEdit(scope, input.id), planTaskUpdate),
+    'tasks.delete': define('tasks.delete', (scope, input) =>
+      authorizeOwnedDeletion(database, scope, 'tasks.delete', input, idempotencyKey, () => authorizeTaskEdit(scope, input.id)),
+    planTaskDelete),
+    'tasks.move': define('tasks.move', authorizeTaskMove, planTaskMove),
     'lists.sort': define('lists.sort', (scope, input) => authorizeListEdit(scope, input.id), planListSort),
     'lists.archiveCards': define('lists.archiveCards', (scope, input) => authorizeListEdit(scope, input.id), planArchiveCards),
     'lists.clearTrash': define('lists.clearTrash', (scope, input) => authorizeClearTrash(scope, input.id, origin), planClearTrash),

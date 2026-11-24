@@ -16,6 +16,8 @@ const failures = {
   cardStopwatch: [422, 'CARD_STOPWATCH_STATE', 'The stopwatch cannot make that change in its current state.'],
   archiveCardsSource: [422, 'ARCHIVE_CARDS_SOURCE', 'Choose a closed list to archive its cards.'],
   trashDeleteData: [422, 'TRASH_CLEAR_DATA_LIMIT', 'This trash contains imported data too large to preserve while clearing it.'],
+  checklistOrder: [409, 'CHECKLIST_ORDER_CONFLICT', 'The checklist order changed. Review it and try again.'],
+  taskFields: [422, 'TASK_FIELDS_UNAVAILABLE', 'This task does not support editing those fields.'],
   duplicate: [409, 'RELATIONSHIP_EXISTS', 'This affiliation already exists.'],
   stale: [409, 'REVISION_CONFLICT', 'This affiliation or project changed. Reload and try again.'],
   lastManager: [409, 'LAST_PROJECT_MANAGER', 'Keep at least one project manager.'],
@@ -111,7 +113,7 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
 }
 
 export function touchRevision(
-  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels', row: Parameters<typeof rowRevision>[0] & { revision: number },
+  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists' | 'labels' | 'tasks', row: Parameters<typeof rowRevision>[0] & { revision: number },
   timestamp: string, expected = row.revision,
 ): Extract<PlannedEffect, { kind: 'update' }> & { revision: number } {
   const revision = requireRevision(row, expected, true)!;

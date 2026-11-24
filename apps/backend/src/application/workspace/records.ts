@@ -36,7 +36,7 @@ interface Records {
   cards: Ordered & {
     boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
     description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;
-    dueDateCompleted?: boolean | null; isDueCompleted?: boolean | null; stopwatch?: unknown;
+    dueDateCompleted?: boolean | null; isDueCompleted?: boolean | null; stopwatch?: unknown; checklistOrderVersion?: number;
     listChangedAt?: Date | null; historySequence?: Long; coverAttachmentId?: string | null;
   };
   labels: Omit<Ordered, 'name'> & { name?: string | null; boardId: string; color?: string | null };
@@ -44,7 +44,7 @@ interface Records {
   cardAssignees: { cardId: string; userId: string };
   boardFollows: { boardId: string; userId: string };
   cardFollows: { cardId: string; userId: string; isPermanent?: boolean | null };
-  checklists: Ordered & { cardId: string; showOnFront?: boolean; hideCompleted?: boolean };
+  checklists: Ordered & { cardId: string; showOnFront?: boolean; hideCompleted?: boolean; orderVersion?: number };
   tasks: {
     checklistId: string; rank?: Long | null; name?: string | null; completed?: boolean | null; assigneeId?: string | null;
     linkedCardId?: string | null; linkedUnavailable?: boolean;
