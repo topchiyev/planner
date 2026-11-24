@@ -524,3 +524,103 @@ test('narrow board membership grants only selected access, handles leaving and d
     assert.ok(await main.evaluate((element) => element.scrollWidth <= element.clientWidth));
   });
 });
+
+test('direct editors create, edit and move board lists by keyboard and pointer, including stale order recovery', { timeout: 150_000 }, async () => {
+  await workspaceBrowser(async ({ origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    const colleague = await page({ width: 1440, height: 900 });
+    const viewer = await page({ width: 390, height: 844 });
+    const path = board(ids.privateBoard) + '?context=board&view=grid';
+    await signIn(editor, origin, 'first-editor');
+    await signIn(colleague, origin, 'second-editor');
+    await signIn(viewer, origin, 'viewer');
+    await editor.goto(origin + path);
+    const listNames = (p) => p.getByRole('list', { name: 'Board lists' }).locator('strong');
+    const listRow = (p, name) => p.getByRole('list', { name: 'Board lists' }).getByRole('listitem')
+      .filter({ has: p.getByText(name, { exact: true }) });
+    async function add(p, name, kind, color = '') {
+      await p.getByRole('button', { name: 'Add list' }).click();
+      const create = p.getByRole('dialog', { name: 'Create list' });
+      await create.getByLabel('List name').fill(name);
+      await create.getByLabel('List type').selectOption(kind);
+      await create.getByLabel('List color').selectOption(color);
+      await create.getByRole('button', { name: 'Create list', exact: true }).click();
+      await expect(listRow(p, name)).toBeVisible();
+    }
+
+    await add(editor, 'Incoming', 'active', 'lagoon-blue');
+    await add(editor, 'Finished', 'closed');
+    await expect(listRow(editor, 'Incoming').getByText('Active', { exact: true })).toBeVisible();
+    await expect(listRow(editor, 'Finished').getByText('Closed', { exact: true })).toBeVisible();
+    await expect(listRow(editor, 'Incoming').getByRole('img', { name: 'Lagoon blue' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Edit Incoming', exact: true }).click();
+    let edit = editor.getByRole('dialog', { name: 'Edit list' });
+    await edit.getByLabel('List name').fill('Review queue');
+    await edit.getByLabel('List color').selectOption('berry-red');
+    await edit.getByRole('button', { name: 'Save list' }).click();
+    await expect(listRow(editor, 'Review queue').getByRole('img', { name: 'Berry red' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Edit Review queue', exact: true }).click();
+    edit = editor.getByRole('dialog', { name: 'Edit list' });
+    await edit.getByLabel('List color').selectOption('');
+    await edit.getByRole('button', { name: 'Save list' }).click();
+    await expect(listRow(editor, 'Review queue').getByRole('img')).toHaveCount(0);
+
+    let moveRequests = 0;
+    editor.on('request', (request) => {
+      if (request.method() === 'POST' && /\/api\/v1\/lists\/[^/]+\/move$/u.test(request.url())) moveRequests++;
+    });
+    const moveFinished = editor.getByRole('button', { name: 'Move Finished', exact: true });
+    await moveFinished.focus();
+    await editor.keyboard.press('Enter');
+    const move = editor.getByRole('dialog', { name: 'Move list' });
+    await expect(move.getByLabel('Place list')).toBeFocused();
+    await editor.keyboard.press('Escape');
+    await expect(move).toHaveCount(0);
+    await expect(moveFinished).toBeFocused();
+    assert.equal(moveRequests, 0);
+    await editor.keyboard.press('Enter');
+    await move.getByLabel('Place list').selectOption({ label: 'Before To do' });
+    await move.getByRole('button', { name: 'Move list', exact: true }).press('Enter');
+    await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Done', 'Review queue']);
+    await expect(editor.getByText('Moved Finished.', { exact: true })).toBeVisible();
+    await expect(moveFinished).toBeFocused();
+
+    const source = listRow(editor, 'Review queue').locator('[data-list-drag-handle]');
+    const target = listRow(editor, 'Done');
+    const handle = await source.boundingBox();
+    const box = await target.boundingBox();
+    assert.ok(handle && box);
+    await editor.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await editor.mouse.down();
+    await editor.mouse.move(handle.x + handle.width / 2 - 15, handle.y + handle.height / 2, { steps: 4 });
+    await editor.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 12 });
+    await expect(target).toHaveAttribute('data-list-drop-target', 'true');
+    await editor.mouse.up();
+    await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Review queue', 'Done']);
+    assert.equal(moveRequests, 2);
+    await expect(editor).toHaveURL(origin + path);
+    await editor.reload();
+    await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Review queue', 'Done']);
+
+    await colleague.goto(origin + path);
+    const stale = colleague.getByRole('button', { name: 'Move Done', exact: true });
+    await stale.click();
+    const staleDialog = colleague.getByRole('dialog', { name: 'Move list' });
+    await staleDialog.getByLabel('Place list').selectOption({ label: 'Before Finished' });
+    await add(editor, 'Concurrent addition', 'active');
+    await staleDialog.getByRole('button', { name: 'Move list', exact: true }).click();
+    await expect(colleague.getByRole('alert')).toContainText('The list order changed');
+    await expect(listNames(colleague)).toHaveText(['Finished', 'To do', 'Review queue', 'Done', 'Concurrent addition']);
+    await expect(stale).toBeFocused();
+    await expect(colleague).toHaveURL(origin + path);
+
+    await viewer.goto(origin + path);
+    await expect(listNames(viewer)).toHaveText(['Finished', 'To do', 'Review queue', 'Done', 'Concurrent addition']);
+    await expect(viewer.getByRole('button', { name: 'Add list' })).toHaveCount(0);
+    await expect(viewer.getByRole('button', { name: 'Move Done' })).toHaveCount(0);
+    await editor.getByRole('link', { name: 'Archive', exact: true }).click();
+    await expect(listNames(editor)).toHaveText(['Archive']);
+    await expect(editor.getByRole('button', { name: 'Edit Archive' })).toHaveCount(0);
+    await expect(editor.getByRole('button', { name: 'Add list' })).toHaveCount(0);
+  });
+});

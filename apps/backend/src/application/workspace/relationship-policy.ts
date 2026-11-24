@@ -13,6 +13,8 @@ const failures = {
   projectName: [422, 'PROJECT_NAME_MISMATCH', 'Enter the project name exactly as displayed.'],
   projectPlacement: [409, 'PROJECT_PLACEMENT', 'Planner could not append this project to the current order.'],
   boardOrder: [409, 'BOARD_ORDER_CONFLICT', 'The board order changed. Reload and try again.'],
+  listOrder: [409, 'LIST_ORDER_CONFLICT', 'The list order changed. Reload and try again.'],
+  listAnchor: [422, 'INVALID_LIST_ANCHOR', 'Choose a different list as the destination.'],
   boardName: [422, 'BOARD_NAME_MISMATCH', 'Enter the board name exactly as displayed.'],
   background: [422, 'INVALID_PROJECT_BACKGROUND', 'Choose an available image from this project.'],
   ownership: [409, 'OWNER_REQUIRES_SOLE_MANAGER', 'A private project requires one active eligible project manager.'],
@@ -91,7 +93,7 @@ export function requireRevision(row: Parameters<typeof rowRevision>[0], expected
 }
 
 export function touchRevision(
-  collection: 'projects' | 'boards' | 'cards' | 'checklists', row: Parameters<typeof rowRevision>[0] & { revision: number },
+  collection: 'projects' | 'boards' | 'lists' | 'cards' | 'checklists', row: Parameters<typeof rowRevision>[0] & { revision: number },
   timestamp: string, expected = row.revision,
 ): Extract<PlannedEffect, { kind: 'update' }> & { revision: number } {
   const revision = requireRevision(row, expected, true)!;

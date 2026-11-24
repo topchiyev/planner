@@ -3,6 +3,7 @@ import { relationshipCommands, type RelationshipBoardInvalidation, type Relation
 import type { Db } from 'mongodb';
 import type { CommandContext, CommandPlan, CommandPlanningContext, JournalFields, JournalOperation, PlannedEffect } from '../command-journal/operation.js';
 import { requireCapability, WorkspaceAccessError, type BoardAccessContext, type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
+import { authorizeListCreate, authorizeListEdit, authorizeListMove, planListCreate, planListMove, planListUpdate } from './list-lifecycle.js';
 import { availableProjectImage } from './project-background.js';
 import { authorizeProjectDelete, planProjectCreate, planProjectDelete } from './project-lifecycle.js';
 import {
@@ -94,7 +95,7 @@ export function createRelationshipJournalOperations(
   origin: 'web' | 'mcp' = 'web',
   idempotencyKey?: string,
 ): Record<RelationshipCommand, JournalOperation> {
-  function define<K extends RelationshipCommand, Scope extends ProjectAccessContext | BoardAccessContext | void>(
+  function define<K extends RelationshipCommand, Scope>(
     operation: K,
     authorize: (actor: WorkspaceAuthorization, input: RelationshipCommandInput<K>) => Promise<Scope>,
     plan: (records: WorkspaceRecords, access: Scope, input: RelationshipCommandInput<K>, context: CommandPlanningContext,
@@ -116,6 +117,9 @@ export function createRelationshipJournalOperations(
   }
 
   return {
+    'lists.create': define('lists.create', (scope, input) => authorizeListCreate(scope, input.id), planListCreate),
+    'lists.update': define('lists.update', (scope, input) => authorizeListEdit(scope, input.id), planListUpdate),
+    'lists.move': define('lists.move', authorizeListMove, planListMove),
     'boards.create': define('boards.create', (scope, input) => authorizeBoardCreate(scope, input.id),
       (_records, project, input, context, scope) => planBoardCreate(project, input, context, scope)),
     'boards.move': define('boards.move', (scope, input) => authorizeBoardManage(scope, input.id),

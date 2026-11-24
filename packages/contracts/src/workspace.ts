@@ -62,8 +62,16 @@ export const projectDetailSchema = projectSummarySchema.extend({
   fieldTemplates: z.array(fieldGroupSchema).nullable(),
   background: projectBackgroundSchema, backgrounds: z.array(named).nullable(),
 });
+export const finiteListKindSchema = z.enum(['active', 'closed']);
+export const listColorSchema = z.enum([
+  'berry-red', 'pumpkin-orange', 'lagoon-blue', 'pink-tulip', 'light-mud',
+  'orange-peel', 'bright-moss', 'antique-blue', 'dark-granite', 'turquoise-sea',
+]);
+export type ListColor = z.infer<typeof listColorSchema>;
+
 export const boardListSchema = ordered.extend({
-  boardId: publicIdSchema, kind: workspaceListKind, orderVersion: revisionSchema, cardCount: nonnegative,
+  boardId: publicIdSchema, kind: workspaceListKind, color: listColorSchema.nullable(),
+  orderVersion: revisionSchema, cardCount: nonnegative,
 });
 export const boardLabelSchema = ordered.omit({ name: true }).extend({ boardId: publicIdSchema, name: maybeText, color: maybeText });
 export const boardSettingsSchema = z.strictObject({
