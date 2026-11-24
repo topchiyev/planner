@@ -32,6 +32,9 @@ export const mediaReferenceSchema = z.strictObject({
   kind: z.enum(['file', 'link']), byteLength: z.number().int().nonnegative().nullable(),
   url: z.string().nullable(), available: z.boolean(),
 });
+export const mediaBoardInvalidation = z.strictObject({
+  boardId: publicIdSchema, kind: z.literal('card.mediaChanged'), payload: mediaIdSchema.extend({ revision: revisionSchema }),
+});
 export const mediaMutationSchema = z.strictObject({ data: z.strictObject({
   reference: mediaReferenceSchema.nullable(),
   parent: z.strictObject({ id: publicIdSchema, revision: revisionSchema, coverAttachmentId: publicIdSchema.nullable().optional() }),

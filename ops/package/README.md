@@ -1,0 +1,7 @@
+# Private media runtime
+
+Planner stores originals and PNG variants in its service-owned `blobs` directory and prepares them in the adjacent `staging` directory. The native package runs the shipped decoder with Ubuntu Noble's `python3-pil` at version `10.2.0-1ubuntu1.5` or newer. The dependency is recorded in the signed release manifest and Debian control metadata. For an offline install, include the patched decoder's dependency closure in the local Ubuntu package source. `noble-media-closure.sha256` records the exact additional archives used to qualify the Noble cloud image dated 2026-10-17. Recalculate the missing archives against the target image's dpkg status when qualifying a different base image.
+
+The native multipart routes accept a single `file` and an exact decimal `byteLength`. An optional `name` overrides the supplied file name. Use the existing browser Origin, CSRF, `Idempotency-Key` and quoted `If-Match` headers. The 32 MiB file limit has a separate 64 KiB multipart allowance. nginx streams request bodies to Planner. Planner checks resource access before reading file bytes and again before committing the reference.
+
+Cleanup records when an object first becomes unreachable and only removes it after 24 hours. Every sweep protects active and inactive generation references, prepared journal effects, derivatives and in-flight publications. The signed offline guest test in `tests/release/native-media.sh` covers the shipped helper through nginx and checks that readiness stays closed until missing referenced bytes are restored.

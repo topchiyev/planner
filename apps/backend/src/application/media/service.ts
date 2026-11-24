@@ -3,7 +3,7 @@ import type { Readable } from 'node:stream';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Db } from 'mongodb';
 import {
-  mediaMutationSchema, mediaOperations, safeMediaLink, type MediaMutation, type MediaVariant,
+  mediaBoardInvalidation, mediaMutationSchema, mediaOperations, safeMediaLink, type MediaMutation, type MediaVariant,
 } from '@planner/contracts';
 import { publicIdSchema, revisionSchema } from '@planner/contracts/storage';
 import { newPublicId } from '../../storage/identity.js';
@@ -191,7 +191,14 @@ export function createMediaService(
               cardId: id, name, kind, url: payload.url ?? null, createdAt: timestamp, updatedAt: null, ...lifecycle,
             } });
             reference = referenceDto({ id: mediaId, revision: 1, name, kind, url: payload.url, ...lifecycle }, id);
-            if (media?.variants && !coverAttachmentId) coverAttachmentId = mediaId;
+            if (media?.variants) {
+              const records = mediaRecords(database, generationId);
+              const oldCover = coverAttachmentId ? await records.attachment(coverAttachmentId) : null;
+              const eligible = live(oldCover) && oldCover.cardId === id && oldCover.kind === 'file'
+                && oldCover.availability === availableMedia && oldCover.blobDigest;
+              const catalog = eligible ? await records.catalog(oldCover.blobDigest!) : null;
+              if (!catalog || catalog.lifecycleState !== availableMedia || !catalogVariants(catalog)) coverAttachmentId = mediaId;
+            }
           }
           effects.push({ kind: 'update', collection: 'cards', id, revision: card.revision,
             fields: { coverAttachmentId, updatedAt: timestamp } });
@@ -230,7 +237,7 @@ export function createMediaService(
           resourceType: parent.type === 'avatar' ? 'account' : parent.type,
           resourceId: id, action: operationId, origin: 'web',
           ...(reference && { detail: { referenceId: reference.id } }),
-        }, ...(boardId && { events: [{ boardId, kind: 'card.mediaChanged', payload: { id, revision: parentRevision } }] }) };
+        }, ...(boardId && { events: [mediaBoardInvalidation.parse({ boardId, kind: 'card.mediaChanged', payload: { id, revision: parentRevision } })] }) };
       },
     };
     const journal = new CommandJournal(gate, database, installationId, {

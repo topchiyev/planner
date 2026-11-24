@@ -2,11 +2,12 @@ import { Busboy, type BusboyFileStream, type BusboyInstance } from '@fastify/bus
 import type { IncomingHttpHeaders } from 'node:http';
 import { Transform, type Readable } from 'node:stream';
 import { maximumMediaBytes, maximumMediaEnvelope, mediaNameSchema } from '@planner/contracts';
-import type { PrivateMediaStage } from '../../storage/blobs/private-store.js';
+import { MediaSizeError, type PrivateMediaStage } from '../../storage/blobs/private-store.js';
 import { MediaRejection } from './errors.js';
 
 type Received = Awaited<ReturnType<PrivateMediaStage['receive']>>;
 
+const decimalSize = /^(?:0|[1-9][0-9]{0,8})$/u;
 const allowedEncoding = (encoding: string) => ['7bit', '8bit', 'binary'].includes(encoding.toLowerCase());
 
 export function mediaContentLength(headers: IncomingHttpHeaders) {
@@ -78,16 +79,23 @@ export async function receiveMultipart(
     if (failed) return;
     if ((name !== 'name' && name !== 'byteLength') || fields.has(name) || nameTruncated
         || valueTruncated || !allowedEncoding(encoding)) { broken(); return; }
+    if (name === 'byteLength') {
+      if (!decimalSize.test(value)) { broken(); return; }
+      if (Number(value) > maximumMediaBytes) { fail(new MediaRejection('limit')); return; }
+    }
     fields.set(name, value);
   });
   parser.on('file', (field, body, name, encoding) => {
     file = body;
-    body.on('error', broken);
+    body.on('error', (error: NodeJS.ErrnoException) => {
+      // A file iterator interrupted by its size check emits ABORT_ERR as it unwinds.
+      if (error.code !== 'ABORT_ERR') broken();
+    });
     if (failed || field !== 'file' || received || !allowedEncoding(encoding)) { body.destroy(); broken(); return; }
     body.on('limit', () => fail(new MediaRejection('limit')));
     fileName = name;
     received = stage.receive(body, maximumMediaBytes, signal);
-    void received.catch(fail);
+    void received.catch((error) => fail(error instanceof MediaSizeError ? new MediaRejection('limit') : error));
   });
 
   try {
@@ -97,7 +105,7 @@ export async function receiveMultipart(
     const blob = await received;
     signal.throwIfAborted();
     const length = fields.get('byteLength');
-    if (!length || !/^(?:0|[1-9][0-9]{0,8})$/u.test(length)
+    if (!length || !decimalSize.test(length)
         || blob.identity.byteLength !== Number(length) || file?.truncated) throw new MediaRejection('input');
     const name = mediaNameSchema.safeParse(fields.get('name') ?? (fileName || 'Attachment'));
     if (!name.success) throw new MediaRejection('input');

@@ -87,6 +87,9 @@ async function runUpload(request: FastifyRequest, reply: FastifyReply, media: Me
 
 const mutations = ['uploadAttachment', 'addLink', 'renameAttachment', 'removeAttachment', 'uploadBackground',
   'removeBackground', 'uploadAvatar', 'removeAvatar'] as const;
+const uploadOperations = new Set(['uploadAttachment', 'uploadBackground', 'uploadAvatar']);
+const uploadPaths = new Set<string>(mutations.filter((operation) => uploadOperations.has(operation)).map((operation) =>
+  `${mediaOperations[operation].method} ${mediaOperations[operation].path}`));
 const reads = ['attachmentDownload', 'attachmentThumbnail', 'backgroundDownload', 'backgroundThumbnail', 'ownAvatar', 'userAvatar'] as const;
 
 function readTarget(request: FastifyRequest, operation: typeof reads[number]): MediaRead {
@@ -111,10 +114,23 @@ function readTarget(request: FastifyRequest, operation: typeof reads[number]): M
 
 export function registerMediaRoutes(app: FastifyInstance, access: MediaAccess) {
   app.register(async (routes) => {
-    routes.addContentTypeParser('multipart/form-data', (_request, payload, done) => { done(null, payload); });
+    routes.setErrorHandler((error: { statusCode?: number }, request, reply) => {
+      if (!request.raw.complete) reply.header('Connection', 'close');
+      if (error instanceof MediaRejection) return respondError(request, reply, error);
+      if (error.statusCode === 415) return respondError(request, reply, new MediaRejection('type'));
+      if (error.statusCode && error.statusCode >= 400 && error.statusCode < 500) {
+        return respondError(request, reply, new MediaRejection('input'));
+      }
+      return respondError(request, reply, error);
+    });
+    routes.addContentTypeParser('multipart/form-data', (request, payload, done) => {
+      const address = `${request.method} ${request.routeOptions.url}`;
+      if (!uploadPaths.has(address)) done(new MediaRejection('input'), undefined);
+      else done(null, payload);
+    });
     for (const operation of mutations) {
       const { method, path } = mediaOperations[operation];
-      const upload = operation === 'uploadAttachment' || operation === 'uploadBackground' || operation === 'uploadAvatar';
+      const upload = uploadOperations.has(operation);
       routes.route({ method, url: path, bodyLimit: 8192, async handler(request, reply) {
         try {
           const token = browserToken(request);
@@ -138,12 +154,16 @@ export function registerMediaRoutes(app: FastifyInstance, access: MediaAccess) {
     }
     for (const operation of reads) {
       routes.route({ method: ['GET', 'HEAD'], url: mediaOperations[operation].path, exposeHeadRoute: false, async handler(request, reply) {
+        let opened: Awaited<ReturnType<MediaService['openForRead']>> | undefined;
         try {
           const token = browserToken(request);
           const target = readTarget(request, operation);
-          const opened = await access((media) => media.openForRead(token, target));
-          return await sendPrivateMedia(request, reply, opened);
-        } catch (error) { return respondError(request, reply, error); }
+          const file = await access(async (media) => (opened = await media.openForRead(token, target)));
+          return await sendPrivateMedia(request, reply, file);
+        } catch (error) {
+          await opened?.file.close().catch(() => undefined);
+          return respondError(request, reply, error);
+        }
       } });
     }
   });

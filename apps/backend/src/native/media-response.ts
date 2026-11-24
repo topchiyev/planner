@@ -41,7 +41,7 @@ export async function sendPrivateMedia(request: FastifyRequest, reply: FastifyRe
       return reply.code(304).send();
     }
 
-    const range = request.headers.range && (!request.headers['if-range'] || request.headers['if-range'] === etag)
+    const range = request.method === 'GET' && request.headers.range && (!request.headers['if-range'] || request.headers['if-range'] === etag)
       ? requestedRange(request.headers.range, size) : undefined;
     if (range === null) return reply.code(416).header('Content-Range', `bytes */${size}`).send();
     const length = range ? range.end - range.start + 1 : size;

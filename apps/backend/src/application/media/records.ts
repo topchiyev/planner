@@ -1,7 +1,7 @@
 import type { Db } from 'mongodb';
 import { workspaceKey } from '../../storage/identity.js';
 import { digestPattern, MediaStorageError, type BlobIdentity } from '../../storage/blobs/private-store.js';
-import type { MediaVariants } from './decoder.js';
+import { imageTypes, type MediaVariants } from './decoder.js';
 
 export const availableMedia = 'available';
 export const originalType = 'application/octet-stream';
@@ -51,7 +51,8 @@ export function validBlobIdentity(identity: unknown): identity is BlobIdentity {
 
 export function catalogVariants(row: MediaCatalog) {
   const value = row.variants;
-  if (value == null) return null;
+  if (row.mimeType === originalType && value == null) return null;
+  if (!Object.values<string>(imageTypes).includes(row.mimeType) || value == null) throw new MediaStorageError();
   if (!validBlobIdentity(value.small) || !validBlobIdentity(value.large)) throw new MediaStorageError();
   return { small: { digest: value.small.digest, byteLength: value.small.byteLength },
     large: { digest: value.large.digest, byteLength: value.large.byteLength } };

@@ -42,7 +42,7 @@ function socket(f, path, cookie, { method = 'GET', headers = {}, body } = {}) {
         const chunks = [];
         for await (const chunk of response) chunks.push(chunk);
         const bytes = Buffer.concat(chunks);
-        const data = response.headers['content-type']?.startsWith('application/json') ? JSON.parse(bytes) : undefined;
+        const data = bytes.length && response.headers['content-type']?.startsWith('application/json') ? JSON.parse(bytes) : undefined;
         resolve({ status: response.statusCode, headers: response.headers, bytes, data });
       } catch (error) { reject(error); }
     });
@@ -146,6 +146,17 @@ test('private streaming upload authorizes exact logical references and replays i
     assert.equal((await socket(f, download, viewer)).status, 404);
     assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.attachments.some(({ id }) => id === reference.id), false);
     assert.deepEqual(await readdir(stagePath), []);
+    const oldLink = fixtureId(5001);
+    await f.insert('attachments', oldLink, { cardId: ids.activeCard, kind: 'link', url: 'javascript:unsafe', name: 'Old imported link' });
+    const renamed = await f.call(filePath(oldLink), editor, { method: 'PATCH', headers: expected(editor, 1), body: { name: 'Renamed' } });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.data.data.reference.url, null);
+    assert.equal(renamed.data.data.reference.available, false);
+    const addPath = `${cardPath(ids.activeCard)}/attachment-links`;
+    assert.equal((await f.call(addPath, editor, { method: 'POST', headers: expected(editor, 4), body: { name: 'Bad scheme', url: 'file:///etc/host' } })).status, 422);
+    const link = await f.call(addPath, editor, { method: 'POST', headers: expected(editor, 4), body: { name: 'Guide', url: 'HTTPS://EXAMPLE.TEST' } });
+    assert.equal(link.status, 201);
+    assert.equal(link.data.data.reference.url, 'https://example.test/');
   });
 });
 
@@ -157,6 +168,10 @@ test('native Pillow derivatives are bounded and metadata-free with distinct avat
       const viewer = await login(f, ids.viewer);
       const owner = await login(f, ids.privateOwner);
       const path = `${cardPath(ids.activeCard)}/attachment-files`;
+      const staleCover = fixtureId(5100);
+      await f.insert('attachments', staleCover, { cardId: ids.activeCard, name: 'Unavailable imported cover', kind: 'file', availability: 'unavailable' });
+      await f.db.collection('cards').updateOne({ id: ids.activeCard, generationId: f.generationId }, { $set: { coverAttachmentId: staleCover } });
+      assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.coverAttachmentId, null);
       let revision = 1;
       let cover;
       for (const [format, file] of uploads) {
@@ -265,4 +280,107 @@ test('orphan reconciliation retains newly unreachable old content, staged genera
     for (const object of [staged, inFlight, prepared]) assert.ok(await stat(object.path));
     inFlight.unpin();
   });
+});
+
+test('enforces exact 32 MiB bounds and disposes an aborted or corrupt stage', { timeout: 100_000 }, async () => {
+  await withMedia(async (f, { store, stagePath, blobPath }) => {
+    const editor = await login(f, ids.firstEditor);
+    const path = `${cardPath(ids.activeCard)}/attachment-files`;
+    const full = Buffer.alloc(maximumMediaBytes, 0x61);
+    const accepted = await upload(f, path, editor, 1, full, 'exact.bin');
+    assert.equal(accepted.status, 201, JSON.stringify(accepted.data));
+    assert.equal(accepted.data.data.reference.byteLength, maximumMediaBytes);
+    const oversized = await upload(f, path, editor, 2, Buffer.concat([full, Buffer.from('b')]), 'over.bin', { declared: maximumMediaBytes });
+    assert.equal(oversized.status, 413, JSON.stringify(oversized.data));
+    assert.deepEqual(await readdir(stagePath), []);
+    assert.deepEqual(await readdir(blobPath), [checksum(full)]);
+
+    const pending = form(Buffer.from('interrupted'), 'abort.bin');
+    await new Promise((resolve, reject) => {
+      const client = request({ socketPath: f.socketPath, path, method: 'POST', headers: {
+        ...proxyHeaders(origin), Cookie: editor, ...pending.headers, ...expected(editor, 2),
+      } });
+      client.on('response', (response) => { response.resume(); reject(new Error('The incomplete body was answered early.')); });
+      client.on('error', (error) => { if (error.code !== 'ECONNRESET') reject(error); });
+      client.write(pending.body[0]);
+      const ceiling = Date.now() + 5000;
+      const timer = setInterval(async () => {
+        try {
+          if ((await readdir(stagePath)).length > 0) {
+            clearInterval(timer);
+            client.destroy();
+            resolve();
+          } else if (Date.now() > ceiling) {
+            clearInterval(timer);
+            client.destroy();
+            reject(new Error('The upload did not create its staging directory.'));
+          }
+        } catch (error) { clearInterval(timer); client.destroy(); reject(error); }
+      }, 50);
+    });
+    for (let attempt = 0; attempt < 30 && (await readdir(stagePath)).length; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.deepEqual(await readdir(stagePath), []);
+    assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.revision, 2);
+
+    const stage = await store.stage();
+    try {
+      const { identity } = await stage.receive(Readable.from([Buffer.from('abc')]), 1024, new AbortController().signal);
+      const [directory] = await readdir(stagePath);
+      const stored = join(stagePath, directory, 'original');
+      await chmod(stored, 0o600);
+      await writeFile(stored, 'xyz');
+      await chmod(stored, 0o400);
+      await assert.rejects(stage.publish([{ part: 'original', identity }]), { message: 'Private media storage is unavailable or inconsistent.' });
+      assert.deepEqual(await readdir(blobPath), [checksum(full)]);
+    } finally { await stage.dispose(); }
+  });
+});
+
+test('permission downgrade during decode is enforced at commit',
+  { timeout: 100_000, skip: !decoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required' }, async () => {
+    const { readFile } = await import('node:fs/promises');
+    const started = Promise.withResolvers();
+    const decision = Promise.withResolvers();
+    await withMedia(async (f, { stagePath }) => {
+      const editor = await login(f, ids.firstEditor);
+      const path = `${cardPath(ids.activeCard)}/attachment-files`;
+      const uploadInFlight = upload(f, path, editor, 1, await readFile(new URL('sample.png', formats)), 'rechecked.png');
+      try {
+        await started.promise;
+        await f.gate.runCommand(() => f.db.collection('boardMembers').updateOne({ generationId: f.generationId,
+          boardId: ids.privateBoard, userId: ids.firstEditor }, { $set: { role: 'viewer', canComment: false } }));
+      } finally { decision.resolve(); }
+      const denied = await uploadInFlight;
+      assert.equal(denied.status, 403, JSON.stringify(denied.data));
+      assert.equal(await f.db.collection('blobs').countDocuments({ generationId: f.generationId }), 0);
+      assert.equal((await f.call(cardPath(ids.activeCard), editor)).data.data.revision, 1);
+      assert.deepEqual(await readdir(stagePath), []);
+    }, { decoder: (decode) => async (...args) => { started.resolve(); await decision.promise; return decode(...args); } });
+  });
+
+test('published bytes survive interrupted journal effects and readiness opens after reconciliation', { timeout: 100_000 }, async () => {
+  let interrupt = true;
+  await withMedia(async (f, { store, stagePath }) => {
+    const editor = await login(f, ids.firstEditor);
+    const file = Buffer.from('published before the interrupted command');
+    const path = `${cardPath(ids.activeCard)}/attachment-files`;
+    const key = randomUUID();
+    const interrupted = await upload(f, path, editor, 1, file, 'interrupted.bin', { key });
+    assert.equal(interrupted.status, 503);
+    assert.equal(f.gate.ready, false);
+    assert.deepEqual(await readdir(stagePath), []);
+    assert.equal(await f.db.collection('attachments').countDocuments({ generationId: f.generationId }), 0);
+    await store.verifyBlob({ digest: checksum(file), byteLength: file.length });
+    await new CommandJournal(f.gate, f.db, f.installationId).recover(() => verifyActiveMedia(f.db, f.installationId, store));
+    assert.equal(f.gate.ready, true);
+    const replay = await upload(f, path, editor, 1, file, 'interrupted.bin', { key });
+    assert.equal(replay.status, 201, JSON.stringify(replay.data));
+    const { reference } = replay.data.data;
+    assert.deepEqual((await socket(f, `${filePath(reference.id)}/download`, editor)).bytes, file);
+    assert.equal(await f.db.collection('attachments').countDocuments({ generationId: f.generationId }), 1);
+  }, { checkpoint(point, step) {
+    if (interrupt && point === 'effectApplied' && step === 0) { interrupt = false; throw new Error('test interruption'); }
+  } });
 });

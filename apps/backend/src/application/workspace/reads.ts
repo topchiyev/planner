@@ -66,8 +66,11 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
     return (await records.find('users', { id: { $in: ids }, $expr: canonical }, { id: 1 })).map(person);
   }
 
-  async function blobAvailable(blobDigest?: string | null) {
-    return !!blobDigest && !!await records.first('blobs', { digest: blobDigest, lifecycleState: 'available' });
+  async function blobAvailable(blobDigest?: string | null, image = false) {
+    return !!blobDigest && !!await records.first('blobs', {
+      digest: blobDigest, lifecycleState: 'available',
+      ...(image && { 'variants.small.digest': { $type: 'string' }, 'variants.large.digest': { $type: 'string' } }),
+    });
   }
 
   async function attachment(row: WorkspaceRow<'attachments'>) {
@@ -278,7 +281,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const members = await records.find('boardMembers', { boardId, userId: { $in: assignments.map(({ userId }) => userId) },
         $expr: directBoardRole });
       const visibleAttachments = await together(attachments.map(attachment));
-      const coverAttachmentId = visibleAttachments.some((item) => item.id === card.coverAttachmentId && item.kind === 'file' && item.available) ? card.coverAttachmentId! : null;
+      const cover = attachments.find((item) => item.id === card.coverAttachmentId && item.kind === 'file' && item.availability === 'available');
+      const coverAttachmentId = cover && await blobAvailable(cover.blobDigest, true) ? cover.id : null;
       return { data: { ...cardDto(card, board, list), description: card.description ?? null, previousListId, labels: labels.map(labelDto),
         assignees: await visiblePeople(members.map(({ userId }) => userId)), attachments: visibleAttachments,
         coverAttachmentId, ...fields } };
