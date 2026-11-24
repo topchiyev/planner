@@ -6,7 +6,9 @@ import { WorkspaceRequestError } from '../workspace/workspace-api.js';
 
 export type Mention = RelationshipReadOutput<'boards.mentionMembers'>['data'][number];
 
-export function MemberPicker({ boardId, select }: { boardId: string; select: (person: Mention) => void }) {
+export function MemberPicker({ boardId, select, label = 'Mention a board member' }: {
+  boardId: string; select: (person: Mention) => void; label?: string;
+}) {
   const { pathname, search } = useLocation();
   const revalidator = useRevalidator();
   const [open, setOpen] = useState(false);
@@ -48,7 +50,7 @@ export function MemberPicker({ boardId, select }: { boardId: string; select: (pe
     <button className="workspace-button" type="button" aria-expanded={open} onClick={() => {
       if (!open) { setCursor(null); setAttempt((value) => value + 1); }
       setOpen(!open);
-    }}>Mention a board member</button>
+    }}>{label}</button>
     {open && <div>
       <label>Find a board member<input type="search" value={draft} maxLength={120} onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); submit(); } }} /></label>
