@@ -1775,7 +1775,11 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await filters.getByRole('button', { name: 'Clear filters' }).click();
     await expect(filters.getByRole('searchbox')).toHaveValue('');
     await expect.poll(() => new URL(editor.url()).searchParams.has('q')).toBe(false);
-    await expect(filters.getByRole('button', { name: 'Recall last cleared filters' })).toBeVisible();
+    await filters.getByRole('button', { name: 'Recall last cleared filters' }).click();
+    await expect(cards.getByRole('link', { name: 'Quartz card 1', exact: true })).toBeVisible();
+    await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Alternate recipe');
+    await filters.getByRole('button', { name: 'Recall saved filters' }).click();
+    await expect(editor.getByText('No matching cards', { exact: true })).toBeVisible();
     await filters.getByRole('combobox', { name: 'Saved recipe' }).selectOption('Release quartz');
     await filters.getByRole('button', { name: 'Recall saved filters' }).click();
     await expect(filters.getByRole('searchbox')).toHaveValue('Quartz; SIGNAL');
@@ -1894,9 +1898,9 @@ test('a rejected filter-member read clears the board and open inspector before r
       await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
         ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor,
       }));
-      const denied = editor.waitForResponse((response) => response.url().endsWith('/filter-members') && response.status() === 404);
+      const denied = editor.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/filter-members'));
       await filters.getByText('Filter by labels, members or lists').click();
-      await denied;
+      assert.equal((await denied).status(), 404);
       await held.promise;
       await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
       await expect(editor.getByRole('heading', { name: oldName, exact: true })).toHaveCount(0);
