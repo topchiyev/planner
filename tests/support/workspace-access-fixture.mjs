@@ -8,6 +8,7 @@ import { CommandGate } from '../../apps/backend/dist/application/command-gate/ga
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { buildApp } from '../../apps/backend/dist/build-app.js';
+import { createWorkspaceRelationships } from '../../apps/backend/dist/native/relationship-routes.js';
 import { startProxySocket } from '../../apps/backend/dist/native/proxy-socket.js';
 import { createWorkspaceReader } from '../../apps/backend/dist/native/workspace-routes.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
@@ -93,7 +94,8 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   const sessions = createBrowserSessions(db, installationId, gate, hasher, now);
   const reader = createWorkspaceReader(db, installationId, gate, now);
   const app = buildApp({
-    native: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }), workspace: reader, auth: {
+    native: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }), workspace: reader,
+      relationships: createWorkspaceRelationships(db, installationId, gate, now), auth: {
       confirm: async () => false, login: sessions.login, revoke: sessions.revoke,
       async read(token) {
         const session = await sessions.read(token);

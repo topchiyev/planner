@@ -24,6 +24,8 @@ const paginated = z.strictObject({ nextCursor: cursor.nullable() });
 const page = <S extends z.ZodType>(item: S) => z.strictObject({ data: z.array(item), page: paginated });
 const data = <S extends z.ZodType>(schema: S) => z.strictObject({ data: schema });
 
+export { pageQuery as workspacePageQuery, page as workspacePage, data as workspaceData };
+
 export const projectAccessSchema = z.strictObject({
   canEdit: z.boolean(), canToggleHidden: z.boolean(), canChangeOwnership: z.boolean(), canCreateBoard: z.boolean(),
   canManageManagers: z.boolean(), canDelete: z.boolean(), canFavorite: z.boolean(),
