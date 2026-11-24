@@ -169,7 +169,8 @@ for attempt in {1..60}; do
     sleep .1
 done
 forged=( -H 'X-Forwarded-For: 198.51.100.10' -H 'X-Forwarded-Host: forged.invalid' -H 'X-Forwarded-Proto: http'
-    -H 'X-Real-IP: 198.51.100.11' -H 'X-Planner-Proxy-Token: fabricated' -H 'Forwarded: host=forged.invalid;proto=http' )
+    -H 'X-Real-IP: 198.51.100.11' -H 'X-Planner-Proxy-Token: fabricated' -H 'Forwarded: host=forged.invalid;proto=http'
+    -H 'X-Unrelated: preserved' )
 curl_loopback --fail "${forged[@]}" -H 'Host: forged.invalid' "$backend/fixture/context" > "$work/direct.json"
 curl_tls --fail --interface 127.0.0.2 "${forged[@]}" "$origin/fixture/context" > "$work/proxied.json"
 python3 - "$work" <<'PY'
@@ -180,7 +181,7 @@ for path, address in [('direct.json', None), ('proxied.json', '127.0.0.2')]:
     value = json.loads((root / path).read_text())
     assert value == {'context': {'origin': 'https://planner.example.test', 'clientAddress': address},
                      'host': 'planner.example.test', 'rawAddress': '127.0.0.1' if address is None else None,
-                     'forwarded': []}, value
+                     'forwardingRemoved': True, 'canonicalHost': True, 'unrelated': ['preserved']}, value
 PY
 [ "$(status_code curl_tls "$origin/health/ready")" = 200 ]
 "$node" "$media/native-http-fixture.mjs" stream

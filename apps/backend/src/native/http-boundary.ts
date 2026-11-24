@@ -43,19 +43,40 @@ function proxyAddress(request: FastifyRequest, authority: string, token?: Buffer
   return address;
 }
 
+function isForwardingHeader(name: string) {
+  return name.startsWith('x-forwarded-') || name.startsWith('x-planner-')
+    || ['forwarded', 'x-real-ip', 'x-original-url', 'x-rewrite-url'].includes(name);
+}
+
+function sanitizeHeaders(request: FastifyRequest, authority: string) {
+  const raw = request.raw;
+  const distinct = raw.headersDistinct;
+  for (const headers of [request.headers, raw.headers, distinct]) {
+    if (!headers) continue;
+    for (const name of Object.keys(headers)) {
+      if (isForwardingHeader(name)) delete headers[name];
+    }
+  }
+  raw.headers.host = authority;
+  request.headers.host = authority;
+  if (distinct) distinct.host = [authority];
+
+  const rawHeaders = raw.rawHeaders;
+  const sanitized: string[] = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index].toLowerCase();
+    if (name !== 'host' && !isForwardingHeader(name)) sanitized.push(rawHeaders[index], rawHeaders[index + 1]);
+  }
+  rawHeaders.splice(0, rawHeaders.length, ...sanitized, 'Host', authority);
+}
+
 export function registerNativeHttpBoundary(app: FastifyInstance, boundary: NativeHttpBoundary) {
   const authority = new URL(boundary.origin).host;
   const token = boundary.proxyToken === undefined ? undefined : Buffer.from(boundary.proxyToken, 'hex');
   app.addHook('onRequest', async (request, reply) => {
     const clientAddress = proxyAddress(request, authority, token);
     request.plannerConnection = { origin: boundary.origin, clientAddress };
-    for (const name of Object.keys(request.headers)) {
-      if (name.startsWith('x-forwarded-') || name.startsWith('x-planner-')
-          || ['forwarded', 'x-real-ip', 'x-original-url', 'x-rewrite-url'].includes(name)) {
-        delete request.headers[name];
-      }
-    }
-    request.headers.host = authority;
+    sanitizeHeaders(request, authority);
 
     const pathname = (request.raw.url ?? '').split('?', 1)[0];
     const read = request.method === 'GET' || request.method === 'HEAD';

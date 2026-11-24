@@ -21,6 +21,7 @@ const proxyHeaders = {
   host: 'forged.local', forwarded: 'for=10.4.0.4;host=forged.local;proto=http',
   'x-forwarded-host': authority, 'x-forwarded-proto': 'https', 'x-forwarded-for': '2001:db8::17',
   'x-forwarded-prefix': '/untrusted', 'x-real-ip': '10.4.0.4', origin,
+  'x-unrelated': ['first', 'second'],
 };
 
 function unixRequest(socketPath, path, { method, headers } = {}) {
@@ -46,7 +47,17 @@ test('native transport gates every protected route and strips forged forwarding 
   ]) {
     app.route({ method, url, handler: (req) => {
       protectedCalls += 1;
-      return { context: req.plannerConnection, headers: req.headers, host: req.host, ip: req.ip };
+      const { rawHeaders, headersDistinct } = req.raw;
+      const rawNames = rawHeaders.filter((_name, index) => index % 2 === 0).map((name) => name.toLowerCase());
+      const leak = [...Object.keys(req.headers), ...Object.keys(headersDistinct ?? {}), ...rawNames]
+        .some((name) => /^(?:forwarded|x-(?:forwarded|real|planner)-)/u.test(name));
+      return {
+        context: req.plannerConnection, host: req.host, ip: req.ip,
+        forwardingRemoved: !leak && !rawHeaders.includes(proxyToken),
+        canonicalHost: headersDistinct?.host?.length === 1 && headersDistinct.host[0] === authority
+          && rawNames.filter((name) => name === 'host').length === 1 && rawHeaders[rawNames.indexOf('host') * 2 + 1] === authority,
+        unrelated: headersDistinct?.['x-unrelated'],
+      };
     } });
   }
   const proxyDirectory = await mkdtemp(join(tmpdir(), 'planner-proxy-'));
@@ -98,10 +109,9 @@ test('native transport gates every protected route and strips forged forwarding 
   assert.deepEqual(allowed.data.context, { origin, clientAddress: '2001:db8::17' });
   assert.equal(allowed.data.host, authority);
   assert.equal(allowed.data.ip, undefined);
-  assert.equal(allowed.data.headers.origin, origin);
-  for (const name of Object.keys(proxied).filter((name) => name !== 'host' && name !== 'origin')) {
-    assert.equal(allowed.data.headers[name], undefined);
-  }
+  assert.equal(allowed.data.forwardingRemoved, true);
+  assert.equal(allowed.data.canonicalHost, true);
+  assert.deepEqual(allowed.data.unrelated, ['first', 'second']);
   assert.equal((await proxyPost('/api/v1/mfa/enrollment', proxied)).status, 503);
   access = { kind: 'enrollment', step: 'mfa' };
   assert.equal((await inject('HEAD', '/enroll-mfa')).statusCode, 200);
@@ -116,6 +126,7 @@ test('native transport gates every protected route and strips forged forwarding 
     const direct = (await inject('GET', '/api/v1/projects', headers)).json();
     assert.deepEqual(direct.context, { origin, clientAddress: null });
     assert.equal(direct.host, authority);
+    assert.equal(direct.forwardingRemoved, true);
   }
   const malformed = await unixRequest(socket, '/api/v1/projects', { headers: { ...proxied, 'x-forwarded-for': '192.0.2.9, 192.0.2.10' } });
   assert.deepEqual(malformed.data.context, { origin, clientAddress: null });

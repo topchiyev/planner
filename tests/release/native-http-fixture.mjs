@@ -17,11 +17,20 @@ if (mode === 'serve') {
   const proxyToken = (await readFile('/etc/planner/proxy-token', 'utf8')).trim();
   process.umask(0o077);
   const app = buildApp({ native: { origin, proxyToken, readAccess: async () => ({ kind: 'ready' }) } });
-  app.get('/fixture/context', (req) => ({
-    context: req.plannerConnection, host: req.host, rawAddress: req.ip ?? null,
-    forwarded: Object.keys(req.headers).filter((name) => name.startsWith('x-forwarded-')
-      || name.startsWith('x-planner-') || ['forwarded', 'x-real-ip'].includes(name)),
-  }));
+  app.get('/fixture/context', (req) => {
+    const { headersDistinct, rawHeaders } = req.raw;
+    const rawNames = rawHeaders.filter((_name, index) => index % 2 === 0).map((name) => name.toLowerCase());
+    const leak = [...Object.keys(req.headers), ...Object.keys(headersDistinct), ...rawNames]
+      .some((name) => /^(?:forwarded|x-(?:forwarded|real|planner)-)/u.test(name));
+    return {
+      context: req.plannerConnection, host: req.host, rawAddress: req.ip ?? null,
+      forwardingRemoved: !leak && !rawHeaders.includes(proxyToken),
+      canonicalHost: headersDistinct.host?.length === 1 && headersDistinct.host[0] === 'planner.example.test'
+        && rawNames.filter((name) => name === 'host').length === 1
+        && rawHeaders[rawNames.indexOf('host') * 2 + 1] === 'planner.example.test',
+      unrelated: headersDistinct['x-unrelated'],
+    };
+  });
   app.get(eventPath, async (_req, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
