@@ -927,6 +927,85 @@ test('editors move cards by pointer and keyboard, recover stale placement, and u
   });
 });
 
+test('list maintenance sorts, archives closed cards and requires fresh confirmation after a new trash arrival', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ fixture: f, origin, page }) => {
+    const alpha = fixtureId(16200);
+    const closedA = fixtureId(16201);
+    const closedB = fixtureId(16202);
+    const privateBoard = ids.privateBoard;
+    for (const [id, listId, name, rank] of [
+      [alpha, ids.privateActiveList, 'Alpha fixture', '4096'], [closedA, ids.privateClosedList, 'Closed first', '1024'],
+      [closedB, ids.privateClosedList, 'Closed second', '2048'],
+    ]) {
+      await f.insert('cards', id, { boardId: privateBoard, listId, name, rank, kind: 'board', type: 'project', closed: listId === ids.privateClosedList });
+    }
+    await f.db.collection('boardMembers').deleteOne({ ...f.scope, boardId: privateBoard, userId: ids.privateOwner });
+    const editor = await page({ width: 1440, height: 900 });
+    const manager = await page({ width: 390, height: 844 });
+    const viewer = await page({ width: 390, height: 844 });
+    await signIn(editor, origin, 'first-editor');
+    await signIn(manager, origin, 'private-owner');
+    await signIn(viewer, origin, 'viewer');
+    const base = origin + board(privateBoard);
+    await editor.goto(base + '?view=grid');
+    await viewer.goto(base + '?context=trash&view=grid');
+    await expect(viewer.getByRole('link', { name: 'Card in trash' })).toBeVisible();
+    await expect(viewer.getByRole('button', { name: 'Clear trash', exact: true })).toHaveCount(0);
+    await expect(editor.getByRole('button', { name: 'Archive cards in To do' })).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Sort cards in To do' }).click();
+    const sort = editor.getByRole('dialog', { name: 'Sort cards' });
+    await sort.getByLabel('Sort by').selectOption('name');
+    await sort.getByLabel('Direction').selectOption('asc');
+    await sort.getByRole('button', { name: 'Apply sort' }).click();
+    await expect(editor.getByRole('list', { name: 'Cards in To do' }).getByRole('link').first()).toHaveText('Alpha fixture');
+
+    await editor.getByRole('button', { name: 'Archive cards in Done' }).click();
+    const archive = editor.getByRole('dialog', { name: 'Archive cards' });
+    await expect(archive.getByText('Move 2 cards from')).toBeVisible();
+    await archive.getByRole('button', { name: 'Confirm archive' }).click();
+    await expect(editor.getByRole('link', { name: 'Closed first' })).toHaveCount(0);
+    const contexts = editor.getByRole('navigation', { name: 'Board context' });
+    await contexts.getByRole('link', { name: 'Archive' }).click();
+    await expect(editor.getByRole('list', { name: 'Cards in Archive' }).getByRole('link').first()).toHaveText('Closed first');
+    await expect(editor.getByRole('list', { name: 'Cards in Archive' }).getByRole('link').nth(1)).toHaveText('Closed second');
+
+    await manager.goto(base + '?context=trash&view=grid');
+    await manager.getByRole('button', { name: 'Clear trash', exact: true }).click();
+    const clear = manager.getByRole('dialog', { name: 'Clear trash' });
+    const confirmation = clear.getByLabel('I confirm permanent deletion of these cards');
+    const apply = clear.getByRole('button', { name: 'Permanently clear trash' });
+    await expect(clear.getByText('Permanently delete 1 card and its contents?')).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await confirmation.check();
+    await expect(apply).toBeEnabled();
+
+    const session = await (await editor.request.get(origin + '/api/v1/session')).json();
+    const current = (await (await editor.request.get(origin + '/api/v1/cards/' + alpha)).json()).data;
+    const workspace = (await (await editor.request.get(origin + '/api/v1/boards/' + privateBoard + '/workspace')).json()).data;
+    const source = workspace.lists.find(({ id }) => id === ids.privateActiveList);
+    const trash = workspace.lists.find(({ id }) => id === ids.privateTrash);
+    const arrival = await editor.request.post(origin + '/api/v1/cards/' + alpha + '/trash', {
+      headers: { Origin: origin, 'X-CSRF-Token': session.csrfToken, 'If-Match': `"${current.revision}"`, 'Idempotency-Key': randomUUID() },
+      data: { sourceOrderVersion: source.orderVersion, destinationOrderVersion: trash.orderVersion },
+    });
+    assert.equal(arrival.status(), 200);
+    await apply.click();
+    await expect(clear.getByRole('alert')).toContainText('changed');
+    await expect(clear.getByText('Permanently delete 2 cards and their contents?')).toBeVisible();
+    await expect(confirmation).not.toBeChecked();
+    await expect(apply).toBeDisabled();
+    await confirmation.check();
+    await apply.click();
+    await expect(clear).toHaveCount(0);
+    await expect(manager.getByRole('button', { name: 'Clear trash', exact: true })).toBeDisabled();
+    await expect(manager.getByRole('link', { name: 'Card in trash' })).toHaveCount(0);
+    await expect(manager).toHaveURL(base + '?context=trash&view=grid');
+    assert.equal((await editor.request.get(origin + '/api/v1/cards/' + alpha)).status(), 404);
+    assert.ok(await f.db.collection('lists').findOne({ ...f.scope, id: ids.privateTrash, kind: 'trash' }));
+    assert.equal(await f.db.collection('cards').countDocuments({ ...f.scope, listId: ids.privateArchive, kind: 'archive' }), 3);
+  });
+});
+
 test('keyboard placement continues past the first anchor page and closes when protected access is lost', { timeout: 120_000 }, async () => {
   await workspaceBrowser(async ({ fixture, origin, page }) => {
     const p = await page({ width: 390, height: 844 });

@@ -514,3 +514,33 @@ test('historical cards retain authenticated exact file bytes while ordinary muta
     assert.equal((await f.call(ref, editor, { method: 'PATCH', headers: expected(editor, 1), body: { name: 'Restored file' } })).status, 200);
   });
 });
+
+test('clearing trash retires only deleted logical attachment references while shared bytes are still served', { timeout: 100_000 }, async () => {
+  await withMedia(async (f, { blobPath }) => {
+    const editor = await login(f, ids.firstEditor);
+    const bytes = Buffer.from([0xaa, 0x00, 0xfd, 0x3c, 0x42]);
+    const removed = await upload(f, cardPath(ids.activeCard) + '/attachment-files', editor, 1, bytes, 'Trash file');
+    const survivor = await upload(f, cardPath(ids.sharedTarget) + '/attachment-files', editor, 1, bytes, 'Live file');
+    assert.equal(removed.status, 201);
+    assert.equal(survivor.status, 201);
+    const removedPath = filePath(removed.data.data.reference.id) + '/download';
+    const retainedPath = filePath(survivor.data.data.reference.id) + '/download';
+    const trashed = await f.call(cardPath(ids.activeCard) + '/trash', editor, {
+      method: 'POST', headers: expected(editor, removed.data.data.parent.revision),
+      body: { sourceOrderVersion: 1, destinationOrderVersion: 1 },
+    });
+    assert.equal(trashed.status, 200);
+    assert.deepEqual((await socket(f, removedPath, editor)).bytes, bytes);
+    const { destination } = trashed.data.data;
+    const clear = await f.call('/api/v1/boards/' + ids.privateBoard + '/trash/clear', editor, {
+      method: 'POST', headers: expected(editor, destination.revision),
+      body: { trashListId: destination.listId, trashOrderVersion: destination.orderVersion, confirmed: true },
+    });
+    assert.equal(clear.status, 200);
+    assert.equal(clear.data.data.clearedCount, 2);
+    assert.equal((await socket(f, removedPath, editor)).status, 404);
+    assert.deepEqual((await socket(f, retainedPath, editor)).bytes, bytes);
+    assert.deepEqual(await readdir(blobPath), [checksum(bytes)]);
+    assert.equal(await f.db.collection('attachments').countDocuments({ ...f.scope, blobDigest: checksum(bytes) }), 1);
+  });
+});

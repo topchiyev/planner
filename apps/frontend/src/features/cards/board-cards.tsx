@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { workspaceSignInPath, type RelationshipCommandInput, type WorkspaceReadOutput } from '@planner/contracts';
 import { BoardCardPlacement, CardAppendTarget, DraggableBoardCard } from './card-placement-dnd.js';
+import { ClearTrash, ListMaintenanceButtons } from '../lists/list-maintenance.js';
 import { DeleteList } from '../lists/delete-list.js';
 import { BoardLists, ReadonlyBoardLists, type BoardList } from '../lists/board-lists.js';
 import { relationshipCommand } from '../projects/project-api.js';
@@ -56,7 +57,9 @@ export function BoardCards({ workspace, lists, context }: { workspace: Workspace
     } finally { pending.current = null; if (!controller.signal.aborted) setLoading(false); }
   }
 
+  const trash = context === 'trash' ? lists.find(({ kind }) => kind === 'trash') : undefined;
   return <>
+    {trash && <ClearTrash workspace={workspace} trash={trash} />}
     {editable ? <BoardLists key={workspace.board.id} workspace={workspace} lists={lists} renderContents={renderContents}
       wrapDragContents={(children) => <BoardCardPlacement workspace={workspace} cards={current.data}>{children}</BoardCardPlacement>} /> :
       <ReadonlyBoardLists lists={lists} renderContents={renderContents} />}
@@ -81,6 +84,7 @@ function CardsInList({ workspace, list, cards, editable, search }: {
     {editable && <div className="project-actions">
       <button className="workspace-button board-add-card" type="button" aria-label={'Add card to ' + list.name}
         onClick={() => setCreating(true)}>Add card</button>
+      <ListMaintenanceButtons workspace={workspace} list={list} />
       <DeleteList workspace={workspace} list={list} />
     </div>}
     {editable && creating && <CreateCardDialog workspace={workspace} list={list} cards={cards} close={() => setCreating(false)} />}

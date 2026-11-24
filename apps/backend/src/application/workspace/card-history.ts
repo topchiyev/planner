@@ -22,9 +22,7 @@ export async function scopedSystemList(records: WorkspaceRecords, generationId: 
   return list;
 }
 
-export async function reserveCardHistory(records: WorkspaceRecords, generationId: string, board: Board, count: number) {
-  if (!Number.isSafeInteger(count) || count < 0) throw new RangeError('Expected an exact history arrival count.');
-  if (count === 0) return null;
+export async function cardHistoryHighWater(records: WorkspaceRecords, generationId: string, board: Board) {
   let previous: bigint;
   if (board.historySequence !== undefined) previous = decodeRank(board.historySequence);
   else {
@@ -33,7 +31,13 @@ export async function reserveCardHistory(records: WorkspaceRecords, generationId
         { $eq: [{ $type: '$historySequence' }, 'long'] }] } }, { historySequence: -1 });
     previous = latest?.historySequence === undefined ? 0n : decodeRank(latest.historySequence);
   }
-  if (previous < 0n) previous = 0n;
+  return previous < 0n ? 0n : previous;
+}
+
+export async function reserveCardHistory(records: WorkspaceRecords, generationId: string, board: Board, count: number) {
+  if (!Number.isSafeInteger(count) || count < 0) throw new RangeError('Expected an exact history arrival count.');
+  if (count === 0) return null;
+  const previous = await cardHistoryHighWater(records, generationId, board);
   const last = previous + BigInt(count);
   if (last > maximumSignedInt64) throw new RelationshipError('cardOrder');
   return { first: previous + 1n, last };

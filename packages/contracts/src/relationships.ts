@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { cardTransitionCommands } from './card-transitions.js';
 import { cardLifecycleCommands } from './card-lifecycle.js';
 import { boardLifecycleCommands } from './board-lifecycle.js';
+import { listMaintenanceCommands } from './list-maintenance.js';
 import { listLifecycleCommands } from './list-lifecycle.js';
 import { publicIdSchema, revisionSchema } from './storage.js';
 import { projectBackgroundSchema, workspaceData, workspacePage, workspacePageQuery, workspacePersonSchema, workspaceProjectType } from './workspace.js';
@@ -73,6 +74,7 @@ function read<const ID extends string, const Route extends string, I extends z.Z
 }
 
 export const relationshipCommands = {
+  ...listMaintenanceCommands,
   ...cardLifecycleCommands,
   ...cardTransitionCommands,
   ...boardLifecycleCommands,
