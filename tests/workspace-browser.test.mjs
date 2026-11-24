@@ -2254,8 +2254,7 @@ test('keyboard cut rechecks the source revision, cancels cleanly and reopens aft
       if (!response.url().endsWith('/boards/' + ids.privateBoard + '/workspace') || response.status() !== 200) return false;
       return (await response.json()).data.board.permissions.canEdit === false;
     });
-    const demoted = await changeSourceRole('viewer', 0);
-    await readOnly;
+    const [demoted] = await Promise.all([changeSourceRole('viewer', 1), readOnly]);
     await expect(editor.getByRole('heading', { name: 'Transfer source', level: 1 })).toBeVisible();
     await expect(toolbar).toHaveCount(0);
     await changeSourceRole('editor', demoted);
@@ -2388,6 +2387,8 @@ test('description drafts recover exact Markdown, preserve newer tab writes and r
     await peerTab.clock.setFixedTime(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
     await peerTab.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect(markdown(peerTab)).toHaveValue(currentDraft);
+    await peerTab.clock.setFixedTime(new Date());
+    await expiringTab.close();
     await offer(editor).getByRole('button', { name: 'Discard draft' }).click();
     assert.deepEqual((await browserDescriptionDrafts(editor)).map(({ markdown }) => markdown), [currentDraft]);
 
