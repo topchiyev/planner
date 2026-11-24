@@ -182,6 +182,11 @@ check_payload() {
             fail ownership 'The plannerctl entry point is already in use.'
     fi
     check_units
+    for base in /etc/tmpfiles.d /run/tmpfiles.d /usr/local/lib/tmpfiles.d; do
+        if exists "$base/planner-workspace.conf"; then
+            fail ownership "A local runtime directory override occupies $base/planner-workspace.conf."
+        fi
+    done
     if exists /usr/lib/tmpfiles.d/planner-workspace.conf; then
         require_payload_owner /usr/lib/tmpfiles.d/planner-workspace.conf
         owned_file /usr/lib/tmpfiles.d/planner-workspace.conf 0:0:644

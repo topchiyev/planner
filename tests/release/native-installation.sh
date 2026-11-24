@@ -104,6 +104,26 @@ for conflict in /etc/systemd/system/planner.service.d /run/systemd/system/planne
     rmdir "$conflict"
 done
 
+for base in /etc/tmpfiles.d /run/tmpfiles.d /usr/local/lib/tmpfiles.d; do
+    mkdir -p "$base"
+    conflict=$base/planner-workspace.conf
+    ln -s /dev/null "$conflict"
+    reject_install tmpfiles-mask "A local runtime directory override occupies $conflict."
+    [ "$(readlink "$conflict")" = /dev/null ]
+    unlink "$conflict"
+done
+
+install_planner() { PLANNER_INSTALL_APP_PORT=27530 PLANNER_INSTALL_DB_PORT=27531 dpkg -i "$package"; }
+assert_units() {
+    systemd-analyze verify planner.service planner-mongodb.service
+    for unit in planner.service planner-mongodb.service; do
+        [ "$(systemctl is-enabled "$unit" || true)" = disabled ]
+        [ "$(systemctl show -p FragmentPath --value "$unit")" = "/usr/lib/systemd/system/$unit" ]
+        [ "$(systemctl show -p MainPID --value "$unit")" = 0 ]
+    done
+    [ "$(/usr/bin/plannerctl --version)" = 0.1.0 ]
+}
+
 dpkg -i "$previous"
 old_launcher=$(sha256sum /usr/bin/plannerctl)
 for conflict in /usr/lib/systemd/system/planner.service /usr/lib/tmpfiles.d/planner-workspace.conf; do
@@ -123,8 +143,24 @@ for conflict in /usr/lib/systemd/system/planner.service /usr/lib/tmpfiles.d/plan
     [ -z "$(getent passwd planner planner-mongodb || :)" ]
     unlink "$conflict"
 done
+install_planner
+assert_units
+[ -x /opt/planner/current/lib/native-preflight ]
+[ -f /etc/planner/.native-installation ]
+cmp /etc/planner/.native-installation /var/lib/planner/.native-installation
+printf '%s\n' 'The signed prior package upgraded directly to the new units and CLI.'
+
+# This guest started empty and only the candidate created these test identities and paths.
+# Reset its synthetic installation to exercise first install independently in the same boot.
 dpkg -r planner-workspace
 [ ! -e /opt/planner ]
+unlink /etc/planner/.native-installation
+unlink /var/lib/planner/.native-installation
+rmdir /etc/planner /var/lib/planner/{mongodb,blobs,staging,backups} /var/lib/planner /run/planner
+for account in planner planner-mongodb; do
+    userdel "$account"
+    if getent group "$account" >/dev/null; then groupdel "$account"; fi
+done
 
 systemd-run --unit=planner-test-port --uid=nobody /usr/bin/python3 -m http.server 27431 --bind 127.0.0.1
 for attempt in {1..50}; do
@@ -135,14 +171,8 @@ reject_install collision 'Planner database port 27431 is occupied.'
 [ ! -e /etc/planner ]
 [ ! -e /var/lib/planner ]
 
-install_planner() { PLANNER_INSTALL_APP_PORT=27530 PLANNER_INSTALL_DB_PORT=27531 dpkg -i "$package"; }
 install_planner
-systemd-analyze verify planner.service planner-mongodb.service
-for unit in planner.service planner-mongodb.service; do
-    [ "$(systemctl is-enabled "$unit" || true)" = disabled ]
-    [ "$(systemctl show -p FragmentPath --value "$unit")" = "/usr/lib/systemd/system/$unit" ]
-    [ "$(systemctl show -p MainPID --value "$unit")" = 0 ]
-done
+assert_units
 systemctl start planner.service planner-mongodb.service
 for unit in planner.service planner-mongodb.service; do
     [ "$(systemctl show -p MainPID --value "$unit")" = 0 ]
@@ -207,5 +237,5 @@ install_planner
 [ "$(awk '{print $22}' "/proc/$sentinel_pid/stat")" = "$sentinel_time" ]
 [ "$(sha256sum "$work/sentinel.conf")" = "$sentinel_config" ]
 [ "$(sentinel_data check)" = "$sentinel_id" ]
-[ "$(systemctl show -p MainPID --value planner.service planner-mongodb.service | sort -u)" = 0 ]
+assert_units
 echo 'NATIVE INSTALLATION ACCEPTANCE PASSED'
