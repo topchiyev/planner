@@ -13,12 +13,15 @@ export function useWorkspaceNavigation() {
   return useRouteLoaderData<Awaited<ReturnType<typeof loadWorkspaceNavigation>>>(workspaceNavigationId);
 }
 
-function useWorkspaceSelection() {
+type BoardSnapshot = NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>;
+
+function useWorkspaceSelection(currentBoard?: BoardSnapshot) {
   const matches = useMatches();
   const project = matches.find(({ id }) => id === workspaceProjectId)?.loaderData as
     Awaited<ReturnType<typeof loadNativeProject>> | undefined;
-  const board = matches.find(({ id }) => id === workspaceBoardId)?.loaderData as
+  const loadedBoard = matches.find(({ id }) => id === workspaceBoardId)?.loaderData as
     Awaited<ReturnType<typeof loadNativeBoard>> | undefined;
+  const board = currentBoard ?? loadedBoard;
   return { project: project ?? board?.project, board: board?.board };
 }
 
@@ -30,10 +33,10 @@ export function BoardLinks({ boards, className }: { boards: BoardSummary[]; clas
   );
 }
 
-export function WorkspaceSidebar({ onFollow }: { onFollow: () => void }) {
+export function WorkspaceSidebar({ onFollow, currentBoard }: { onFollow: () => void; currentBoard?: BoardSnapshot }) {
   const location = useLocation();
   const navigation = useWorkspaceNavigation();
-  const selection = useWorkspaceSelection();
+  const selection = useWorkspaceSelection(currentBoard);
   if (!navigation) return null;
   const normal = navigation.projectsPage.data;
   const projects = selection.project && !normal.some(({ id }) => id === selection.project?.id)

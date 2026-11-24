@@ -2027,6 +2027,8 @@ test('native browser applies verified live updates passively and preserves a dir
     assert.equal(renamed.status(), 200, await renamed.text());
     await publish();
     await expect(editor.getByRole('heading', { name: 'Board from the live peer', level: 1 })).toBeVisible();
+    await expect(editor.getByRole('navigation', { name: 'Project navigation' })
+      .getByRole('link', { name: 'Board from the live peer' })).toBeVisible();
     await expect(draft).toHaveValue('Unsubmitted local title');
 
     let invalidatedResume = false;

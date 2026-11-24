@@ -33,7 +33,7 @@ export function BoardPage() {
   const initial = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
   const [params] = useSearchParams();
   const navigation = useNavigation();
-  const { deniedBoard, refuseBoard, suspendBoard } = useOutletContext<BoardReadRefusal>();
+  const { deniedBoard, refuseBoard, presentBoard } = useOutletContext<BoardReadRefusal>();
   const { key, pathname, search, state: routeState } = useLocation();
   const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
   const pending = !!navigation.location && (navigation.location.pathname !== pathname || navigation.location.search !== search);
@@ -45,9 +45,9 @@ export function BoardPage() {
   useLayoutEffect(() => {
     if (initial && live.phase === 'missing') refuseBoard(initial);
     else if (initial && deniedBoard === initial && live.phase === 'visible' && board !== initial) refuseBoard(undefined);
-    if (initial && concealed) suspendBoard(initial);
-    else suspendBoard(undefined);
-    return () => suspendBoard(undefined);
+    presentBoard(initial && (concealed || board !== initial)
+      ? { source: initial, board: concealed ? null : board ?? null } : undefined);
+    return () => presentBoard(undefined);
   }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, suspendBoard]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
