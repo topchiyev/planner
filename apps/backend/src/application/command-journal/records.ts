@@ -32,6 +32,7 @@ export interface CommandRecord {
   recoverySequence?: Long;
   status: 'building' | 'prepared' | 'committed';
   applied?: number;
+  lastAppliedEffectId?: string | null;
   pendingDelete?: string;
   manifest?: BatchSummary[];
   result?: string;
@@ -68,7 +69,7 @@ export function checkCommand(command: CommandRecord) {
     throw new CommandRecoveryError('A command journal identity is invalid.');
   }
   if (status === 'building') {
-    if ([command.applied, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
+    if ([command.applied, command.lastAppliedEffectId, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
       command.eventCount, command.delivered, command.outboxPending, command.recoverySequence]
       .some((value) => value !== undefined)) throw new CommandRecoveryError('A building command has active effects.');
     return;
@@ -87,7 +88,8 @@ export function checkCommand(command: CommandRecord) {
     }
     return sum + item.count;
   }, 0);
-  if (command.applied! > total || (status === 'committed' && (command.applied !== total || command.pendingDelete !== undefined))) {
+  if (command.applied! > total || (command.applied === 0 ? command.lastAppliedEffectId !== null
+      : !publicIdSchema.safeParse(command.lastAppliedEffectId).success) || (status === 'committed' && (command.applied !== total || command.pendingDelete !== undefined))) {
     throw new CommandRecoveryError('The command journal cursor is invalid.');
   }
   checkOutboxCursor(command);

@@ -251,7 +251,7 @@ export class CommandJournal {
       return sequence > maximum ? sequence : maximum;
     }, 0n);
     const recoverySequence = encodeRank(last + 1n);
-    const preparedFields = { status: 'prepared', recoverySequence, applied: 0, manifest, result, resultHash: journalDigest(result),
+    const preparedFields = { status: 'prepared', recoverySequence, applied: 0, lastAppliedEffectId: null, manifest, result, resultHash: journalDigest(result),
       eventCount, delivered: 0, outboxPending: eventCount > 0 } as const;
     const prepared = { ...command, ...preparedFields };
     const collection = batches(this.database);
@@ -296,6 +296,9 @@ export class CommandJournal {
         } else if (audit) {
           throw new CommandRecoveryError('A domain effect follows its command audit.');
         }
+        if (index === cursor - 1 && effect.effectId !== command.lastAppliedEffectId) {
+          throw new CommandRecoveryError('A command journal cursor does not match the stored effect.');
+        }
         if (index === cursor && command.pendingDelete !== undefined
             && (effect.kind !== 'delete' || command.pendingDelete !== effect.effectId)) {
           throw new CommandRecoveryError('The command deletion reservation is invalid.');
@@ -312,11 +315,12 @@ export class CommandJournal {
     const cursor = command.applied!;
     const collection = commands(this.database);
     let index = 0;
+    let lastAppliedEffectId = command.lastAppliedEffectId ?? null;
     for await (const batch of readBatches(this.database, command)) {
       for (const effect of batch) {
         const step = index++;
         if (step < cursor) continue;
-        const position = { _id: command._id, status: 'prepared', applied: step } as const;
+        const position = { _id: command._id, status: 'prepared', applied: step, lastAppliedEffectId } as const;
         await applyCommandEffect(this.database, command.generationId, effect, step === cursor && command.pendingDelete !== undefined,
           async () => {
             const reserved = await collection.updateOne({ ...position, pendingDelete: { $exists: false } },
@@ -325,11 +329,12 @@ export class CommandJournal {
             await this.options.checkpoint?.('deleteReserved', step);
           });
         await this.options.checkpoint?.('effectApplied', step);
-        const advanced = await collection.updateOne(position, { $inc: { applied: 1 }, $unset: { pendingDelete: '' } }, durable);
+        const advanced = await collection.updateOne(position, { $inc: { applied: 1 }, $set: { lastAppliedEffectId: effect.effectId }, $unset: { pendingDelete: '' } }, durable);
         assertChanged(advanced.matchedCount);
+        lastAppliedEffectId = effect.effectId;
       }
     }
-    const committed = await collection.updateOne({ _id: command._id, status: 'prepared', applied: index, pendingDelete: { $exists: false } },
+    const committed = await collection.updateOne({ _id: command._id, status: 'prepared', applied: index, lastAppliedEffectId, pendingDelete: { $exists: false } },
       { $set: { status: 'committed', committedAt: new Date() } }, durable);
     assertChanged(committed.matchedCount);
     await this.options.checkpoint?.('committed');

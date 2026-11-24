@@ -273,18 +273,22 @@ test('a concurrent reader never sees half of a transfer, and replay checks curre
   });
 });
 
-for (const fault of ['batch digest', 'prepared event count', 'missing deletion target', 'missing outbox event',
+for (const fault of ['batch digest', 'prepared event count', 'advanced applied cursor', 'wrong applied effect', 'missing deletion target', 'missing outbox event',
   'false outbox marker', 'missing outbox marker']) {
   test(`recovery closes the gate for a ${fault}`, { timeout: 45_000 }, async () => {
     await withFixtureMongo(async (fixture) => {
       const ownerDirectory = await seed(fixture);
       const { db } = fixture;
-      const prepared = fault === 'batch digest' || fault === 'prepared event count' || fault === 'missing deletion target';
+      const prepared = ['batch digest', 'prepared event count', 'advanced applied cursor',
+        'wrong applied effect', 'missing deletion target'].includes(fault);
       await killAt(fixture, ownerDirectory, prepared ? 'prepared' : 'committed');
       if (fault === 'batch digest') {
         await db.collection('commandEffectBatches').updateOne(byGeneration, { $set: { payload: '[]' } });
       } else if (fault === 'prepared event count') {
         await db.collection('commands').updateOne(byGeneration, { $set: { eventCount: 0, delivered: 0, outboxPending: false } });
+      } else if (fault === 'advanced applied cursor' || fault === 'wrong applied effect') {
+        await db.collection('commands').updateOne(byGeneration, { $set: { applied: 1,
+          ...(fault === 'wrong applied effect' && { lastAppliedEffectId: actorId }) } });
       } else if (fault === 'missing deletion target') {
         await db.collection('boardMembers').deleteOne(byGeneration);
       } else if (fault === 'missing outbox event') {
@@ -303,7 +307,7 @@ for (const fault of ['batch digest', 'prepared event count', 'missing deletion t
           assert.equal((await db.collection('commands').findOne(byGeneration)).status, 'prepared');
           assert.equal(await db.collection('auditEntries').countDocuments(byGeneration), 0);
         }
-        if (fault === 'prepared event count') {
+        if (['prepared event count', 'advanced applied cursor', 'wrong applied effect'].includes(fault)) {
           assert.equal(await rawBalance(db, leftId), 10);
           assert.equal(await db.collection('events').countDocuments(byGeneration), 0);
         }
