@@ -1,6 +1,7 @@
 import { lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultAppPort } from '@planner/contracts/native';
+import { recoverAccountChanges } from './application/auth/account-credentials.js';
 import { recoverFirstAdmin } from './application/auth/first-admin.js';
 import type { CommandGate } from './application/command-gate/gate.js';
 import { buildApp, type AppDependencies } from './build-app.js';
@@ -48,12 +49,16 @@ try {
     });
     // Apply this before binding the local operator socket, including direct service-account startup.
     process.umask(0o077);
-    closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess);
+    const auth = createNativeBrowserAuth(config, gate);
+    closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement);
     dependencies = { frontendRoot, native: {
-      origin: config.publicUrl, proxyToken, readAccess, auth: createNativeBrowserAuth(config, gate),
+      origin: config.publicUrl, proxyToken, readAccess, auth,
     } };
     port = config.appPort;
-    stopRecovery = startNativeCommandRecovery(config, gate, recoverFirstAdmin);
+    stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
+      await recoverFirstAdmin(db, installationId);
+      await recoverAccountChanges(db, installationId);
+    });
   } else {
     const configuredPort = process.env.PLANNER_HTTP_PORT ?? String(defaultAppPort);
     if (!/^\d{1,5}$/.test(configuredPort) || Number(configuredPort) > 65535) throw new Error('Invalid Planner HTTP port.');

@@ -219,6 +219,7 @@ export class CommandJournal {
     effects.push({ kind: 'insert', collection: 'auditEntries', id: commandUuid(command.id, ['audit']), fields: {
       actorId: command.actorId, commandId: command.id, resourceType: plan.audit.resourceType,
       resourceId: plan.audit.resourceId, action: plan.audit.action, createdAt: command.createdAt.toISOString(),
+      ...(plan.audit.origin && { origin: plan.audit.origin }),
       ...(plan.audit.detail === undefined ? {} : { detail: plan.audit.detail }),
     } });
     const sequences = new Map<string, bigint>();

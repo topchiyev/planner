@@ -67,7 +67,7 @@ export function encodeWorkspaceFields(fields: WorkspaceFields) {
   }
   return Object.fromEntries(Object.entries(fields).map(([field, value]) => {
     if (identityFields.has(field)) throw new TypeError('Workspace identity fields cannot be overridden.');
-    if (field === 'localAuth') throw new TypeError('Account credentials require protected storage access.');
+    if (field === 'localAuth' || field === 'accountChange') throw new TypeError('Account credentials require protected storage access.');
     validateField(field);
     if (integer64Fields.has(field)) return [field, (field === 'rank' && value === null) ? null : encodeRank(value as bigint | string)];
     if (dates.has(field)) return [field, toInstant(value)];
@@ -126,7 +126,7 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
       await checkBinding();
       const stored = await source.findOne(filter, {
         promoteLongs: false,
-        ...(name === 'users' && { projection: { localAuth: 0 } }),
+        ...(name === 'users' && { projection: { localAuth: 0, accountChange: 0 } }),
       });
       if (!stored) return null;
       const { _id, generationId: storedGeneration, commandEffectId, ...logical } = stored;

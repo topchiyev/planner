@@ -12,11 +12,16 @@ export const router = createBrowserRouter([
       lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).FirstAdminPage }),
     },
     {
+      path: 'account-recovery',
+      lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).AccountRecoveryPage }),
+    },
+    {
       path: 'sign-in',
       lazy: async () => ({ Component: (await import('../features/auth/auth-pages.js')).SignInPage }),
     },
   ] : []),
   {
+    id: 'app-shell',
     Component: AppShell,
     ...(nativeBrowserAuth && {
       loader: loadBrowserSession,
@@ -46,6 +51,22 @@ export const router = createBrowserRouter([
             lazy: async () => ({ Component: (await import('../features/boards/card-inspector.js')).CardInspector }),
           }],
         },
+        ...(nativeBrowserAuth ? [
+          {
+            path: 'settings',
+            lazy: async () => {
+              const { AccountSettingsPage, loadAccountSettings } = await import('../features/accounts/account-settings.js');
+              return { Component: AccountSettingsPage, loader: loadAccountSettings };
+            },
+          },
+          {
+            path: 'admin/accounts',
+            lazy: async () => {
+              const { AccountDirectoryPage, loadAccountDirectory } = await import('../features/accounts/account-directory.js');
+              return { Component: AccountDirectoryPage, loader: loadAccountDirectory };
+            },
+          },
+        ] : []),
         { path: '*', Component: RouteNotFound },
       ],
     }],
