@@ -106,9 +106,7 @@ function decodeValue(value: unknown): Value {
 
 function scopedWorkspace(database: Db, installationId: string, generationId: string, kind: 'active' | 'staged') {
   const collection = (name: WorkspaceCollection) => {
-    if (!indexedCollections.has(name) || protectedCollections.has(name)) {
-      throw new TypeError('Expected a collection available to the workspace.');
-    }
+    if (!indexedCollections.has(name)) throw new TypeError('Expected a workspace collection.');
     return database.collection<WorkspaceDocument>(name);
   };
   const lookup = (id: string): Filter<WorkspaceDocument> => ({ _id: workspaceKey(generationId, id), generationId, id });
@@ -122,6 +120,7 @@ function scopedWorkspace(database: Db, installationId: string, generationId: str
   return Object.freeze({
     generationId,
     async read(name: WorkspaceCollection, id: string) {
+      if (protectedCollections.has(name)) throw new TypeError('Expected a collection available to the workspace.');
       const source = collection(name);
       const filter = lookup(id);
       await checkBinding();
