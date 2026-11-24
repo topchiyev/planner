@@ -1,5 +1,6 @@
 import type { Db } from 'mongodb';
 import { workspaceKey } from '../../storage/identity.js';
+import { canonicalRow } from '../workspace/records.js';
 import { digestPattern, MediaStorageError, type BlobIdentity } from '../../storage/blobs/private-store.js';
 import { imageTypes, maximumDerivativeBytes, type MediaVariants } from './decoder.js';
 
@@ -44,11 +45,14 @@ export interface StoredAvatar {
   avatarMedia?: { id: string; name: string; availability: string; byteLength: number } | null;
 }
 
+export function mediaByteLength(value: unknown) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 export function validBlobIdentity(identity: unknown): identity is BlobIdentity {
   if (!identity || typeof identity !== 'object') return false;
   const { digest, byteLength } = identity as Partial<BlobIdentity>;
-  return typeof digest === 'string' && digestPattern.test(digest) && typeof byteLength === 'number'
-    && Number.isSafeInteger(byteLength) && byteLength >= 0;
+  return typeof digest === 'string' && digestPattern.test(digest) && mediaByteLength(byteLength) !== null;
 }
 
 function validDerivative(identity: unknown): identity is BlobIdentity {
@@ -62,6 +66,10 @@ export function catalogVariants(row: MediaCatalog) {
   if (!validDerivative(value.small) || !validDerivative(value.large)) throw new MediaStorageError();
   return { small: { digest: value.small.digest, byteLength: value.small.byteLength },
     large: { digest: value.large.digest, byteLength: value.large.byteLength } };
+}
+
+export function canonicalMediaCatalog(generationId: string, digests: string[]) {
+  return { digest: { $in: digests }, $expr: { $and: [canonicalRow(generationId), { $in: ['$digest', digests] }] } };
 }
 
 export function mediaRecords(database: Db, generationId: string) {
@@ -80,6 +88,8 @@ export function mediaRecords(database: Db, generationId: string) {
       return !!await database.collection('users').findOne({ generationId, avatarBlobDigest: digest,
         'avatarMedia.availability': availableMedia }, { projection });
     },
-    catalog: (digest: string) => database.collection<MediaCatalog>('blobs').findOne({ generationId, digest }),
+    catalog: (digest: string) => database.collection<MediaCatalog>('blobs')
+      .findOne({ generationId, ...canonicalMediaCatalog(generationId, [digest]) }),
+    occupiedCatalog: (digest: string) => database.collection('blobs').findOne({ generationId, digest }, { projection }),
   };
 }

@@ -665,5 +665,39 @@ test('card cover commands validate the exact logical image and keep imported una
       assert.deepEqual((await socket(f, filePath(duplicateId) + '/download', editor)).bytes, pngBytes);
       assert.equal((await stored()).revision, 9);
       assert.equal((await stored()).coverAttachmentId, null);
+
+      const rename = (revision, name) => f.call(filePath(duplicateId), editor, {
+        method: 'PATCH', headers: expected(editor, revision), body: { name },
+      });
+      const setDuplicateLength = (byteLength) => f.gate.runCommand(() =>
+        attachments.updateOne({ ...f.scope, id: duplicateId }, { $set: { byteLength } }));
+      await setDuplicateLength(pngBytes.length + 1);
+      const invalidOriginal = await rename(1, 'Mismatched original.png');
+      assert.equal(invalidOriginal.status, 200);
+      assert.equal(invalidOriginal.data.data.reference.available, false);
+      await setDuplicateLength(pngBytes.length);
+      await setSmallLength(0);
+      const validOriginal = await rename(2, 'Original is still available.png');
+      assert.equal(validOriginal.status, 200);
+      assert.equal(validOriginal.data.data.reference.available, true);
+      await setSmallLength(row.variants.small.byteLength);
+
+      const noncanonical = { ...row, _id: f.generationId + '/' + fixtureId(5195) };
+      await f.gate.runCommand(async () => {
+        await blobs.deleteOne({ _id: row._id });
+        await blobs.insertOne(noncanonical);
+      });
+      const duplicateDownload = filePath(duplicateId) + '/download';
+      const hidden = await socket(f, duplicateDownload, editor, { method: 'HEAD', headers: { 'If-None-Match': '*' } });
+      assert.equal(hidden.status, 404);
+      assert.equal(hidden.headers.etag, undefined);
+      assert.equal((await socket(f, duplicateDownload, editor)).status, 404);
+      assert.equal((await rename(3, 'Noncanonical catalog.png')).data.data.reference.available, false);
+      const intentCount = await f.db.collection('commands').countDocuments(f.scope);
+      const denied = await upload(f, files, editor, 9, pngBytes, 'occupied-catalog.png');
+      assert.equal(denied.status, 503);
+      assert.equal(await f.db.collection('commands').countDocuments(f.scope), intentCount);
+      assert.equal((await stored()).revision, 9);
+      assert.equal(f.gate.ready, true);
     });
   });
