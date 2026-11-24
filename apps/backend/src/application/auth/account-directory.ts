@@ -10,7 +10,7 @@ import { InvalidPageCursor, pageCursors } from '../pagination/cursor.js';
 import { CommandJournal } from '../command-journal/journal.js';
 import type { JournalOperation, JournalValue } from '../command-journal/operation.js';
 import {
-  accountIdentity, AccountActionError, adminAccountOf, checkAccountIdentity, profileOf, requireSiteAdmin,
+  accountIdentity, AccountActionError, adminAccountOf, checkAccountIdentity, nextAccountRevision, profileOf, requireSiteAdmin,
 } from './account-policy.js';
 import { accounts, defaultPreferences } from './accounts.js';
 import { normalizeIdentifier } from './credentials.js';
@@ -91,7 +91,7 @@ export function createAccountDirectory(
           await checkAccountIdentity(database, generationId, identity, actorId);
           return {
             effects: [{ kind: 'update', collection: 'users', id: actorId, revision, fields: { ...changes, ...identity } }],
-            result: profileOf({ ...stored, ...changes, ...identity, revision: revision + 1 }),
+            result: profileOf({ ...stored, ...changes, ...identity, revision: nextAccountRevision(revision) }),
             audit: { resourceId: actorId, resourceType: 'account', origin: 'web', action: 'account.profile' },
           };
         },
@@ -107,7 +107,7 @@ export function createAccountDirectory(
           const preferences = { ...defaultPreferences, ...stored.preferences, ...input.preferences };
           return {
             effects: [{ kind: 'update', collection: 'users', id: actorId, revision: input.revision, fields: { preferences } }],
-            result: { revision: input.revision + 1, preferences },
+            result: { revision: nextAccountRevision(input.revision), preferences },
             audit: { resourceId: actorId, resourceType: 'account', origin: 'web', action: 'account.preferences' },
           };
         },

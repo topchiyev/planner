@@ -10,7 +10,7 @@ import { isStoredDate, newPublicId, workspaceKey } from '../../storage/identity.
 import type { CommandGate } from '../command-gate/gate.js';
 import { commandUuid, CommandRecoveryError } from '../command-journal/operation.js';
 import { assertChanged, durable } from '../command-journal/records.js';
-import { accountById, accountEpoch, accountLookup, AccountActionError, protectLastAdmin, requireSiteAdmin, usableAdmin } from './account-policy.js';
+import { accountById, accountEpoch, accountLookup, AccountActionError, nextAccountRevision, protectLastAdmin, requireSiteAdmin, usableAdmin } from './account-policy.js';
 import { accounts, type AccountRecord } from './accounts.js';
 import { newToken, tokenDigest } from './credentials.js';
 import { isPasswordVerifier, type PasswordHasher } from './password.js';
@@ -233,7 +233,7 @@ export function createAccountCredentials(
   }
 
   async function commit(target: AccountRecord, input: ChangeInput, values: Partial<Pick<AccountRecord, 'role' | 'disabledAt' | 'localAuth'>>) {
-    const revision = revisionSchema.parse(target.revision + 1);
+    const revision = nextAccountRevision(target.revision);
     const epoch = values.localAuth?.credentialsVersion ?? accountEpoch(target);
     const accountChange = { ...input, revision, epoch };
     const updated = await accounts(database).findOneAndUpdate({
@@ -272,6 +272,7 @@ export function createAccountCredentials(
         requireSiteAdmin(actor);
         const target = await accountById(database, generationId, targetId);
         if (target.revision !== revision) throw new AccountActionError('revision');
+        nextAccountRevision(revision);
         if ((change.action === 'role' && change.role === target.role)
             || (change.action === 'availability' && change.disabled === (target.disabledAt !== null))
             || (change.action === 'recovery' && target.disabledAt !== null)) throw new AccountActionError('forbidden');
@@ -353,7 +354,9 @@ export function createAccountCredentials(
 
 function nextAuth(account: AccountRecord, passwordVerifier = account.localAuth?.passwordVerifier ?? null) {
   const mfa = account.requiresMfaEnrollment ? 'enrollment-required' : account.localAuth?.mfa ?? 'none';
-  return { ...account.localAuth, passwordVerifier, credentialsVersion: accountEpoch(account) + 1, mfa };
+  const credentialsVersion = accountEpoch(account) + 1;
+  if (!Number.isSafeInteger(credentialsVersion)) throw new AccountActionError('revision');
+  return { ...account.localAuth, passwordVerifier, credentialsVersion, mfa };
 }
 
 export type AccountCredentials = ReturnType<typeof createAccountCredentials>;
