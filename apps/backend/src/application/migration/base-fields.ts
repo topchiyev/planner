@@ -65,7 +65,7 @@ export function importAccount(id: string, row: SourceRow<'user_account'>, fallba
 
 export function importStopwatch(column: SourceJsonColumn | null) {
   const raw = column?.value ?? null;
-  if (raw === null) return null;
+  if (raw === null) return { value: null, sourceStartedAt: null };
   if (typeof raw !== 'object' || raw instanceof SourceJsonNumber || Array.isArray(raw)
     || Object.keys(raw).length !== 2 || !(raw.total instanceof SourceJsonNumber)) {
     invalidBaseRow('The source has an invalid card stopwatch.');
@@ -77,8 +77,8 @@ export function importStopwatch(column: SourceJsonColumn | null) {
     if (Number.isFinite(candidate.valueOf())) startedAt = candidate.toISOString();
   }
   const total = raw.total.decimal;
-  const result = cardStopwatchSchema.safeParse({ startedAt, total: /^(?:0|[1-9]\d*)$/u.test(total) ? Number(total) : NaN });
+  const result = cardStopwatchSchema.safeParse({ startedAt, total: /^(?:0|[1-9]\d*)(?:\.0+)?$/u.test(total) ? Number(total) : NaN });
   if ((starts !== null && (typeof starts !== 'string' || startedAt === null || starts.slice(0, 19) !== startedAt.slice(0, 19))) || !result.success)
     invalidBaseRow('The source has an invalid card stopwatch.');
-  return result.data;
+  return { value: result.data, sourceStartedAt: starts };
 }

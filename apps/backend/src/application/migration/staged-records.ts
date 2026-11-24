@@ -15,12 +15,17 @@ import { sourceKey, type SourceTable } from './source-projections.js';
 export type ImportedEntity = Exclude<SourceTable, 'internal_config' | 'storage_usage'>;
 export type SourceTimes = { createdAt: string | null; updatedAt: string | null };
 export type ImportOrder = { parent: string; position: number } | { parent: string; position: number | null; board: string; changedAt: string | null };
+export type ImportOptionalReference = null | { sourceId: string; unresolved?: 'missing-source-record' };
+
 export type ImportProvenance = SourceTimes & {
   listChangedAt?: string | null;
   dueDate?: string | null;
   previousListSourceId?: string | null;
   creatorSourceId?: string | null;
   sourceCommentCount?: number;
+  stopwatchStartedAt?: string | null;
+  coverReference?: ImportOptionalReference;
+  backgroundReference?: ImportOptionalReference;
   backgroundType?: string | null;
   backgroundGradient?: string | null;
   unrecognizedGradient?: true;
@@ -70,7 +75,13 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
   async function mapping(entity: ImportedEntity, sourceId: string) {
     lease.assertHeld();
     const id = publicId(entity, sourceId);
-    return ids.findOne({ ...key(id), entity, sourceId, sourceInstanceId });
+    const mapped = await ids.findOne({ ...key(id), entity, sourceId, sourceInstanceId });
+    if (!mapped) return null;
+    if (mapped.id !== id || mapped.generationId !== generationId || mapped.entity !== entity || mapped.sourceId !== sourceId
+      || mapped.sourceInstanceId !== sourceInstanceId) {
+      throw new MigrationError('target-write', 'The protected source mapping has an invalid identity.');
+    }
+    return mapped;
   }
 
   const resolve = async (entity: ImportedEntity, sourceId: string) => (await mapping(entity, sourceId))?.id ?? null;

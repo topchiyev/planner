@@ -287,10 +287,30 @@ test('staging preserves exact gradient and history provenance and blocks malform
     assert.deepEqual((await provenance('user_account', '102')).unsupportedPreferences, ['editorMode']);
     const card = await db.collection('cards').findOne({ generationId, id: id('card', '9007199254740993') });
     assert.deepEqual(card.stopwatch, { startedAt: '2026-02-13T08:09:10.123Z', total: 42 });
+    assert.equal((await provenance('card', '9007199254740993')).stopwatchStartedAt, '2026-02-13T08:09:10.123456Z');
     const history = await db.collection('cards').find({ generationId, listId: id('list', '403') })
       .sort({ listChangedAt: -1, historySequence: -1 }).toArray();
     assert.deepEqual(history.map(({ id }) => id), ['9007199254740997', '9007199254740996'].map((sourceId) => id('card', sourceId)));
     assert.deepEqual(history.map(({ rank }) => rank), [null, null]);
+
+    update(`
+      UPDATE public.project SET background_type='image', background_image_id=299 WHERE id=202;
+      UPDATE public.card SET cover_attachment_id=699 WHERE id=9007199254740998;
+    `);
+    const dangling = await createRun(db, installationId, await inspect(source));
+    await stage(dangling);
+    const danglingScope = { generationId: dangling.generationId };
+    const missingProject = await db.collection('projects').findOne({ ...danglingScope, id: id('project', '202') });
+    const missingCard = await db.collection('cards').findOne({ ...danglingScope, id: id('card', '9007199254740998') });
+    assert.equal(missingProject.backgroundId, null);
+    assert.equal(missingCard.coverAttachmentId, null);
+    const unresolved = async (id) => (await db.collection('importIds').findOne({ ...danglingScope, id })).provenance;
+    assert.deepEqual((await unresolved(missingProject.id)).backgroundReference, { sourceId: '299', unresolved: 'missing-source-record' });
+    assert.deepEqual((await unresolved(missingCard.id)).coverReference, { sourceId: '699', unresolved: 'missing-source-record' });
+    update(`
+      UPDATE public.project SET background_type='gradient', background_image_id=NULL WHERE id=202;
+      UPDATE public.card SET cover_attachment_id=NULL WHERE id=9007199254740998;
+    `);
 
     const badRows = [
       ["UPDATE public.project SET owner_project_manager_id=221 WHERE id=202", 'source-read', 'different workspace scope'],
@@ -299,6 +319,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
       ["UPDATE public.board_membership SET can_comment=NULL WHERE id=313", 'source-read', 'comment grant'],
       ["UPDATE public.user_account SET username='IRIS@planner-fixture.invalid' WHERE id=103", 'source-read', 'duplicate normalized'],
       ["UPDATE public.card SET list_id=405 WHERE id=9007199254740993", 'source-read', 'different workspace scope'],
+      ["UPDATE public.project SET background_image_id=211 WHERE id=202", 'source-read', 'different workspace scope'],
       ["UPDATE public.card SET cover_attachment_id=603 WHERE id=9007199254740998", 'source-read', 'different workspace scope'],
       ["DELETE FROM public.list WHERE id=406", 'source-read', 'one archive list'],
     ];
@@ -309,6 +330,7 @@ test('staging preserves exact gradient and history provenance and blocks malform
       'UPDATE public.board_membership SET can_comment=TRUE WHERE id=313',
       "UPDATE public.user_account SET username='sage-fixture' WHERE id=103",
       'UPDATE public.card SET list_id=401 WHERE id=9007199254740993',
+      'UPDATE public.project SET background_image_id=NULL WHERE id=202',
       'UPDATE public.card SET cover_attachment_id=NULL WHERE id=9007199254740998',
       "INSERT INTO public.list (id,board_id,type) VALUES (406,302,'archive')",
     ];
@@ -319,6 +341,10 @@ test('staging preserves exact gradient and history provenance and blocks malform
         await assert.rejects(stage(bad), (error) => error?.fault === fault && error.message.includes(message));
         assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, activeGenerationId);
         assert.equal(await db.collection('events').countDocuments({ generationId: bad.generationId }), 0);
+        if (edit.includes('background_image_id') || edit.includes('cover_attachment_id')) {
+          assert.equal(await db.collection('boards').countDocuments({ generationId: bad.generationId }), 0);
+          assert.equal(await db.collection('cards').countDocuments({ generationId: bad.generationId }), 0);
+        }
       } finally { update(undo[index]); }
     }
   }));

@@ -2,7 +2,7 @@ import { listColorSchema, workspaceBoardView, workspaceCardType, workspaceListKi
 import type { WorkspaceFields } from '../../storage/scoped.js';
 import { nameBasedUuid } from '../../storage/identity.js';
 import { gradientPreset, importAccount, importAccountPreferences, importStopwatch, invalidBaseRow, nullableDate, targetTimes } from './base-fields.js';
-import type { ImportedEntity, ImportOrder, ImportProvenance, ImportRecords, ImportReference } from './staged-records.js';
+import type { ImportedEntity, ImportOptionalReference, ImportOrder, ImportProvenance, ImportRecords, ImportReference } from './staged-records.js';
 import type { SourceRow } from './source-projections.js';
 
 export const baseWorkspaceTables = ['board', 'card', 'list', 'project', 'user_account'] as const;
@@ -15,7 +15,7 @@ type SourceReservation<T extends ImportedEntity = ImportedEntity> = { table: T; 
 // The projection row is controlled by its table's pinned decoder. This discriminated union keeps that relationship below.
 type Reservation = { [K in ImportedEntity]: SourceReservation<K> }[ImportedEntity];
 
-export function reserveSourceRecord(store: ImportRecords, untyped: SourceReservation) {
+export async function reserveSourceRecord(store: ImportRecords, untyped: SourceReservation) {
   const { table, row } = untyped as Reservation;
   const provenance: ImportProvenance = { createdAt: row.created_at, updatedAt: row.updated_at };
   let order: ImportOrder | undefined;
@@ -25,6 +25,7 @@ export function reserveSourceRecord(store: ImportRecords, untyped: SourceReserva
       order = { parent: '', position: 0 };
       provenance.backgroundType = row.background_type;
       provenance.backgroundGradient = row.background_gradient;
+      provenance.backgroundReference = await optionalProvenance(store, 'background_image', row.background_image_id, row.id);
       if ((row.background_type === 'gradient' || row.background_gradient !== null)
         && !gradientPreset(row.background_type, row.background_gradient)) provenance.unrecognizedGradient = true;
       break;
@@ -43,6 +44,8 @@ export function reserveSourceRecord(store: ImportRecords, untyped: SourceReserva
       provenance.previousListSourceId = row.prev_list_id;
       provenance.creatorSourceId = row.creator_user_id;
       provenance.sourceCommentCount = row.comments_total;
+      provenance.stopwatchStartedAt = importStopwatch(row.stopwatch).sourceStartedAt;
+      provenance.coverReference = await optionalProvenance(store, 'attachment', row.cover_attachment_id, row.id, 'file');
       break;
     case 'project_manager':
       reference = { parent: row.project_id };
@@ -72,11 +75,27 @@ function positiveRank(rank: bigint | null) {
   return rank;
 }
 
-async function scopedReference(store: ImportRecords, table: 'project_manager' | 'list' | 'background_image' | 'attachment' | 'board',
-  sourceId: string, parentSourceId: string, kind?: string) {
+async function scopedOptionalReference(store: ImportRecords, table: 'background_image' | 'attachment',
+  sourceId: string | null, parentSourceId: string, kind?: string) {
+  if (sourceId === null) return null;
   const source = await store.mapping(table, sourceId);
-  if (!source || source.reference?.parent !== parentSourceId || (kind !== undefined && source.reference.kind !== kind)) {
-    invalidBaseRow('A required source reference belongs to a different workspace scope.');
+  if (source && (source.reference?.parent !== parentSourceId || (kind !== undefined && source.reference.kind !== kind))) {
+    invalidBaseRow('An optional source reference belongs to a different workspace scope or has an invalid type.');
+  }
+  return source;
+}
+
+async function optionalProvenance(store: ImportRecords, table: 'background_image' | 'attachment', sourceId: string | null,
+  parentSourceId: string, kind?: string): Promise<ImportOptionalReference> {
+  if (sourceId === null) return null;
+  return await scopedOptionalReference(store, table, sourceId, parentSourceId, kind)
+    ? { sourceId } : { sourceId, unresolved: 'missing-source-record' };
+}
+
+async function scopedReference(store: ImportRecords, table: 'project_manager' | 'list' | 'board', sourceId: string, parentSourceId: string) {
+  const source = await store.mapping(table, sourceId);
+  if (!source || source.reference?.parent !== parentSourceId) {
+    invalidBaseRow('A required source reference is missing or belongs to a different workspace scope.');
   }
   return source;
 }
@@ -101,7 +120,7 @@ async function writeProject(store: ImportRecords, id: string, row: SourceRow<'pr
   const owner = row.owner_project_manager_id === null ? null : await scopedReference(store, 'project_manager', row.owner_project_manager_id, row.id);
   if (row.background_type !== null && row.background_type !== 'gradient' && row.background_type !== 'image')
     invalidBaseRow('The source has an invalid project background type.');
-  const image = row.background_image_id === null ? null : await scopedReference(store, 'background_image', row.background_image_id, row.id);
+  const image = await scopedOptionalReference(store, 'background_image', row.background_image_id, row.id);
   await store.write('projects', id, { ...fields, name: requiredName(row.name), description: row.description, type: owner ? 'private' : 'shared',
     ownerProjectManagerId: owner?.id ?? null, hidden: row.is_hidden, backgroundPreset: gradientPreset(row.background_type, row.background_gradient),
     backgroundId: row.background_type === 'image' ? image?.id ?? null : null, boardOrderVersion: 1, fieldGroupOrderVersion: 1 });
@@ -145,10 +164,10 @@ async function writeCard(store: ImportRecords, id: string, row: SourceRow<'card'
   const previousListId = previous && previousReference?.parent === row.board_id
     && (previousReference.kind === 'active' || previousReference.kind === 'closed') ? previous.id : null;
   const creatorId = row.creator_user_id === null ? null : await store.resolve('user_account', row.creator_user_id);
-  const cover = row.cover_attachment_id === null ? null : await scopedReference(store, 'attachment', row.cover_attachment_id, row.id, 'file');
+  const cover = await scopedOptionalReference(store, 'attachment', row.cover_attachment_id, row.id, 'file');
   await store.write('cards', id, { ...fields, boardId, listId: list.id, kind, type: type.data, name: requiredName(row.name),
     closed: row.is_closed, description: row.description, dueDate: nullableDate(row.due_date), dueDateCompleted: row.is_due_completed,
-    stopwatch: importStopwatch(row.stopwatch), listChangedAt: nullableDate(row.list_changed_at), previousListId, creatorId,
+    stopwatch: importStopwatch(row.stopwatch).value, listChangedAt: nullableDate(row.list_changed_at), previousListId, creatorId,
     coverAttachmentId: cover?.id ?? null, checklistOrderVersion: 1, fieldGroupOrderVersion: 1 });
 }
 
