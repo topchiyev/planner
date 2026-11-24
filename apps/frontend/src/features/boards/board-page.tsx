@@ -4,6 +4,7 @@ import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js'
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
 import { projectHref } from '../workspace/workspace-navigation.js';
 import { BoardManagement } from './board-management.js';
+import { BoardLists, ReadonlyBoardLists } from '../lists/board-lists.js';
 
 const contexts = [
   { id: 'board', name: 'Board', emptyTitle: 'No cards to show' },
@@ -63,9 +64,9 @@ export function BoardPage() {
             ))}
           </nav>
         </div>
-        {lists?.length ? <ul aria-label="Board lists" className="workspace-list-summary">
-          {lists.map((list) => <li key={list.id}><strong>{list.name}</strong><span>{list.cardCount} {list.cardCount === 1 ? 'card' : 'cards'}</span></li>)}
-        </ul> : <EmptyState title={board ? 'No lists to show' : context.emptyTitle} />}
+        {board && lists ? context.id === 'board' && board.board.permissions.canEdit
+          ? <BoardLists key={board.board.id} workspace={board} lists={lists} />
+          : <ReadonlyBoardLists lists={lists} /> : <EmptyState title={context.emptyTitle} />}
       </section>
       <Outlet />
     </div>

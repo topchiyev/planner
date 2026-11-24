@@ -9,6 +9,7 @@ import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/
 import { cardPermissions, WorkspaceAccessError, type BoardAccessContext, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization } from './authorization.js';
 import { boardDto, boardPreferences, boardPreferencesRow, projectBoardOrderVersion } from './board-state.js';
+import { boardListOrderVersion, listDto } from './list-state.js';
 import { cardFilters, cardPlacementStages, cardSearch, datedOrder, historyOrder, rankedOrder, readPage,
   rejectedPattern, textQuery, type PagePosition } from './queries.js';
 import { availableMedia, unavailableMedia } from '../media/records.js';
@@ -230,9 +231,8 @@ export function createWorkspaceReads(database: Db, access: WorkspaceAuthorizatio
       const counts = new Map(totals.flat().map(({ _id, count }) => [_id, count]));
       return { data: {
         board: boardDto(board), project,
-        lists: lists.map((item) => ({ ...ordered(item), boardId: id, kind: item.kind, name: item.name,
-          orderVersion: item.orderVersion ?? item.revision, cardCount: counts.get(item.id) ?? 0 })),
-        labels: labels.map(labelDto), orderVersion: board.board.orderVersion ?? 1,
+        lists: lists.map((item) => ({ ...listDto(item), cardCount: counts.get(item.id) ?? 0 })),
+        labels: labels.map(labelDto), orderVersion: boardListOrderVersion(board.board),
         latestEventSequence: latestSequence.toString(),
         eventCursor: eventCursors.encode({ actorId: actor.id, generationId, boardId: id }, latestSequence),
         preferences: boardPreferences(board.board, preferences),

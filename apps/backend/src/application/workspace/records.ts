@@ -1,5 +1,5 @@
 import type { AggregateOptions, Db, Document, Filter, Long, Sort } from 'mongodb';
-import type { SessionActor, projectGradientSchema } from '@planner/contracts';
+import type { ListColor, SessionActor, projectGradientSchema } from '@planner/contracts';
 import { publicIdPattern } from '@planner/contracts/storage';
 import { workspaceKey } from '../../storage/identity.js';
 
@@ -32,7 +32,7 @@ interface Records {
     boardId: string; defaultView?: BoardView; defaultCardType?: CardType | null; restrictedCardType?: CardType | null;
     showCreator?: boolean; showCardAge?: boolean; showCardCount?: boolean; expandChecklists?: boolean;
   };
-  lists: Ordered & { boardId: string; kind: ListKind; orderVersion?: number };
+  lists: Ordered & { boardId: string; kind: ListKind; orderVersion?: number; color?: ListColor | null };
   cards: Ordered & {
     boardId: string; listId: string; kind: CardKind; type: CardType; closed?: boolean;
     description?: string | null; previousListId?: string | null; dueDate?: Date | string | null;

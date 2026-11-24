@@ -539,6 +539,136 @@ test('narrow board membership grants only selected access, handles leaving and d
   });
 });
 
+test('direct editors create, edit and move board lists by keyboard and pointer, including stale order recovery', { timeout: 150_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    const colleague = await page({ width: 390, height: 844 });
+    const viewer = await page({ width: 390, height: 844 });
+    const path = board(ids.privateBoard) + '?context=board&view=grid';
+    await signIn(editor, origin, 'first-editor');
+    await signIn(colleague, origin, 'second-editor');
+    await signIn(viewer, origin, 'viewer');
+    await editor.goto(origin + path);
+    const listNames = (p) => p.getByRole('list', { name: 'Board lists' }).locator('strong');
+    const listRow = (p, name) => p.getByRole('list', { name: 'Board lists' }).getByRole('listitem')
+      .filter({ has: p.getByText(name, { exact: true }) });
+    async function add(p, name, kind, color = '') {
+      await p.getByRole('button', { name: 'Add list' }).click();
+      const create = p.getByRole('dialog', { name: 'Create list' });
+      await create.getByLabel('List name').fill(name);
+      await create.getByLabel('List type').selectOption(kind);
+      await create.getByLabel('List color').selectOption(color);
+      await create.getByRole('button', { name: 'Create list', exact: true }).click();
+      await expect(listRow(p, name)).toBeVisible();
+    }
+
+    await add(editor, 'Incoming', 'active', 'lagoon-blue');
+    await add(editor, 'Finished', 'closed');
+    await expect(listRow(editor, 'Incoming').getByText('Active', { exact: true })).toBeVisible();
+    await expect(listRow(editor, 'Finished').getByText('Closed', { exact: true })).toBeVisible();
+    await expect(listRow(editor, 'Incoming').getByRole('img', { name: 'Lagoon blue' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Edit Incoming', exact: true }).click();
+    let edit = editor.getByRole('dialog', { name: 'Edit list' });
+    await edit.getByLabel('List name').fill('Review queue');
+    await edit.getByLabel('List color').selectOption('berry-red');
+    await edit.getByRole('button', { name: 'Save list' }).click();
+    await expect(listRow(editor, 'Review queue').getByRole('img', { name: 'Berry red' })).toBeVisible();
+    await editor.getByRole('button', { name: 'Edit Review queue', exact: true }).click();
+    edit = editor.getByRole('dialog', { name: 'Edit list' });
+    await edit.getByLabel('List color').selectOption('');
+    await edit.getByRole('button', { name: 'Save list' }).click();
+    await expect(listRow(editor, 'Review queue').getByRole('img')).toHaveCount(0);
+
+    let moveRequests = 0;
+    editor.on('request', (request) => {
+      if (request.method() === 'POST' && /\/api\/v1\/lists\/[^/]+\/move$/u.test(request.url())) moveRequests++;
+    });
+    const moveFinished = editor.getByRole('button', { name: 'Move Finished', exact: true });
+    await moveFinished.focus();
+    await editor.keyboard.press('Enter');
+    const move = editor.getByRole('dialog', { name: 'Move list' });
+    await expect(move.getByLabel('Place list')).toBeFocused();
+    await editor.keyboard.press('Escape');
+    await expect(move).toHaveCount(0);
+    await expect(moveFinished).toBeFocused();
+    assert.equal(moveRequests, 0);
+    await editor.keyboard.press('Enter');
+    await move.getByLabel('Place list').selectOption({ label: 'Before To do' });
+    await move.getByRole('button', { name: 'Move list', exact: true }).press('Enter');
+    await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Done', 'Review queue']);
+    await expect(editor.getByText('Moved Finished.', { exact: true })).toBeVisible();
+    await expect(moveFinished).toBeFocused();
+
+    async function drag(from, target, cancel = false) {
+      const source = listRow(editor, from).locator('[data-list-drag-handle]');
+      // Wait until the handle is stable and reachable after any dnd-kit drop animation.
+      await source.hover();
+      const handle = await source.boundingBox();
+      assert.ok(handle);
+      await editor.mouse.down();
+      await editor.mouse.move(handle.x + handle.width / 2 - 15, handle.y + handle.height / 2, { steps: 4 });
+      await expect(target).toBeVisible();
+      const box = await target.boundingBox();
+      assert.ok(box);
+      await editor.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 12 });
+      await expect(target).toHaveAttribute('data-list-drop-target', 'true');
+      if (cancel) await editor.keyboard.press('Escape');
+      await editor.mouse.up();
+    }
+    await drag('Review queue', listRow(editor, 'Done'));
+    await expect(listNames(editor)).toHaveText(['Finished', 'To do', 'Review queue', 'Done']);
+    assert.equal(moveRequests, 2);
+
+    const dropEnd = editor.getByText('Drop at the end', { exact: true });
+    await drag('Finished', dropEnd, true);
+    await expect(dropEnd).toHaveCount(0);
+    await expect(moveFinished).toBeFocused();
+    assert.equal(moveRequests, 2);
+    await drag('Finished', dropEnd);
+    await expect(listNames(editor)).toHaveText(['To do', 'Review queue', 'Done', 'Finished']);
+    assert.equal(moveRequests, 3);
+
+    await expect(editor).toHaveURL(origin + path);
+    await editor.reload();
+    await expect(listNames(editor)).toHaveText(['To do', 'Review queue', 'Done', 'Finished']);
+
+    await colleague.goto(origin + path);
+    const stale = colleague.getByRole('button', { name: 'Move Done', exact: true });
+    await stale.focus();
+    await colleague.keyboard.press('Enter');
+    const staleDialog = colleague.getByRole('dialog', { name: 'Move list' });
+    const placement = staleDialog.getByLabel('Place list');
+    await expect(placement).toBeFocused();
+    await placement.press('Home');
+    await add(editor, 'Concurrent addition', 'active');
+    await staleDialog.getByRole('button', { name: 'Move list', exact: true }).click();
+    await expect(colleague.getByRole('alert')).toContainText('The list order changed');
+    await expect(listNames(colleague)).toHaveText(['To do', 'Review queue', 'Done', 'Finished', 'Concurrent addition']);
+    await expect(stale).toBeFocused();
+    await expect(colleague).toHaveURL(origin + path);
+
+    await viewer.goto(origin + path);
+    await expect(listNames(viewer)).toHaveText(['To do', 'Review queue', 'Done', 'Finished', 'Concurrent addition']);
+    await expect(viewer.getByRole('button', { name: 'Add list' })).toHaveCount(0);
+    await expect(viewer.getByRole('button', { name: 'Move Done' })).toHaveCount(0);
+    await editor.getByRole('link', { name: 'Archive', exact: true }).click();
+    await expect(listNames(editor)).toHaveText(['Archive']);
+    await expect(editor.getByRole('button', { name: 'Edit Archive' })).toHaveCount(0);
+    await expect(editor.getByRole('button', { name: 'Add list' })).toHaveCount(0);
+
+    const legacy = 'Imported ' + 'long-list-name'.repeat(14);
+    await fixture.gate.runCommand(() => fixture.db.collection('lists').updateOne({ ...fixture.scope, id: ids.privateActiveList },
+      { $set: { name: legacy } }));
+    await colleague.reload();
+    await expect(listRow(colleague, legacy)).toBeVisible();
+    assert.ok(await colleague.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+    await colleague.getByRole('button', { name: 'Move ' + legacy, exact: true }).click();
+    await expect(staleDialog).toBeVisible();
+    assert.ok(await staleDialog.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth));
+
+  });
+});
+
 test('project deletion confirms and sends an exact imported name with spaces and line breaks', { timeout: 120_000 }, async () => {
   await workspaceBrowser(async ({ fixture, origin, page }) => {
     const id = fixtureId(2899);
