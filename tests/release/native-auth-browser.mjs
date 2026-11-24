@@ -61,7 +61,9 @@ try {
   assert.equal(await page.evaluate((name) => document.cookie.includes(name), cookieName), false);
   assert.equal(await page.evaluate(async () => (await fetch('/api/v1/session', { method: 'DELETE' })).status), 403);
   const old = await context.newPage();
-  await old.goto(`${origin}/workspace`);
+  assert.equal((await old.goto(`${origin}/workspace`)).url(), `${origin}/workspace`);
+  await old.getByRole('heading', { name: 'Projects', exact: true }).waitFor();
+  await page.bringToFront();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await url('/sign-in');
   await head('Sign in');
