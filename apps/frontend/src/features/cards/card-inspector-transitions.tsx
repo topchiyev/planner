@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
+import { transferredCardHref, transferNotice } from '../transfers/transfer-navigation.js';
 import type { CardTransition, WorkspaceReadOutput } from '@planner/contracts';
 import { relationshipCommand } from '../projects/project-api.js';
 import { WorkspaceRequestError } from '../workspace/workspace-api.js';
@@ -8,12 +10,14 @@ type Card = WorkspaceReadOutput<'cardGet'>['data'];
 
 export function CardInspectorTransitions({ card, workspace }: { card: Card; workspace: PlacementWorkspace }) {
   const action = useCardPlacementMutation();
-  const [dialog, setDialog] = useState<{ state: CardPlacement; mode: 'move' | 'restore' }>();
+  const navigate = useNavigate();
+  const [dialog, setDialog] = useState<{ state: CardPlacement; mode: 'move' | 'restore' | 'duplicate' }>();
   const [message, setMessage] = useState('');
   const [restoreFocus, setRestoreFocus] = useState(false);
   const quickMove = useRef<HTMLButtonElement>(null);
   const status = useRef<HTMLParagraphElement>(null);
   const state = captureCardPlacement(workspace, card);
+  const copy = captureCardPlacement(workspace, card, 'duplicate');
 
   useEffect(() => {
     if (!action.busy && !dialog && restoreFocus) {
@@ -21,9 +25,9 @@ export function CardInspectorTransitions({ card, workspace }: { card: Card; work
       setRestoreFocus(false);
     }
   }, [action.busy, dialog, restoreFocus]);
-  if (!state) return null;
+  if (!state && !copy) return null;
 
-  function run(operation: CardTransition, placement: CardPlacement, body: object) {
+  function run(operation: CardTransition | 'cards.duplicate', placement: CardPlacement, body: object) {
     const { card: { id, revision } } = placement;
     setDialog(undefined);
     setMessage('');
@@ -34,9 +38,14 @@ export function CardInspectorTransitions({ card, workspace }: { card: Card; work
         if (error instanceof WorkspaceRequestError && error.code === 'RESTORE_TARGET_REQUIRED') setDialog({ state: placement, mode: 'restore' });
         throw error;
       }
-    }, (result) => {
-      if (result) setMessage(operation === 'cards.archive' ? 'Card archived.' : operation === 'cards.trash' ? 'Card moved to trash.'
-        : operation === 'cards.restore' ? 'Card restored.' : 'Card moved.');
+    }, async (result) => {
+      if (!result) return;
+      const next = result.data.card;
+      const notice = operation === 'cards.archive' ? 'Card archived.' : operation === 'cards.trash' ? 'Card moved to trash.'
+        : operation === 'cards.restore' ? 'Card restored.' : operation === 'cards.duplicate' ? 'Card duplicated.' : 'Card moved.';
+      if (operation === 'cards.duplicate' || next.boardId !== workspace.board.id) {
+        await navigate(transferredCardHref(next), { state: { transferNotice: transferNotice(notice, result.data.remaps) } });
+      } else setMessage(notice);
     }).then(() => setRestoreFocus(true));
   }
 
@@ -48,13 +57,15 @@ export function CardInspectorTransitions({ card, workspace }: { card: Card; work
 
   return <section className="card-transition-actions" aria-label="Card placement">
     <div className="project-actions">
-      {card.permissions.canMove && state.destinations.length > 0 && <button className="workspace-button" type="button" ref={quickMove}
+      {state && <button className="workspace-button" type="button" ref={quickMove}
         disabled={action.busy} onClick={() => { action.clearProblem(); setDialog({ state, mode: 'move' }); }}>Move card</button>}
-      {card.permissions.canArchive && <button className="workspace-button" type="button" disabled={action.busy}
+      {copy && <button className="workspace-button" type="button" disabled={action.busy}
+        onClick={() => { action.clearProblem(); setDialog({ state: copy, mode: 'duplicate' }); }}>Duplicate card</button>}
+      {state && card.permissions.canArchive && <button className="workspace-button" type="button" disabled={action.busy}
         onClick={() => runHistory('cards.archive', state)}>Archive card</button>}
-      {card.permissions.canTrash && <button className="workspace-button" type="button" disabled={action.busy}
+      {state && card.permissions.canTrash && <button className="workspace-button" type="button" disabled={action.busy}
         onClick={() => runHistory('cards.trash', state)}>Move to trash</button>}
-      {card.permissions.canRestore && <button className="workspace-button" type="button" disabled={action.busy}
+      {state && card.permissions.canRestore && <button className="workspace-button" type="button" disabled={action.busy}
         onClick={() => runHistory('cards.restore', state)}>Restore card</button>}
     </div>
     {message && <p tabIndex={-1} ref={status} role="status">{message}</p>}
@@ -62,9 +73,9 @@ export function CardInspectorTransitions({ card, workspace }: { card: Card; work
     {dialog && <CardPlacementDialog {...dialog} onClose={() => {
       setDialog(undefined);
       setRestoreFocus(true);
-    }} onPlace={(listId, before) => {
-      const body = cardMoveBody(dialog.state, listId, before);
-      if (body) run(dialog.mode === 'restore' ? 'cards.restore' : 'cards.move', dialog.state, body);
+    }} onPlace={(listId, before, version, boardId) => {
+      const body = cardMoveBody(dialog.state, listId, before, version, dialog.mode === 'restore' ? undefined : boardId);
+      if (body) run(dialog.mode === 'restore' ? 'cards.restore' : dialog.mode === 'duplicate' ? 'cards.duplicate' : 'cards.move', dialog.state, body);
     }} />}
   </section>;
 }

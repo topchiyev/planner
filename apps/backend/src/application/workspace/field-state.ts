@@ -29,8 +29,11 @@ export function fieldGroupRows(records: WorkspaceRecords, generationId: string, 
 }
 
 export function fieldDefinitionRows(records: WorkspaceRecords, generationId: string, ids: string[]) {
-  return records.find('fieldDefinitions', { fieldGroupId: { $in: ids },
-    $expr: { $and: [canonicalRow(generationId), { $in: ['$fieldGroupId', ids] }] } }, rankSort);
+  return records.aggregate<FieldDefinition>('fieldDefinitions', { fieldGroupId: { $in: ids },
+    $expr: { $and: [canonicalRow(generationId), { $in: ['$fieldGroupId', ids] }] } }, [
+    { $set: { orderTie: { $cond: [publicIdField('definitionOrderTieId'), '$definitionOrderTieId', '$id'] } } },
+    { $sort: { rank: 1, orderTie: 1, id: 1 } }, { $unset: 'orderTie' },
+  ]);
 }
 
 export function fieldValueRows(records: WorkspaceRecords, generationId: string, groups: string[], cards?: string[]) {

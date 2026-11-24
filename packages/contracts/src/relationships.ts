@@ -100,6 +100,8 @@ export const relationshipCommands = {
 } as const;
 
 export const relationshipReads = {
+  'boards.transferDestinations': read('boards.transferDestinations', '/api/v1/boards/:id/transfer-destinations', candidatesInput,
+    workspacePage(id.extend({ name: z.string(), project: id.extend({ name: z.string() }) }))),
   'fields.templateOptions': read('fields.templateOptions', '/api/v1/boards/:id/field-template-options', rosterInput, workspacePage(fieldTemplateOptionSchema)),
   'projects.managers': read('projects.managers', '/api/v1/projects/:id/managers', rosterInput, workspacePage(manager)),
   'projects.managerCandidates': read('projects.managerCandidates', '/api/v1/projects/:id/manager-candidates', candidatesInput,

@@ -1534,3 +1534,89 @@ test('native card media keeps files private, manages covers by revision and open
     await new Promise((resolve) => sentinel.close(resolve));
   }
 });
+
+test('keyboard destination picker duplicates and transfers cards and a populated finite list across protected boards', { timeout: 125_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    await fixture.db.collection('boardMembers').deleteOne({ ...fixture.scope, boardId: ids.privateBoard, userId: ids.privateOwner });
+    await fixture.insert('boardMembers', fixtureId(26000), { boardId: ids.sharedBoard, userId: ids.privateOwner, role: 'editor', canComment: null });
+    const third = await fixture.insert('boards', fixtureId(26003), { name: 'Third editor board', projectId: ids.sharedProject, rank: '4000' });
+    await fixture.insert('boardMembers', fixtureId(26004), { boardId: third, userId: ids.firstEditor, role: 'editor', canComment: null });
+    const relocating = await fixture.insert('lists', fixtureId(26005), { boardId: ids.sharedBoard, name: 'Relocating lane', kind: 'active', rank: '5000' });
+    const lane = await fixture.insert('lists', fixtureId(26001), { boardId: ids.privateBoard, name: 'Shipping lane', kind: 'active', rank: '4000' });
+    const occupied = await fixture.insert('cards', fixtureId(26002), { boardId: ids.privateBoard, listId: lane,
+      name: 'A moving occupant', kind: 'board', type: 'project', rank: '1024' });
+    const source = origin + board(ids.privateBoard) + '/cards/' + ids.activeCard + '?view=list';
+    const target = origin + board(ids.sharedBoard);
+    const manager = await page({ width: 1440, height: 900 });
+    const editor = await page({ width: 390, height: 844 });
+    const reader = await page({ width: 390, height: 844 });
+
+    async function selectBoard(dialog) {
+      await dialog.getByText('Choose another board', { exact: true }).press('Enter');
+      await dialog.getByRole('combobox', { name: /^Destination board/u }).selectOption({ label: 'Shared fixture project · Transfer destination' });
+    }
+
+    await signIn(manager, origin, 'private-owner');
+    await manager.goto(source);
+    const managerActions = manager.getByRole('region', { name: 'Card placement' });
+    await expect(managerActions.getByRole('button', { name: 'Move card', exact: true })).toHaveCount(0);
+    await managerActions.getByRole('button', { name: 'Duplicate card' }).click();
+    let dialog = manager.getByRole('dialog', { name: 'Duplicate card' });
+    await selectBoard(dialog);
+    await dialog.getByLabel('Destination list').selectOption(ids.sharedActiveList);
+    await dialog.getByLabel('Position').selectOption(ids.sharedTarget);
+    await dialog.getByRole('button', { name: 'Duplicate card' }).click();
+    await expect(manager).toHaveURL(new RegExp(target + '/cards/'));
+    await expect(manager.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    const duplicateId = new URL(manager.url()).pathname.split('/').at(-1);
+    assert.notEqual(duplicateId, ids.activeCard);
+
+    await signIn(reader, origin, 'viewer');
+    await reader.goto(source);
+    await expect(reader.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    await expect(reader.getByRole('button', { name: 'Duplicate card' })).toHaveCount(0);
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(source);
+    await editor.getByRole('region', { name: 'Card placement' }).getByRole('button', { name: 'Move card' }).click();
+    dialog = editor.getByRole('dialog', { name: 'Move card' });
+    await selectBoard(dialog);
+    await dialog.getByLabel('Destination list').selectOption(relocating);
+    const session = await (await editor.request.get(origin + '/api/v1/session')).json();
+    const displaced = await editor.request.post(origin + '/api/v1/lists/' + relocating + '/move', {
+      headers: { Origin: origin, 'X-CSRF-Token': session.csrfToken, 'Idempotency-Key': randomUUID(), 'If-Match': '"1"' },
+      data: { toBoardId: third, beforeListId: null, sourceOrderVersion: 1, destinationOrderVersion: 1 },
+    });
+    assert.equal(displaced.status(), 200, await displaced.text());
+    const stale = editor.waitForResponse((response) =>
+      response.request().method() === 'POST' && response.url().endsWith('/cards/' + ids.activeCard + '/move'));
+    await dialog.getByRole('button', { name: 'Move card', exact: true }).click();
+    const failure = await stale;
+    assert.equal(failure.status(), 409);
+    const rejected = await failure.json();
+    assert.equal(rejected.error.code, 'CARD_ORDER_CONFLICT');
+    assert.equal(rejected.error.fields, undefined);
+    await expect(editor).toHaveURL(source);
+    await expect(editor.getByRole('region', { name: 'Card placement' }).getByRole('alert')).toBeVisible();
+
+    await editor.getByRole('region', { name: 'Card placement' }).getByRole('button', { name: 'Move card' }).click();
+    dialog = editor.getByRole('dialog', { name: 'Move card' });
+    await selectBoard(dialog);
+    await dialog.getByLabel('Destination list').selectOption(ids.sharedClosedList);
+    await dialog.getByRole('button', { name: 'Move card', exact: true }).click();
+    await expect(editor).toHaveURL(target + '/cards/' + ids.activeCard);
+    await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    await reader.reload();
+    await expect(reader.getByRole('heading', { name: 'Page not found', level: 2 })).toBeVisible();
+    await expect(reader.getByText('Transfer destination', { exact: true })).toHaveCount(0);
+
+    await editor.goto(origin + board(ids.privateBoard));
+    await editor.getByRole('button', { name: 'Move Shipping lane' }).click();
+    dialog = editor.getByRole('dialog', { name: 'Move list' });
+    await selectBoard(dialog);
+    await dialog.getByRole('button', { name: 'Move list', exact: true }).click();
+    await expect(editor).toHaveURL(target);
+    await expect(editor.getByText('Shipping lane', { exact: true })).toBeVisible();
+    await expect(editor.getByRole('link', { name: 'A moving occupant' })).toHaveAttribute('href', board(ids.sharedBoard) + '/cards/' + occupied);
+    assert.ok(await editor.getByRole('main').evaluate((main) => main.scrollWidth <= main.clientWidth));
+  });
+});

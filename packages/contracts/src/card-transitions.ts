@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { publicIdSchema, revisionSchema } from './storage.js';
+import { transferListPosition, transferSummary } from './transfers.js';
 import { workspaceCardContext, workspaceData } from './workspace.js';
 
 const target = z.strictObject({ id: publicIdSchema, expectedRevision: revisionSchema });
 const versions = { sourceOrderVersion: revisionSchema, destinationOrderVersion: revisionSchema };
-const position = z.strictObject({ listId: publicIdSchema, revision: revisionSchema, orderVersion: revisionSchema });
+const position = transferListPosition;
 export const cardPlacementVersionsSchema = z.strictObject({ cardRevision: revisionSchema, source: position, destination: position });
 export type CardPlacementVersions = z.infer<typeof cardPlacementVersionsSchema>;
 const receipt = workspaceData(z.strictObject({
@@ -14,6 +15,7 @@ const receipt = workspaceData(z.strictObject({
   }),
   source: position,
   destination: position,
+  remaps: transferSummary.optional(),
 }));
 export const listDeleteReceipt = workspaceData(z.strictObject({
   id: publicIdSchema, boardId: publicIdSchema, parentRevision: revisionSchema,
@@ -22,7 +24,8 @@ export const listDeleteReceipt = workspaceData(z.strictObject({
 export const cardTransitionCommands = {
   'cards.move': {
     id: 'cards.move', kind: 'command', method: 'POST', path: '/api/v1/cards/:id/move', status: 200, target: 'parent',
-    input: target.extend({ ...versions, toListId: publicIdSchema, beforeCardId: publicIdSchema.nullable() }), output: receipt,
+    input: target.extend({ ...versions, toListId: publicIdSchema, destinationBoardId: publicIdSchema.optional(),
+      beforeCardId: publicIdSchema.nullable() }), output: receipt,
   },
   'cards.archive': {
     id: 'cards.archive', kind: 'command', method: 'POST', path: '/api/v1/cards/:id/archive', status: 200, target: 'parent',

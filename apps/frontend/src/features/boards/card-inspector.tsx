@@ -12,7 +12,7 @@ import { PageHeading } from '../../app/page-state.js';
 export function CardInspector() {
   const card = useLoaderData<Awaited<ReturnType<typeof loadNativeCard>>>();
   const workspace = useRouteLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>(workspaceBoardId);
-  const { search } = useLocation();
+  const { search, state } = useLocation();
   const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
   return (
     <aside className="card-inspector" aria-labelledby="card-heading">
@@ -22,6 +22,7 @@ export function CardInspector() {
           <span aria-hidden="true">×</span>
         </Link>
       </header>
+      {card && typeof state?.transferNotice === 'string' && <p className="inspector-status" role="status">{state.transferNotice}</p>}
       {card === undefined && <p className="inspector-status">Card details are unavailable.</p>}
       {card && workspace && <CardInspectorTransitions key={card.id} card={card} workspace={workspace} />}
       {card && workspace && <CardAffiliationControls key={`affiliations:${session?.account.id}:${card.boardId}:${card.id}`} card={card} workspace={workspace} />}

@@ -37,12 +37,12 @@ export async function authorizeCardUpdate(database: Db, scope: WorkspaceAuthoriz
   return access;
 }
 
-function readCardType(requested: WorkspaceRow<'cards'>['type'] | undefined, options: ReturnType<typeof boardPreferences>) {
+export function readCardType(requested: WorkspaceRow<'cards'>['type'] | undefined, options: ReturnType<typeof boardPreferences>) {
   if (requested && options.restrictedCardType && requested !== options.restrictedCardType) throw new RelationshipError('cardType');
   return requested ?? options.restrictedCardType ?? options.defaultCardType ?? 'project';
 }
 
-async function newPlacement(records: WorkspaceRecords, generationId: string, boardId: string, listId: string,
+export async function planNewCardPlacement(records: WorkspaceRecords, generationId: string, boardId: string, listId: string,
   id: string, before: string | null, timestamp: string,
 ) {
   const cards = await records.find('cards', { listId, boardId, kind: 'board',
@@ -78,7 +78,7 @@ export async function planCardCreate(records: WorkspaceRecords, { list, board }:
   const id = randomUUID();
   const options = boardPreferences(board.board, await boardPreferencesRow(records, generationId, boardId));
   const type = readCardType(input.type, options);
-  const { rank, effects: placement } = await newPlacement(records, generationId, boardId, listId, id, input.beforeCardId, timestamp);
+  const { rank, effects: placement } = await planNewCardPlacement(records, generationId, boardId, listId, id, input.beforeCardId, timestamp);
   const fields = { boardId, listId, type, kind: 'board' as const, name: input.name, closed: list.kind === 'closed', dueDate: null, dueDateCompleted: null };
   const effects: PlannedEffect[] = [
     { kind: 'insert', collection: 'cards', id, fields: { ...fields, creatorId: userId, description: input.description,

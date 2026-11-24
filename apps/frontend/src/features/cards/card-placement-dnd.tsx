@@ -1,5 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useDragDropMonitor, useDraggable, useDroppable } from '@dnd-kit/react';
+import { useNavigate } from 'react-router';
+import { transferredCardHref, transferNotice } from '../transfers/transfer-navigation.js';
 import { relationshipCommand } from '../projects/project-api.js';
 import {
   CardPlacementDialog, cardMoveBody, captureCardPlacement, useCardPlacementMutation, type CardPlacement, type PlacementCard, type PlacementWorkspace,
@@ -15,6 +17,7 @@ const Placement = createContext<Controls | null>(null);
 
 export function BoardCardPlacement({ workspace, cards, children }: { workspace: PlacementWorkspace; cards: PlacementCard[]; children: ReactNode }) {
   const action = useCardPlacementMutation();
+  const navigate = useNavigate();
   const gesture = useRef<CardPlacement | null>(null);
   const [sourceId, setSourceId] = useState<string>();
   const [dialog, setDialog] = useState<CardPlacement>();
@@ -32,16 +35,20 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     setFocus(undefined);
   }, [focus, action.busy, cards]);
 
-  function place(state: CardPlacement, { listId, beforeCardId }: Target) {
+  function place(state: CardPlacement, { listId, beforeCardId }: Target, destinationVersion?: number, destinationBoardId = state.card.boardId) {
     setDialog(undefined);
-    const body = cardMoveBody(state, listId, beforeCardId);
+    const body = cardMoveBody(state, listId, beforeCardId, destinationVersion, destinationBoardId);
     if (!body) return;
     const { card } = state;
     setMessage('');
     const nextFocus: Focus = { id: card.id };
     void action.run(['cards.move', card.id, card.revision, body], (csrf, key) =>
       relationshipCommand('cards.move', csrf, key, { id: card.id, revision: card.revision, body }),
-    (result) => {
+    async (result) => {
+      if (result && result.data.card.boardId !== workspace.board.id) {
+        await navigate(transferredCardHref(result.data.card), { state: { transferNotice: transferNotice('Card moved.', result.data.remaps) } });
+        return;
+      }
       if (result) nextFocus.expected = result.data.card;
       setMessage('Moved ' + card.name + '.');
     }).then(() => setFocus(nextFocus));
@@ -84,7 +91,7 @@ export function BoardCardPlacement({ workspace, cards, children }: { workspace: 
     {dialog && <CardPlacementDialog state={dialog} mode="move" onClose={() => {
       setDialog(undefined);
       setFocus({ id: dialog.card.id });
-    }} onPlace={(listId, beforeCardId) => place(dialog, { listId, beforeCardId })} />}
+    }} onPlace={(listId, beforeCardId, version, boardId) => place(dialog, { listId, beforeCardId }, version, boardId)} />}
   </Placement.Provider>;
 }
 

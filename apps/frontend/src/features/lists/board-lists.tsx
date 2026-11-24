@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { DragDropProvider, PointerSensor, useDraggable, useDroppable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/react';
+import { useNavigate } from 'react-router';
+import { boardHref } from '../workspace/workspace-navigation.js';
+import { transferNotice } from '../transfers/transfer-navigation.js';
+import type { TransferBoard } from '../transfers/transfer-board-picker.js';
 import type { RelationshipCommandInput } from '@planner/contracts';
 import { EmptyState } from '../../app/page-state.js';
 import { relationshipCommand } from '../projects/project-api.js';
@@ -42,11 +46,11 @@ export function ReadonlyBoardLists({ lists, renderContents }: {
   </ul> : <EmptyState title="No lists to show" />;
 }
 
-function EditableList({ list, busy, allowMove, dragging, edit, move, focus, children }: {
-  list: BoardList; busy: boolean; allowMove: boolean; dragging?: string;
+function EditableList({ list, busy, allowDrag, dragging, edit, move, focus, children }: {
+  list: BoardList; busy: boolean; allowDrag: boolean; dragging?: string;
   edit: () => void; move: () => void; focus: (node: HTMLButtonElement | null) => void; children?: ReactNode;
 }) {
-  const drag = useDraggable({ id: list.id, type: listDrag, disabled: busy || !allowMove });
+  const drag = useDraggable({ id: list.id, type: listDrag, disabled: busy || !allowDrag });
   const drop = useDroppable({ id: 'before-' + list.id, accept: listDrag, disabled: !dragging || dragging === list.id });
   const register = useCallback((node: HTMLLIElement | null) => {
     drag.ref(node);
@@ -57,11 +61,9 @@ function EditableList({ list, busy, allowMove, dragging, edit, move, focus, chil
     <ListSummary list={list} />
     <div className="project-actions">
       <button type="button" className="workspace-button" aria-label={'Edit ' + list.name} disabled={busy || !!dragging} onClick={edit}>Edit</button>
-      {allowMove && <>
-        <button type="button" className="workspace-button" aria-label={'Move ' + list.name} disabled={busy || !!dragging} ref={focus} onClick={move}>Move</button>
-        <span ref={drag.handleRef} className="board-list-handle" data-list-drag-handle tabIndex={-1}
-          aria-hidden="true" title={'Drag ' + list.name}>⠿</span>
-      </>}
+      <button type="button" className="workspace-button" aria-label={'Move ' + list.name} disabled={busy || !!dragging} ref={focus} onClick={move}>Move</button>
+      {allowDrag && <span ref={drag.handleRef} className="board-list-handle" data-list-drag-handle tabIndex={-1}
+        aria-hidden="true" title={'Drag ' + list.name}>⠿</span>}
     </div>
     {children}
   </li>;
@@ -79,6 +81,7 @@ export function BoardLists({ workspace, lists, renderContents, wrapDragContents 
   workspace: Workspace; lists: BoardList[]; renderContents?: (list: BoardList) => ReactNode;
   wrapDragContents?: (content: ReactNode) => ReactNode;
 }) {
+  const navigate = useNavigate();
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [message, setMessage] = useState('');
   const [dragging, setDragging] = useState<string>();
@@ -99,27 +102,32 @@ export function BoardLists({ workspace, lists, renderContents, wrapDragContents 
 
   function snapshot(id: string): MoveSnapshot | null {
     const index = lists.findIndex((list) => list.id === id);
-    if (index < 0 || lists.length < 2) return null;
+    if (index < 0) return null;
     return {
       boardId: workspace.board.id, list: lists[index], orderVersion: workspace.orderVersion,
       neighbors: lists.filter((list) => list.id !== id), previousAnchor: lists[index + 1]?.id ?? null,
     };
   }
 
-  function runMove(state: MoveSnapshot, beforeListId: string | null) {
+  function runMove(state: MoveSnapshot, beforeListId: string | null, destination?: TransferBoard) {
     close();
-    if (beforeListId === state.previousAnchor) {
+    if (!destination && beforeListId === state.previousAnchor) {
       setRestoreFocus(state.list.id);
       return;
     }
     const { boardId, orderVersion, list } = state;
     const body: Omit<RelationshipCommandInput<'lists.move'>, 'id' | 'expectedRevision'> = {
-      toBoardId: boardId, beforeListId, sourceOrderVersion: orderVersion, destinationOrderVersion: orderVersion,
+      toBoardId: destination?.id ?? boardId, beforeListId, sourceOrderVersion: orderVersion,
+      destinationOrderVersion: destination?.orderVersion ?? orderVersion,
     };
     setMessage('');
     void action.run(['lists.move', list.id, list.revision, body], (csrf, key) =>
       relationshipCommand('lists.move', csrf, key, { id: list.id, revision: list.revision, body }),
-    () => setMessage('Moved ' + list.name + '.')).then(() => setRestoreFocus(list.id));
+    async (result) => {
+      if (result && result.data.list.boardId !== boardId) {
+        await navigate(boardHref(result.data.list.boardId), { state: { transferNotice: transferNotice('List moved.', result.data.remaps) } });
+      } else setMessage('Moved ' + list.name + '.');
+    }).then(() => setRestoreFocus(list.id));
   }
 
   function dragStart({ operation }: DragStartEvent) {
@@ -147,7 +155,7 @@ export function BoardLists({ workspace, lists, renderContents, wrapDragContents 
   const dragContents = <>
     <ul className="workspace-list-summary board-editable-lists" aria-label="Board lists">
       {lists.map((list) => <EditableList key={list.id} list={list} busy={action.busy} dragging={dragging}
-        allowMove={lists.length > 1} edit={() => {
+        allowDrag={lists.length > 1} edit={() => {
           action.clearProblem(); setMessage(''); setDialog({ kind: 'edit', listId: list.id });
         }} move={() => {
           const captured = snapshot(list.id);
@@ -178,6 +186,6 @@ export function BoardLists({ workspace, lists, renderContents, wrapDragContents 
     {dialog?.kind === 'move' && <MoveListDialog {...dialog.snapshot} onClose={() => {
       close();
       setRestoreFocus(dialog.snapshot.list.id);
-    }} onMove={(anchor) => runMove(dialog.snapshot, anchor)} />}
+    }} onMove={(anchor, board) => runMove(dialog.snapshot, anchor, board)} />}
   </section>;
 }

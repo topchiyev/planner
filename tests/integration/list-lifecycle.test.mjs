@@ -116,7 +116,7 @@ test('finite list moves retain card placement and require current ordered scope 
     await receipt(move(1, anchor, 2), 409, 'LIST_ORDER_CONFLICT');
     await receipt(move(1, anchor, 1, { destinationOrderVersion: 2 }), 409, 'LIST_ORDER_CONFLICT');
     for (const id of [ids.privateArchive, ids.sharedActiveList, fixtureId(5001)]) await receipt(move(1, id, 1), 409, 'LIST_ORDER_CONFLICT');
-    await receipt(move(1, null, 1, { toBoardId: ids.sharedBoard }), 409, 'LIST_ORDER_CONFLICT');
+    await receipt(move(1, null, 1, { toBoardId: ids.hiddenBoard }), 409, 'LIST_ORDER_CONFLICT');
     await receipt(move(1, moving, 1), 422, 'INVALID_LIST_ANCHOR');
     assert.deepEqual(finite(await receipt(f.call(browse, editor), 200)).map(({ id, rank }) => [id, rank]),
       [[left, '9007199254741010'], [anchor, '9007199254741011'], [moving, '9007199254741011']]);

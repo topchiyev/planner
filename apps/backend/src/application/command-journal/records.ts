@@ -4,12 +4,13 @@ import { workspaceCollections, type WorkspaceCollection } from '../../storage/ca
 import { decodeRank, isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { encodeWorkspaceFields, workspaceInsertFields } from '../../storage/scoped.js';
 import {
-  canonicalJournalData, CommandRecoveryError, commandUuid, isCommandName, journalDigest, type PlannedEffect,
+  canonicalJournalData, CommandRecoveryError, commandUuid, isCommandName, journalDigest, type JournalValue, type PlannedEffect,
 } from './operation.js';
 
 export const durable = { writeConcern: { w: 1, j: true } } as const;
 export const maximumBatchEffects = 256;
 export const maximumBatchBytes = 2 * 1024 * 1024;
+export const maximumReplayScopeBytes = 4096;
 const digestPattern = /^[0-9a-f]{64}$/u;
 const internalCollections = new Set<WorkspaceCollection>([
   'commands', 'commandEffectBatches', 'events', 'auditEntries',
@@ -37,6 +38,8 @@ export interface CommandRecord {
   manifest?: BatchSummary[];
   result?: string;
   resultHash?: string;
+  replayScope?: string;
+  replayScopeHash?: string;
   eventCount?: number;
   delivered?: number;
   lastDeliveredEventId?: string | null;
@@ -71,7 +74,8 @@ export function checkCommand(command: CommandRecord) {
   }
   if (status === 'building') {
     if ([command.applied, command.lastAppliedEffectId, command.pendingDelete, command.manifest, command.result, command.resultHash, command.committedAt,
-      command.eventCount, command.delivered, command.lastDeliveredEventId, command.outboxPending, command.recoverySequence]
+      command.eventCount, command.delivered, command.lastDeliveredEventId, command.outboxPending, command.recoverySequence,
+      command.replayScope, command.replayScopeHash]
       .some((value) => value !== undefined)) throw new CommandRecoveryError('A building command has active effects.');
     return;
   }
@@ -98,6 +102,7 @@ export function checkCommand(command: CommandRecord) {
     throw new CommandRecoveryError('The command outbox cursor is invalid.');
   }
   readJournalResult(command);
+  readJournalReplayScope(command);
 }
 
 export function checkOutboxCursor(command: Pick<CommandRecord, 'id' | 'eventCount' | 'delivered' | 'lastDeliveredEventId' | 'outboxPending'>) {
@@ -113,6 +118,18 @@ export function readJournalResult(command: CommandRecord) {
   const result = JSON.parse(command.result!);
   if (canonicalJournalData(result) !== command.result) throw new CommandRecoveryError('The stored command result is invalid.');
   return result;
+}
+
+export function readJournalReplayScope(command: CommandRecord): JournalValue | null {
+  const { replayScope, replayScopeHash } = command;
+  if (replayScope === undefined && replayScopeHash === undefined) return null;
+  if (typeof replayScope !== 'string' || Buffer.byteLength(replayScope) > maximumReplayScopeBytes
+      || journalDigest(replayScope) !== replayScopeHash) throw new CommandRecoveryError('The command replay scope is invalid.');
+  try {
+    const value = JSON.parse(replayScope);
+    if (canonicalJournalData(value) === replayScope) return value;
+  } catch { /* Invalid persisted replay scope. */ }
+  throw new CommandRecoveryError('The command replay scope is invalid.');
 }
 
 export function validateEffect(effect: PlannedEffect, internal: boolean) {
