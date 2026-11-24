@@ -1795,6 +1795,13 @@ test('board filters retain one URL recipe across views and pages with isolated e
     await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
     await expect(filters).toHaveCount(0);
+    await expect(otherTab.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(mount);
+    await expect(filters).toBeVisible();
+    await expect(filters.getByRole('button', { name: /Recall/u })).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(editor.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
     await signIn(editor, origin, 'viewer');
     await editor.goto(mount);
     await expect(filters).toBeVisible();
@@ -1857,5 +1864,45 @@ test('a late card page cannot replace a newer recipe or survive current board ac
     await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
     await expect(editor.getByRole('link', { name: 'Late card from the prior recipe' })).toHaveCount(0);
     await expect(filters).toHaveCount(0);
+  });
+});
+
+test('a rejected filter-member read clears the board and open inspector before revalidation completes', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const editor = await page({ width: 1440, height: 900 });
+    await signIn(editor, origin, 'first-editor');
+    await editor.goto(origin + board(ids.privateBoard) + '/cards/' + ids.activeCard);
+    await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toBeVisible();
+    const heading = editor.locator('#page-heading');
+    const oldName = await heading.textContent();
+    assert.ok(oldName?.trim());
+    const sidebarBoard = editor.getByRole('navigation', { name: 'Project navigation' }).getByRole('link', { name: oldName, exact: true });
+    await expect(sidebarBoard).toBeVisible();
+    const filters = editor.getByRole('search', { name: 'Board cards' });
+    await expect(filters).toBeVisible();
+    const held = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const overview = '**/api/v1/boards/' + ids.privateBoard + '/workspace';
+    await editor.route(overview, async (intercepted) => {
+      held.resolve();
+      await resume.promise;
+      await intercepted.continue().catch(() => {});
+    });
+    try {
+      await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({
+        ...fixture.scope, boardId: ids.privateBoard, userId: ids.firstEditor,
+      }));
+      const denied = editor.waitForResponse((response) => response.url().endsWith('/filter-members') && response.status() === 404);
+      await filters.getByText('Filter by labels, members or lists').click();
+      await denied;
+      await held.promise;
+      await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+      await expect(editor.getByRole('heading', { name: oldName, exact: true })).toHaveCount(0);
+      await expect(sidebarBoard).toHaveCount(0);
+      await expect(editor.getByRole('heading', { name: 'Moving an assigned card', level: 2 })).toHaveCount(0);
+      await expect(editor.getByRole('navigation', { name: 'Board context' })).toHaveCount(0);
+      await expect(filters).toHaveCount(0);
+    } finally { resume.resolve(); }
+    await expect(editor.getByRole('heading', { name: 'Page not found' })).toBeVisible();
   });
 });

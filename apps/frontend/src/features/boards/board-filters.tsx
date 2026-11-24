@@ -5,7 +5,7 @@ import type { BoardList } from '../lists/board-lists.js';
 import { boardFilterLocation, emptyBoardRecipe, hasBoardFilters } from '../workspace/board-filter-route.js';
 import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
 import { BoardFilterMembers } from './board-filter-members.js';
-import { maximumBoardRecipeNameLength, maximumSavedBoardRecipes, readBoardRecipes, saveBoardRecipes } from './board-filter-store.js';
+import { boardRecipeStoragePrefix, maximumBoardRecipeNameLength, maximumSavedBoardRecipes, readBoardRecipes, saveBoardRecipes } from './board-filter-store.js';
 import './board-filters.css';
 
 type Workspace = NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>;
@@ -16,7 +16,7 @@ export function BoardFilters({ workspace, lists, loading, onAccessLost }: {
 }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const key = 'planner.boardFilters.v1/' + workspace.recipeScope + '/' + workspace.board.id + '/' + workspace.context;
+  const key = boardRecipeStoragePrefix + workspace.recipeScope + '/' + workspace.board.id + '/' + workspace.context;
   const [recipes, setRecipes] = useState(() => readBoardRecipes(key));
   const [draft, setDraft] = useState(workspace.recipe);
   const [advanced, setAdvanced] = useState(false);

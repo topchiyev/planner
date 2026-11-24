@@ -1,5 +1,6 @@
 import { boardRecipeSchema, type BoardFilterRecipe } from '@planner/contracts';
 
+export const boardRecipeStoragePrefix = 'planner.boardFilters.v1/';
 export const maximumSavedBoardRecipes = 20;
 export const maximumBoardRecipeNameLength = 64;
 type NamedRecipe = { name: string; recipe: BoardFilterRecipe };
@@ -28,4 +29,13 @@ export function readBoardRecipes(key: string): StoredRecipes {
 
 export function saveBoardRecipes(key: string, value: StoredRecipes) {
   try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* The browser may disable tab storage. */ }
+}
+
+export function clearBoardRecipes() {
+  try {
+    for (let index = sessionStorage.length - 1; index >= 0; index--) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(boardRecipeStoragePrefix)) sessionStorage.removeItem(key);
+    }
+  } catch { /* The browser may disable tab storage. */ }
 }

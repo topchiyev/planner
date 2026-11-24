@@ -88,6 +88,11 @@ export function loadNativeBoard({ params, request }: LoaderFunctionArgs) {
   });
 }
 
+export type BoardReadRefusal = {
+  deniedBoard: Awaited<ReturnType<typeof loadNativeBoard>> | undefined;
+  refuseBoard: (board: NonNullable<Awaited<ReturnType<typeof loadNativeBoard>>>) => void;
+};
+
 export function loadNativeCard({ params, request }: LoaderFunctionArgs) {
   const boardId = publicIdSchema.safeParse(params.boardId);
   const id = publicIdSchema.safeParse(params.cardId);

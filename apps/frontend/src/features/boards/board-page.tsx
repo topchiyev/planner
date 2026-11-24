@@ -1,8 +1,7 @@
-import { useState } from 'react';
-import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useRevalidator, useSearchParams } from 'react-router';
+import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRevalidator, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
 
-import type { loadNativeBoard } from '../workspace/workspace-loaders.js';
+import type { BoardReadRefusal, loadNativeBoard } from '../workspace/workspace-loaders.js';
 import { projectHref } from '../workspace/workspace-navigation.js';
 import { BoardAffiliations } from '../affiliations/board-affiliations.js';
 import { BoardManagement } from './board-management.js';
@@ -30,7 +29,7 @@ export function BoardPage() {
   const [params] = useSearchParams();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
-  const [deniedBoard, setDeniedBoard] = useState<typeof board>();
+  const { deniedBoard, refuseBoard } = useOutletContext<BoardReadRefusal>();
   const { pathname, search, state: routeState } = useLocation();
   const pending = !!navigation.location && (navigation.location.pathname !== pathname || navigation.location.search !== search);
   const inspectorOpen = useMatch('/boards/:boardId/cards/:cardId') !== null;
@@ -51,7 +50,7 @@ export function BoardPage() {
     return { pathname, search: `?${nextParams}` };
   }
 
-  if (board === null) return <RouteNotFound />;
+  if (board === null || (board && deniedBoard === board)) return <RouteNotFound />;
   const lists = board?.lists.filter(({ kind }) => context.id === 'board' ? kind === 'active' || kind === 'closed' : kind === context.id);
 
   return (
@@ -80,10 +79,10 @@ export function BoardPage() {
             ))}
           </nav>
         </div>
-        {board && lists && deniedBoard !== board ? <>
+        {board && lists ? <>
           <BoardFilters key={JSON.stringify([board.recipeScope, board.board.id, board.context, board.recipe])}
             workspace={board} lists={lists} loading={pending} onAccessLost={() => {
-              setDeniedBoard(board);
+              refuseBoard(board);
               void revalidator.revalidate();
             }} />
           <div hidden={pending}>
