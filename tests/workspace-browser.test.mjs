@@ -2248,6 +2248,7 @@ test('keyboard cut rechecks the source revision, cancels cleanly and reopens aft
           'X-CSRF-Token': owner.data.csrfToken }, body: { role, canComment: role === 'viewer' ? false : null },
       });
       assert.equal(response.status, 200, JSON.stringify(response.data));
+      await new CommandJournal(fixture.gate, fixture.db, fixture.installationId).deliverPending(fixture.streams.accept);
       return response.data.data.revision;
     }
     const readOnly = editor.waitForResponse(async (response) => {
