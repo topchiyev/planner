@@ -3,6 +3,7 @@ import {
   nativeInstallationConfig, nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
 } from '@planner/contracts/native';
 import type { MongoClient } from 'mongodb';
+import type { WriterLease } from '../application/command-gate/writer-lease.js';
 import { workspaceKey } from '../storage/identity.js';
 import { currentStorageSchema, type InstallationDocument } from '../storage/schema.js';
 import { checkDirectory, fileJson, readProtectedFile, writeProtectedFile } from './mongo-host.js';
@@ -111,7 +112,7 @@ export function pendingAction(mode: NativeSetupOptions['mode']): PendingAction {
   return mode === 'fresh' ? 'first-admin-enrollment' : 'migration-preflight';
 }
 
-export async function persistSetup(client: MongoClient, installationId: string, intent: SetupIntent) {
+async function setupState(client: MongoClient, installationId: string, intent: SetupIntent, writer?: WriterLease) {
   const database = client.db(databaseName);
   const installation = database.collection<InstallationDocument>('installation');
   const key = { _id: 'installation', installationId } as const;
@@ -119,11 +120,15 @@ export async function persistSetup(client: MongoClient, installationId: string, 
     mode: intent.options.mode, pendingAction: pendingAction(intent.options.mode),
     enrollmentGenerationId: intent.grant?.generationId ?? null,
   };
-  await installation.updateOne(
-    { ...key, setup: { $exists: false }, activeGenerationId: { $exists: false } },
-    { $set: { setup, activeGenerationId: null, schemaVersion: 0 } }, { writeConcern },
-  );
-  const stored = await installation.findOne(key);
+  let stored = await installation.findOne(key);
+  if (writer && stored && stored.setup === undefined && stored.activeGenerationId === undefined) {
+    writer.assertHeld();
+    await installation.updateOne(
+      { ...key, setup: { $exists: false }, activeGenerationId: { $exists: false } },
+      { $set: { setup, activeGenerationId: null, schemaVersion: 0 } }, { writeConcern },
+    );
+    stored = await installation.findOne(key);
+  }
   if (stored?.activeGenerationId !== null || (stored.schemaVersion !== 0 && stored.schemaVersion !== currentStorageSchema)
       || stored.schemaMigration !== undefined
       || stored.setup?.mode !== setup.mode || stored.setup.pendingAction !== setup.pendingAction
@@ -138,6 +143,8 @@ export async function persistSetup(client: MongoClient, installationId: string, 
   const digest = createHash('sha256').update(grant.token).digest('hex');
   const firstIssuedAt = stored.setup.firstAdminGrantIssuedAt;
   if (firstIssuedAt === undefined) {
+    if (!writer) throw new NativeMongoError('The first-administrator grant issuance record is unavailable.');
+    writer.assertHeld();
     const issuedAt = new Date();
     await recoveryGrants.updateOne({ _id: keyForGrant }, { $setOnInsert: {
       id: grant.id, installationId, generationId: grant.generationId, kind: 'first-admin',
@@ -156,7 +163,8 @@ export async function persistSetup(client: MongoClient, installationId: string, 
       || (firstIssuedAt !== undefined && saved.issuedAt.getTime() !== firstIssuedAt.getTime())) {
     throw new NativeMongoError('The first-administrator grant does not match the durable setup intent.');
   }
-  if (firstIssuedAt === undefined) {
+  if (writer && firstIssuedAt === undefined) {
+    writer.assertHeld();
     const marker = await installation.updateOne(
       { ...key, 'setup.firstAdminGrantIssuedAt': { $exists: false } },
       { $set: { 'setup.firstAdminGrantIssuedAt': saved.issuedAt } }, { writeConcern },
@@ -165,4 +173,13 @@ export async function persistSetup(client: MongoClient, installationId: string, 
   }
   if (saved.consumedAt !== null || Date.now() >= saved.expiresAt.getTime()) return undefined;
   return { token: grant.token, expiresAt: saved.expiresAt.toISOString() };
+}
+
+export function readPersistedSetup(client: MongoClient, installationId: string, intent: SetupIntent) {
+  return setupState(client, installationId, intent);
+}
+
+export function persistSetup(client: MongoClient, installationId: string, intent: SetupIntent, writer: WriterLease) {
+  writer.assertHeld();
+  return setupState(client, installationId, intent, writer);
 }

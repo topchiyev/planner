@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,9 @@ import { withFixtureMongo } from '../support/fixture-mongo.ts';
 assertOwnedMongoEnvironment(process.env);
 const { CommandGate, GateUnavailableError, CleanCommandRejection } = await import('../../apps/backend/dist/application/command-gate/gate.js');
 const { acquireWriterDirectory, WriterOwnershipError } = await import('../../apps/backend/dist/application/command-gate/writer-lease.js');
+const { createWorkspaceAccess } = await import('../../apps/backend/dist/application/command-gate/workspace-access.js');
+const { migrateStorageSchema } = await import('../../apps/backend/dist/storage/schema.js');
+const { openActiveWorkspace, openTrustedStagedWorkspace } = await import('../../apps/backend/dist/storage/scoped.js');
 const { buildApp } = await import('../../apps/backend/dist/build-app.js');
 const owner = { uid: process.getuid(), gid: process.getgid() };
 const processScript = fileURLToPath(new URL('../support/writer-process.mjs', import.meta.url));
@@ -142,6 +146,87 @@ test('owned Mongo snapshots straddle the full commit and waiting writers outrank
     } finally {
       for (const barrier of [...finish, secondWrite, commit]) barrier.resolve();
       await Promise.allSettled([...readers, writer, later]);
+    }
+  });
+});
+
+test('active workspace materialization and generation changes share one gate', { timeout: 30_000 }, async (t) => {
+  const { directory } = await scratch(t);
+  const gate = new CommandGate(acquireWriterDirectory(directory, owner, owner));
+  t.after(() => gate.closeAndDrain());
+  return withFixtureMongo(async ({ db }) => {
+    const [installationId, previousId, stagedId, projectId] = Array.from({ length: 4 }, () => randomUUID());
+    const installations = db.collection('installation');
+    await gate.recover(async () => {
+      await installations.insertOne({ _id: 'installation', installationId, activeGenerationId: previousId, schemaVersion: 0 });
+      await migrateStorageSchema(db, installationId);
+      const active = await openActiveWorkspace(db, installationId);
+      const staged = await openTrustedStagedWorkspace(db, installationId, stagedId);
+      await active.insert('projects', projectId, { name: 'previous' });
+      await staged.insert('projects', projectId, { name: 'next' });
+    });
+
+    const bindingChecked = deferred();
+    const materialize = deferred();
+    let pause = true;
+    const collection = db.collection.bind(db);
+    const observedDatabase = new Proxy(db, { get(target, key) {
+      if (key === 'collection') return (name, ...options) => {
+        const source = collection(name, ...options);
+        if (name === 'projects') {
+          const findOne = source.findOne.bind(source);
+          source.findOne = async (...query) => {
+            if (pause) {
+              pause = false;
+              // The real storage handle calls findOne after checking the active binding.
+              bindingChecked.resolve();
+              await materialize.promise;
+            }
+            return findOne(...query);
+          };
+        }
+        return source;
+      };
+      const property = Reflect.get(target, key, target);
+      return typeof property === 'function' ? property.bind(target) : property;
+    } });
+    const workspace = createWorkspaceAccess(gate, observedDatabase, installationId);
+    let escaped;
+    const snapshot = workspace.readSnapshot(async (view) => {
+      assert.equal(view.insert, undefined);
+      escaped = view;
+      return view.read('projects', projectId);
+    });
+    await Promise.race([bindingChecked.promise, snapshot]);
+    const change = gate.runCommand(async () => {
+      const result = await installations.updateOne({ _id: 'installation', activeGenerationId: previousId },
+        { $set: { activeGenerationId: stagedId } });
+      assert.equal(result.modifiedCount, 1);
+    });
+    const later = workspace.readSnapshot((view) => view.read('projects', projectId));
+    try {
+      assert.equal((await installations.findOne({ _id: 'installation' })).activeGenerationId, previousId);
+      materialize.resolve();
+      assert.equal((await snapshot).name, 'previous');
+      await change;
+      assert.equal((await later).name, 'next');
+      await assert.rejects(escaped.read('projects', projectId), GateUnavailableError);
+
+      const clean = new CleanCommandRejection('stale fixture revision');
+      await assert.rejects(workspace.runCommand(async (view) => {
+        assert.equal(await view.update('projects', projectId, { name: 'rejected' }, 99), false);
+        throw clean;
+      }), clean);
+      assert.equal(gate.ready, true);
+      await assert.rejects(workspace.runCommand(async (view) => {
+        assert.equal(await view.update('projects', projectId, { name: 'applied' }, 1), true);
+        throw clean;
+      }), /applied effects before it failed/u);
+      assert.equal(gate.state, 'maintenance');
+      await assert.rejects(workspace.readSnapshot((view) => view.read('projects', projectId)), GateUnavailableError);
+    } finally {
+      materialize.resolve();
+      await Promise.allSettled([snapshot, change, later]);
     }
   });
 });

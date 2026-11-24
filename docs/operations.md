@@ -61,6 +61,8 @@ Use `--mode import` to prepare an installation for migration preflight. It recor
 
 Setup and `plannerctl start` verify the dedicated MongoDB instance, start the application on its selected loopback port and enable the two services for boot. `plannerctl stop` stops the application before MongoDB. `plannerctl restart` applies that order and revalidates the database before starting the application again.
 
+Setup and lifecycle commands serialize through the installation lock. Stopped setup and schema migration also take the exclusive writer lease on the existing `/run/planner` directory inode and release it before the backend starts. A running backend holds that same lease through shutdown. Stop, restart and removal drain the backend and obtain the writer lease before touching MongoDB. Setup retries and start against a running backend verify existing state without provisioning or migrating it. The runtime mount and the host use the same inode, anchored by the root-owned `/run` parent.
+
 Stop Planner before a package upgrade or reinstall. Once configured, the installer checks the recorded ports automatically. Package removal stops and disables the services and preserves the configuration, database and files. After reinstalling, run `sudo plannerctl start` to resume the existing installation. The setup intent and package ports are root-only files under `/etc/planner`; the application configuration is readable by the Planner service group.
 
 ## Workspace storage schema
@@ -118,5 +120,7 @@ Run the [private database acceptance test](../tests/release/native-mongodb.sh) i
 Run the [operator acceptance test](../tests/release/native-setup.sh) for each setup mode in a clean offline guest. It takes the signed candidate ISO mount point and the mode. After the first phase succeeds, reboot the same guest and run it with the additional `reboot-check` argument.
 
 Run the [HTTP and proxy acceptance test](../tests/release/native-http.sh) in a separate clean offline guest. Place the signed candidate, test public key, sample nginx configuration and `native-http-fixture.mjs` at the ISO root. Put the two nginx packages pinned by the test in `nginx/`. The test uses a guest-only event source to measure streaming through TLS.
+
+Run the [writer ownership acceptance test](../tests/release/native-writer.sh) in a clean offline guest with the signed candidate, test public key and `release.py` at the ISO root. Place the signed pre-schema package and its test public key in `previous/`. The test exercises upgrade contention, the systemd backend's held inode, crash recovery and failed launch cleanup.
 
 Run the [storage upgrade acceptance test](../tests/release/native-storage.sh) in a clean offline guest. Pair the signed current candidate at the root of the read-only ISO with the signed schema-0 operator build under `previous/`. The test uses the installed operator commands and the guest's authenticated Planner database.

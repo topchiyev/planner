@@ -7,6 +7,7 @@ import {
   nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
 } from '@planner/contracts/native';
 import type { MongoClient } from 'mongodb';
+import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
   currentStorageSchema, migrateStorageSchema, readInstallation, StorageSchemaError, verifyStorageSchema,
   type InstallationDocument,
@@ -19,8 +20,9 @@ import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-i
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
 import {
   checkPackagePorts, createSetupIntent, pendingAction, persistSetup, publishInstallationConfig, readInstallationConfig,
-  readSetupIntent, sameSetup,
+  readPersistedSetup, readSetupIntent, sameSetup,
 } from './setup-state.js';
+import { acquireNativeWriter } from './writer.js';
 
 const statePath = '/var/lib/planner';
 const app = 'planner.service';
@@ -111,17 +113,26 @@ async function connectOwnedDatabase(expected: Pick<NativeInstallationConfig, 'in
   return connectVerifiedNativeMongo(credential);
 }
 
-async function prepareStorage(client: MongoClient, installationId: string) {
+async function prepareStorage(client: MongoClient, installationId: string, writer: WriterLease) {
+  writer.assertHeld();
   const database = client.db(databaseName);
   const existing = await readInstallation(database, installationId);
-  if (existing.schemaVersion !== currentStorageSchema && systemctl('show', '--property=MainPID', '--value', app) !== '0') {
-    throw new NativeMongoError('Stop the Planner application before upgrading its storage schema.');
-  }
-  await migrateStorageSchema(database, installationId);
+  if (existing.schemaVersion === currentStorageSchema) await verifyStorageSchema(database, installationId);
+  else await migrateStorageSchema(database, installationId);
 }
 
-function stopServices() {
-  systemctl('stop', app);
+// Lifecycle commands take the installation lock before acquiring the writer lease.
+async function withStoppedWriter<T>(operation: (writer: WriterLease) => Promise<T>) {
+  const writer = acquireNativeWriter();
+  try {
+    if (systemctl('show', '--property=MainPID', '--value', app) !== '0') {
+      throw new NativeMongoError('Stop the Planner application before updating installation storage.');
+    }
+    return await operation(writer);
+  } finally { writer.release(); }
+}
+
+function stopDatabase() {
   systemctl('stop', database);
   stopNativeMongoBootstrap();
 }
@@ -162,56 +173,75 @@ async function setup(options: NativeSetupOptions) {
     if (intent && !sameSetup(intent.options, options)) {
       throw new NativeMongoError('Repeat setup with the originally selected mode, origin and ports.');
     }
-    appListening(options.appPort, !!existing);
-    if (!intent) {
-      if (['/etc/planner/mongodb-init.json', '/etc/planner/mongod.conf', mongoCredentialFile]
-        .some((path) => lstatSync(path, { throwIfNoEntry: false }))) {
-        throw new NativeMongoError('The Planner database already has initialization artifacts without a setup intent.');
+    if (appListening(options.appPort, !!existing)) {
+      if (!existing || !intent) throw new NativeMongoError('The running Planner setup could not be verified.');
+      const client = await connectOwnedDatabase(existing, owner.appGroup);
+      try {
+        await verifyStorageSchema(client.db(databaseName), existing.installationId);
+        const grant = await readPersistedSetup(client, existing.installationId, intent);
+        return { ...status(owner), ...(grant && { firstAdminGrant: grant }) };
+      } finally { await client.close(); }
+    }
+    const grant = await withStoppedWriter(async (writer) => {
+      if (!intent) {
+        if (['/etc/planner/mongodb-init.json', '/etc/planner/mongod.conf', mongoCredentialFile]
+          .some((path) => lstatSync(path, { throwIfNoEntry: false }))) {
+          throw new NativeMongoError('The Planner database already has initialization artifacts without a setup intent.');
+        }
+        inspectNativeMongo(options.dbPort);
+        intent = createSetupIntent(owner.receipt, options);
       }
-      inspectNativeMongo(options.dbPort);
-      intent = createSetupIntent(owner.receipt, options);
-    }
-    const active = await ensureNativeMongo(options.dbPort);
-    if (existing && existing.installationId !== active.installationId) {
-      throw new NativeMongoError('The Planner application and database installation identities do not match.');
-    }
-    const client = await connectOwnedDatabase(active, owner.appGroup);
-    try {
-      const saved = await client.db(databaseName).collection<InstallationDocument>('installation').findOne(
-        { _id: 'installation', installationId: active.installationId }, { projection: { schemaVersion: 1 } },
-      );
-      const existingStorage = saved?.schemaVersion !== undefined || !!existing;
-      if (existingStorage) await prepareStorage(client, active.installationId);
-      const grant = await persistSetup(client, active.installationId, intent);
-      if (!existingStorage) await prepareStorage(client, active.installationId);
-      publishInstallationConfig({ formatVersion: 1, installationId: active.installationId, ...options }, owner.appGroup);
-      await startApplication(options.appPort);
-      return { ...status(owner), ...(grant && { firstAdminGrant: grant }) };
-    } finally {
-      await client.close();
-    }
+      const active = await ensureNativeMongo(options.dbPort);
+      if (existing && existing.installationId !== active.installationId) {
+        throw new NativeMongoError('The Planner application and database installation identities do not match.');
+      }
+      const client = await connectOwnedDatabase(active, owner.appGroup);
+      try {
+        const saved = await client.db(databaseName).collection<InstallationDocument>('installation').findOne(
+          { _id: 'installation', installationId: active.installationId }, { projection: { schemaVersion: 1 } },
+        );
+        const existingStorage = saved?.schemaVersion !== undefined || !!existing;
+        if (existingStorage) await prepareStorage(client, active.installationId, writer);
+        const issued = await persistSetup(client, active.installationId, intent, writer);
+        if (!existingStorage) await prepareStorage(client, active.installationId, writer);
+        publishInstallationConfig({ formatVersion: 1, installationId: active.installationId, ...options }, owner.appGroup);
+        return issued;
+      } finally { await client.close(); }
+    });
+    await startApplication(options.appPort);
+    return { ...status(owner), ...(grant && { firstAdminGrant: grant }) };
   });
 }
 
 async function control(action: 'start' | 'stop' | 'restart') {
   return withInstallationLock(async (owner) => {
     if (action === 'stop') {
-      stopServices();
+      systemctl('stop', app);
+      await withStoppedWriter(async () => stopDatabase());
       return status(owner);
     }
     const config = readInstallationConfig(owner.appGroup);
     verifySetupFiles(config, readSetupIntent(owner.receipt));
     if (!config) throw new NativeMongoError('Complete Planner setup before starting its services.');
     validateNativePorts(config);
-    appListening(config.appPort, true);
-    if (action === 'restart') stopServices();
-    const active = await ensureNativeMongo(config.dbPort);
-    if (active.installationId !== config.installationId) {
-      throw new NativeMongoError('The Planner application and database installation identities do not match.');
+    const listening = appListening(config.appPort, true);
+    if (action === 'start' && listening) {
+      const client = await connectOwnedDatabase(config, owner.appGroup);
+      try { await verifyStorageSchema(client.db(databaseName), config.installationId); }
+      finally { await client.close(); }
+      return status(owner);
     }
-    const client = await connectOwnedDatabase(config, owner.appGroup);
-    try { await prepareStorage(client, config.installationId); }
-    finally { await client.close(); }
+    if (action === 'restart') systemctl('stop', app);
+    await withStoppedWriter(async (writer) => {
+      if (action === 'restart') stopDatabase();
+      const active = await ensureNativeMongo(config.dbPort);
+      if (active.installationId !== config.installationId) {
+        throw new NativeMongoError('The Planner application and database installation identities do not match.');
+      }
+      const client = await connectOwnedDatabase(config, owner.appGroup);
+      try { await prepareStorage(client, config.installationId, writer); }
+      finally { await client.close(); }
+    });
     await startApplication(config.appPort);
     return status(owner);
   });
@@ -235,8 +265,11 @@ try {
   const [action, ...args] = process.argv.slice(2);
   if (action === 'package-remove' && args.length === 0) {
     await withInstallationLock(async () => {
-      stopServices();
-      systemctl('disable', app, database);
+      systemctl('stop', app);
+      await withStoppedWriter(async () => {
+        stopDatabase();
+        systemctl('disable', app, database);
+      });
     });
   } else if (action === 'verify-storage' && args.length === 1) {
     const result = await verifyInstalledStorage();
@@ -266,7 +299,7 @@ try {
     }
   }
 } catch (error) {
-  console.error(error instanceof NativeMongoError || error instanceof StorageSchemaError
+  console.error(error instanceof NativeMongoError || error instanceof StorageSchemaError || error instanceof WriterOwnershipError
     ? error.message : 'The Planner operator command could not be completed.');
   process.exitCode = 1;
 }

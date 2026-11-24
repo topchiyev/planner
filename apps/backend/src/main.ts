@@ -1,6 +1,7 @@
 import { lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultAppPort } from '@planner/contracts/native';
+import type { CommandGate } from './application/command-gate/gate.js';
 import { buildApp, type AppDependencies } from './build-app.js';
 import { adminRuntimeDirectory, startAdminSocket } from './native/admin-socket.js';
 import { proxyTokenPattern } from './native/http-boundary.js';
@@ -8,10 +9,12 @@ import { readProtectedFile } from './native/mongo-host.js';
 import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
 import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
 import { readInstallationConfig } from './native/setup-state.js';
+import { createNativeCommandGate } from './native/writer.js';
 
 let app: ReturnType<typeof buildApp> | undefined;
 let closeAdmin: (() => Promise<void>) | undefined;
 let closeProxy: (() => Promise<void>) | undefined;
+let commandGate: CommandGate | undefined;
 
 try {
   const frontendRoot = fileURLToPath(new URL('../../frontend/dist/', import.meta.url));
@@ -28,7 +31,15 @@ try {
     }
     const proxyToken = readProtectedFile('/etc/planner/proxy-token', group, 0o640)?.replace(/\n$/u, '');
     if (proxyToken !== undefined && !proxyTokenPattern.test(proxyToken)) throw new Error('Invalid Planner proxy token.');
-    const readAccess = boundedRuntimeProbe(() => inspectRuntimeAccess(config));
+    const gate = createNativeCommandGate();
+    commandGate = gate;
+    const readAccess = boundedRuntimeProbe(async () => {
+      const access = await inspectRuntimeAccess(config);
+      if (!gate.ready && (access.kind === 'ready' || gate.state !== 'starting')) {
+        return { kind: 'unavailable', reason: 'schema-or-recovery' };
+      }
+      return access;
+    });
     // Apply this before binding the local operator socket, including direct service-account startup.
     process.umask(0o077);
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess);
@@ -50,7 +61,7 @@ try {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
-      await Promise.all([app?.close(), closeAdmin?.(), closeProxy?.()]);
+      await Promise.all([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
     } catch {
       console.error('Planner could not close its listeners.');
       process.exitCode = 1;
@@ -64,7 +75,7 @@ try {
   process.on('SIGTERM', shutdown);
   console.log(address);
 } catch {
-  await Promise.allSettled([app?.close(), closeAdmin?.(), closeProxy?.()]);
+  await Promise.allSettled([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
   console.error('Planner could not start its listeners.');
   process.exitCode = 1;
 }
