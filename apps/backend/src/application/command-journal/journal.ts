@@ -151,10 +151,9 @@ export class CommandJournal {
     return result;
   }
 
-  async recover(recoverPrivate?: () => void | Promise<void>, verifyBeforeReplay?: () => void | Promise<void>) {
+  async recover(recoverPrivate?: () => void | Promise<void>) {
     await this.gate.recover(async () => {
       const installation = await verifyStorageSchema(this.database, this.installationId);
-      await verifyBeforeReplay?.();
       const generationId = scopeGeneration(installation, 'active') ?? scopeGeneration(installation, 'enrollment');
       if (generationId) await this.#recoverScope(generationId);
       // Protected claims may have their own replay mechanism. This hook runs before admission.
