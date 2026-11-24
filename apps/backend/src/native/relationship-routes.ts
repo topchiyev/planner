@@ -13,7 +13,7 @@ import { CommandConflict, CommandInputError } from '../application/command-journ
 import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../application/workspace/relationship-commands.js';
-import { RelationshipError } from '../application/workspace/relationship-policy.js';
+import { CardPlacementConflict, RelationshipError } from '../application/workspace/relationship-policy.js';
 import { createRelationshipReads } from '../application/workspace/relationship-reads.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
@@ -85,6 +85,11 @@ function badInput(request: FastifyRequest, reply: FastifyReply) {
 }
 
 function requestError(error: unknown, request: FastifyRequest, reply: FastifyReply) {
+  if (error instanceof CardPlacementConflict) {
+    return reply.code(error.statusCode).send({ error: {
+      code: error.code, message: error.message, requestId: request.id, current: error.current,
+    } });
+  }
   if (error instanceof WorkspaceAccessError || error instanceof RelationshipError) {
     return fail(request, reply, error.statusCode, error.code, error.message);
   }

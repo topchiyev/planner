@@ -926,3 +926,46 @@ test('editors move cards by pointer and keyboard, recover stale placement, and u
     await expect(editor.getByRole('button', { name: 'Delete list Trash' })).toHaveCount(0);
   });
 });
+
+test('keyboard placement continues past the first anchor page and closes when protected access is lost', { timeout: 120_000 }, async () => {
+  await workspaceBrowser(async ({ fixture, origin, page }) => {
+    const p = await page({ width: 390, height: 844 });
+    const target = ids.privateClosedList;
+    const anchor = fixtureId(8102);
+    for (let index = 1; index <= 102; index++) {
+      await fixture.insert('cards', fixtureId(8000 + index), { boardId: ids.privateBoard, listId: target,
+        name: 'Anchor ' + String(index).padStart(3, '0'), kind: 'board', type: 'project', closed: true, rank: String(index * 1024) });
+    }
+    await signIn(p, origin, 'first-editor');
+    const card = ids.activeCard;
+    const path = board(ids.privateBoard) + '/cards/' + card + '?context=board&view=list';
+    await p.goto(origin + path);
+    const placement = p.getByRole('region', { name: 'Card placement' });
+    await placement.getByRole('button', { name: 'Move card', exact: true }).press('Enter');
+    const dialog = p.getByRole('dialog', { name: 'Move card' });
+    await dialog.getByLabel('Destination list').selectOption({ label: 'Done' });
+    const position = dialog.getByLabel('Position');
+    await expect(dialog.getByRole('button', { name: 'Load more positions' })).toBeVisible();
+    await expect(position.locator('option', { hasText: 'Before Anchor 102' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Load more positions' }).press('Enter');
+    await position.selectOption({ label: 'Before Anchor 102' });
+    const submitted = p.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/api/v1/cards/' + card + '/move'));
+    await dialog.getByRole('button', { name: 'Move card', exact: true }).press('Enter');
+    assert.equal((await submitted).postDataJSON().beforeCardId, anchor);
+    await expect(placement.getByRole('status')).toContainText('Card moved.');
+    const saved = await fixture.db.collection('cards').findOne({ ...fixture.scope, id: card }, { promoteLongs: false });
+    assert.equal(saved.listId, target);
+    assert.ok(saved.rank.toBigInt() > 101n * 1024n && saved.rank.toBigInt() < 102n * 1024n);
+
+    await placement.getByRole('button', { name: 'Move card', exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await fixture.gate.runCommand(() => fixture.db.collection('boardMembers').deleteOne({ ...fixture.scope,
+      boardId: ids.privateBoard, userId: ids.firstEditor }));
+    const rejected = p.waitForResponse((response) => response.url().includes('/api/v1/boards/' + ids.privateBoard + '/cards')
+      && new URL(response.url()).searchParams.get('listIds') === ids.privateActiveList);
+    await dialog.getByLabel('Destination list').selectOption({ label: 'To do' });
+    assert.equal((await rejected).status(), 404);
+    await expect(dialog).toHaveCount(0);
+    await expect(p.getByRole('heading', { name: 'Page not found', exact: true })).toBeVisible();
+  });
+});
