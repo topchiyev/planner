@@ -6,6 +6,7 @@ import test from 'node:test';
 import { Secret, TOTP } from 'otpauth';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
+import { adminAccountOf, requireSiteAdmin, usableAdmin } from '../../apps/backend/dist/application/auth/account-policy.js';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
 import { newToken, tokenDigest } from '../../apps/backend/dist/application/auth/credentials.js';
 import { getFactor, readStagedMfaEnrollment, recoverFactorChanges } from '../../apps/backend/dist/application/auth/mfa-account.js';
@@ -63,7 +64,7 @@ async function setup({ db, directory }, staged = false) {
   let time = initial;
   const now = () => time;
   const manage = createMfaManagement(db, installationId, gate, key, hasher, now);
-  const sessions = createBrowserSessions(db, installationId, gate, hasher, now);
+  const sessions = createBrowserSessions(db, installationId, gate, hasher, now, key);
   return {
     installationId, generationId, userId, recoveryId, users, grants, installation, gate, key, manage, sessions, now,
     setTime: (value) => { time = value; }, user: () => users.findOne({ _id: user._id }),
@@ -95,6 +96,9 @@ test('standalone Mongo atomically binds factor changes, consumes challenge and f
       assert.equal(issued.recoveryCodes.length, 10);
       assert.equal(await sessions.read(first.token), null);
       const stored = await fixture.user();
+      assert.equal(usableAdmin(stored), true);
+      assert.equal(adminAccountOf(stored).signIn, 'available');
+      assert.doesNotThrow(() => requireSiteAdmin(stored));
       assert.equal(stored.localAuth.credentialsVersion, 2);
       assert.equal(stored.localAuth.mfa, 'totp');
       const factor = getFactor(stored);
@@ -109,8 +113,9 @@ test('standalone Mongo atomically binds factor changes, consumes challenge and f
       assert.equal(earlier.status, 'challenge-required');
       assert.equal(rival.status, 'challenge-required');
       const code = codeAt();
-      const accepted = await verify({ challengeId: earlier.challengeId, totpCode: code, rememberDevice: true });
-      assert.equal(accepted.account.actor.id, fixture.userId);
+      const accepted = await sessions.verifyMfa({ challengeId: earlier.challengeId, totpCode: code, rememberDevice: true });
+      assert.equal(accepted.session.account.id, fixture.userId);
+      assert.equal((await sessions.read(accepted.token)).account.role, 'admin');
       assert.equal(typeof accepted.trustedToken, 'string');
       assert.equal(await verify({ challengeId: earlier.challengeId, recoveryCode: issued.recoveryCodes[0] }), null);
       assert.equal(await verify({ challengeId: rival.challengeId, totpCode: code }), null);
@@ -133,6 +138,10 @@ test('standalone Mongo atomically binds factor changes, consumes challenge and f
       const device = await db.collection('trustedDevices').findOne({});
       assert.equal(device.tokenDigest, tokenDigest(accepted.trustedToken));
       assert.equal(JSON.stringify(device).includes(accepted.trustedToken), false);
+      const devices = await manage.list(accepted.token, accepted.trustedToken);
+      assert.equal(devices.mfaEnabled, true);
+      assert.equal(devices.devices.length, 1);
+      assert.equal(devices.devices[0].current, true);
       fixture.setTime(device.expiresAt);
       assert.equal((await passwordStep(accepted.trustedToken)).status, 'challenge-required');
     } finally { await gate.closeAndDrain(); }
@@ -147,6 +156,7 @@ test('only the exact recovered staged administrator can enroll and completion le
     const issue = () => gate.runCommand(() => issueStagedMfaTicket(db, installationId, now()));
     try {
       assert.equal((await sessions.login({ identifier: 'mfa@example.test', password })).status, 'invalid');
+      assert.equal(usableAdmin(await fixture.user()), false);
       assert.equal(await manage.begin({ enrollmentId: newToken() }), null);
       const ticket = await issue();
       assert.equal(typeof ticket, 'string');

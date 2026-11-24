@@ -3,7 +3,7 @@ import {
   type AccountPreferences, type AccountProfile, type BrowserSession,
 } from '@planner/contracts';
 import { useState, type FormEvent } from 'react';
-import { useLoaderData, useRouteLoaderData, type LoaderFunctionArgs } from 'react-router';
+import { Link, useLoaderData, useRouteLoaderData, type LoaderFunctionArgs } from 'react-router';
 import { PageHeading } from '../../app/page-state.js';
 import { accountError, accountMutation, accountRequest, AccountRequestError } from './account-api.js';
 
@@ -127,6 +127,7 @@ export function AccountSettingsPage() {
   return (
     <section className="page">
       <PageHeading>Account settings</PageHeading>
+      <Link to="/settings/security">Manage multifactor authentication</Link>
       {notice && <p role="status">{notice}</p>}
       {problem && <p className="auth-error" role="alert">{problem}</p>}
       <div className="account-settings">

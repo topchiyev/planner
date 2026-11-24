@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { registerFrontendShell } from './frontend-shell.js';
 import { registerAccountRoutes } from './native/account-routes.js';
 import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-auth.js';
+import { registerNativeMfaRoutes } from './native/mfa-routes.js';
 import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
 
 type NativeAuthBoundary = NativeHttpBoundary & { auth: BrowserAuth };
@@ -23,6 +24,7 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
   if (transport) registerNativeHttpBoundary(app, transport);
   if (native) {
     registerNativeBrowserAuth(app, native.auth);
+    if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);
     if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
   }
 

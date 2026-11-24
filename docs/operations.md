@@ -61,6 +61,13 @@ After configuring the HTTPS reverse proxy, open `/recover` at the configured pub
 
 Planner uses a host-only secure browser session cookie. The initial account has a 12-hour inactivity timeout and every session expires at most 30 days after sign-in. Signing out revokes the current browser session on the server. Public readiness can report that the application is ready after activation. Workspace pages, files and account data require a current session. Sign-in failures share the same response and attempts are limited by normalized identifier and the verified proxy client address.
 
+In Account settings, open **Manage multifactor authentication** to enroll an authenticator. Copy the setup key into the authenticator and verify its current six-digit code. Save the ten recovery codes when Planner displays them. Each code can be used once. Replacing the list or disabling the authenticator requires the current password and an authenticator or recovery code. A password-only session expires when enrollment completes. After a successful second factor, you may trust that browser for up to 30 days. Account security lists your trusted browsers and lets you revoke them.
+
+Native setup and start bind an installation-specific key in `/etc/planner/mfa-key.json`. The file belongs to root and is readable by the Planner service group. If it disappears or differs from the installation binding, Planner refuses to start until the correct key is restored. Keep that key with the installation’s protected secrets.
+
+An approved, recovered administrator in a staged import can enroll through `/enroll-mfa` with the enrollment ticket. Completing this step preserves the imported identity and leaves the workspace inactive until operator cutover.
+
+
 Use `--mode import` to prepare an installation for migration preflight. It records that pending action and leaves the active generation unset. Both modes keep workspace readiness unavailable while their respective setup steps are pending.
 
 Setup and `plannerctl start` verify the dedicated MongoDB instance, start the application on its selected loopback port and enable the two services for boot. `plannerctl stop` stops the application before MongoDB. `plannerctl restart` applies that order and revalidates the database before starting the application again.

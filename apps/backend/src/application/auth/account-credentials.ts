@@ -14,6 +14,7 @@ import { accountById, accountEpoch, accountLookup, AccountActionError, nextAccou
 import { accounts, type AccountRecord } from './accounts.js';
 import { newToken, tokenDigest } from './credentials.js';
 import { isPasswordVerifier, type PasswordHasher } from './password.js';
+import { getFactor } from './mfa-account.js';
 import { activeAccountGeneration, loadCurrentBrowserSession } from './sessions.js';
 
 const approvalLifetimeMs = 10 * 60_000;
@@ -346,14 +347,15 @@ export function createAccountCredentials(
         const localAuth = nextAuth(target, passwordVerifier);
         await commit(target, { id: grant.id, recoveryId: grant.id, actorId: target.id, kind: 'reset-consumed',
           origin: 'web', appliedAt }, { localAuth });
-        return { status: localAuth.mfa !== 'none' ? 'enrollment-required' : 'confirmed' } as const;
+        return { status: localAuth.mfa === 'enrollment-required' ? 'enrollment-required' : 'confirmed' } as const;
       });
     },
   };
 }
 
 function nextAuth(account: AccountRecord, passwordVerifier = account.localAuth?.passwordVerifier ?? null) {
-  const mfa = account.requiresMfaEnrollment ? 'enrollment-required' : account.localAuth?.mfa ?? 'none';
+  const previousMfa = account.localAuth?.mfa ?? 'none';
+  const mfa = account.requiresMfaEnrollment || (previousMfa === 'totp' && !getFactor(account)) ? 'enrollment-required' : previousMfa;
   const credentialsVersion = accountEpoch(account) + 1;
   if (!Number.isSafeInteger(credentialsVersion)) throw new AccountActionError('revision');
   return { ...account.localAuth, passwordVerifier, credentialsVersion, mfa };

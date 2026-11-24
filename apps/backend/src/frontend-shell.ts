@@ -38,10 +38,14 @@ export function registerFrontendShell(app: FastifyInstance, frontendRoot: string
         if (browserAuth && request.plannerAccess?.kind === 'ready') return reply.redirect('/sign-in');
         return sendShell(reply);
       });
-      if (browserAuth) frontend.get('/sign-in', (_request, reply) => {
-        return sendShell(reply);
-      });
-      else frontend.get('/enroll-mfa', (_request, reply) => reply.header('Cache-Control', 'no-store').type('text/html').send(
+      if (browserAuth) {
+        frontend.get('/sign-in', (_request, reply) => sendShell(reply));
+        frontend.get('/enroll-mfa', (request, reply) => {
+          if (request.plannerAccess?.kind !== 'enrollment' || request.plannerAccess.step !== 'mfa') return reply.callNotFound();
+          reply.header('Referrer-Policy', 'no-referrer');
+          return sendShell(reply);
+        });
+      } else frontend.get('/enroll-mfa', (_request, reply) => reply.header('Cache-Control', 'no-store').type('text/html').send(
         '<!doctype html><html lang="en"><meta charset="utf-8"><title>Multi-factor enrollment · Planner</title><h1>Multi-factor enrollment</h1></html>',
       ));
     }
@@ -49,7 +53,7 @@ export function registerFrontendShell(app: FastifyInstance, frontendRoot: string
       reply.header('Referrer-Policy', 'no-referrer');
       return sendShell(reply);
     });
-    const accounts = browserAuth ? ['/settings', '/admin/accounts'] : [];
+    const accounts = browserAuth ? ['/settings', '/settings/security', '/admin/accounts'] : [];
     for (const route of [...shellRoutes, ...accounts].flatMap((path) => [path, `${path}/`])) {
       frontend.get<{ Params: Record<string, string> }>(route, (request, reply) => {
         if (Object.values(request.params).some((id) => id.length === 0)) {

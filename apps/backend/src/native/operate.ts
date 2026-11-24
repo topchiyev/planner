@@ -20,6 +20,7 @@ import {
   stopNativeMongoBootstrap,
 } from './mongo-host.js';
 import { adminRuntimeDirectory } from './admin-socket.js';
+import { assertNativeMfaKey, ensureNativeMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
 import type { RuntimeAccess } from './runtime-access.js';
@@ -248,7 +249,9 @@ async function setup(options: NativeSetupOptions) {
       if (!existing || !intent) throw new NativeMongoError('The running Planner setup could not be verified.');
       const client = await connectOwnedDatabase(existing, owner.appGroup);
       try {
-        await verifyStorageSchema(client.db(databaseName), existing.installationId);
+        const db = client.db(databaseName);
+        await verifyStorageSchema(db, existing.installationId);
+        await assertNativeMfaKey(db, existing.installationId, readNativeMfaKey(existing.installationId, owner.appGroup));
         const { confirmed, grant } = await readPersistedSetup(client, existing.installationId, intent);
         return { ...await status(owner, confirmed), ...(grant && { firstAdminGrant: grant }) };
       } finally { await client.close(); }
@@ -275,6 +278,7 @@ async function setup(options: NativeSetupOptions) {
         if (existingStorage) await prepareStorage(client, active.installationId, writer);
         const issued = await persistSetup(client, active.installationId, intent, writer);
         if (!existingStorage) await prepareStorage(client, active.installationId, writer);
+        await ensureNativeMfaKey(client.db(databaseName), active.installationId, owner.appGroup, writer);
         publishInstallationConfig({ formatVersion: 1, installationId: active.installationId, ...options }, owner.appGroup);
         return issued;
       } finally { await client.close(); }
@@ -298,8 +302,11 @@ async function control(action: 'start' | 'stop' | 'restart') {
     const listening = appListening(config.appPort, true);
     if (action === 'start' && listening && systemctl('show', '--property=MainPID', '--value', database) !== '0') {
       const client = await connectOwnedDatabase(config, owner.appGroup);
-      try { await verifyStorageSchema(client.db(databaseName), config.installationId); }
-      finally { await client.close(); }
+      try {
+        const db = client.db(databaseName);
+        await verifyStorageSchema(db, config.installationId);
+        await assertNativeMfaKey(db, config.installationId, readNativeMfaKey(config.installationId, owner.appGroup));
+      } finally { await client.close(); }
       return status(owner);
     }
     if (action === 'restart' || listening) systemctl('stop', app);
@@ -310,8 +317,10 @@ async function control(action: 'start' | 'stop' | 'restart') {
         throw new NativeMongoError('The Planner application and database installation identities do not match.');
       }
       const client = await connectOwnedDatabase(config, owner.appGroup);
-      try { await prepareStorage(client, config.installationId, writer); }
-      finally { await client.close(); }
+      try {
+        await prepareStorage(client, config.installationId, writer);
+        await ensureNativeMfaKey(client.db(databaseName), config.installationId, owner.appGroup, writer);
+      } finally { await client.close(); }
     });
     await startApplication(config.appPort);
     return status(owner);

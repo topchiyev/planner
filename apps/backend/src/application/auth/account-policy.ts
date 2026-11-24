@@ -4,6 +4,7 @@ import type { Db } from 'mongodb';
 import { workspaceKey } from '../../storage/identity.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
 import { accounts, getLocalAccount, type AccountRecord } from './accounts.js';
+import { getFactor } from './mfa-account.js';
 import { normalizeIdentifier } from './credentials.js';
 
 export const accountErrors = {
@@ -61,7 +62,7 @@ export function adminAccountOf(account: AccountRecord) {
   let signIn: 'disabled' | 'enrollment-required' | 'available' | 'password-required' = 'password-required';
   if (disabled) signIn = 'disabled';
   else if (account.requiresMfaEnrollment || local?.auth.mfa === 'enrollment-required') signIn = 'enrollment-required';
-  else if (local?.auth.mfa === 'none') signIn = 'available';
+  else if (local && (local.auth.mfa === 'none' || getFactor(account))) signIn = 'available';
   return adminAccountSchema.parse({ id, revision, name, email, username: username ?? null, role, disabled, signIn });
 }
 
@@ -80,7 +81,8 @@ export function nextAccountRevision(revision: number) {
 }
 
 export function usableAdmin(account: AccountRecord) {
-  return account.role === 'admin' && !account.requiresMfaEnrollment && getLocalAccount(account)?.auth.mfa === 'none';
+  const local = getLocalAccount(account);
+  return account.role === 'admin' && !!local && (local.auth.mfa === 'none' || !!getFactor(account));
 }
 
 export async function protectLastAdmin(database: Db, account: AccountRecord, change: AccountApprovalAction) {
