@@ -227,6 +227,13 @@ test('both synthetic restored tags match the native-source preflight through a t
 
     postgres.write(database, "UPDATE public.user_account SET password='invented-unused-fixture-password' WHERE id=101");
     assert.equal((await inspectMigration(request, owner, config)).fingerprint.sha256, before);
+    postgres.write(database, "UPDATE public.notification_service SET format='html' WHERE id=831");
+    const html = await inspectMigration(request, owner, config);
+    postgres.write(database, "UPDATE public.notification_service SET format='unknown fixture format' WHERE id=831");
+    const unknownFormat = await inspectMigration(request, owner, config);
+    assert.notEqual(html.fingerprint.components.rows, unknownFormat.fingerprint.components.rows);
+    postgres.write(database, "UPDATE public.notification_service SET format='text' WHERE id=831");
+    assert.equal((await inspectMigration(request, owner, config)).fingerprint.sha256, before);
     postgres.write(database, `
       INSERT INTO public.card (id, board_id, list_id, type, position, name, description, stopwatch, comments_total, is_closed)
         VALUES ('-9223372036854775808',301,401,'story',3.141592653589793,'edge','', 'null',0,false),

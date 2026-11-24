@@ -56,10 +56,11 @@ function stream(component: string) {
 async function exclusions(client: Client, counts: Readonly<Record<string, string>>) {
   const { rows } = await client.query<{ type: string; count: string }>(`
     SELECT 'notificationService.' || CASE format WHEN 'text' THEN 'text' WHEN 'markdown' THEN 'markdown'
-      ELSE 'other' END AS type, count(*)::text AS count FROM public.notification_service GROUP BY 1
+      WHEN 'html' THEN 'html' ELSE 'other' END AS type, count(*)::text AS count FROM public.notification_service GROUP BY 1
     UNION ALL
-    SELECT 'webhook.' || CASE WHEN board_id IS NOT NULL THEN 'board' WHEN project_id IS NOT NULL THEN 'project'
-      WHEN user_id IS NOT NULL THEN 'user' ELSE 'installation' END, count(*)::text FROM public.webhook GROUP BY 1
+    SELECT 'webhook.' || COALESCE(NULLIF(pg_catalog.concat_ws('+', CASE WHEN project_id IS NOT NULL THEN 'project' END,
+      CASE WHEN board_id IS NOT NULL THEN 'board' END, CASE WHEN user_id IS NOT NULL THEN 'user' END), ''), 'installation'),
+      count(*)::text FROM public.webhook GROUP BY 1
     UNION ALL
     SELECT 'smtp.configured', count(*)::text FROM public.config WHERE smtp_host IS NOT NULL AND smtp_host <> ''
   `);
