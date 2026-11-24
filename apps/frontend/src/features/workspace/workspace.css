@@ -1,4 +1,6 @@
 .app-shell[data-native-workspace='true'] .project-sidebar { overflow-y: auto; gap: 1.4rem; }
+.app-shell[data-native-workspace='true'] .sidebar-account a { color: #b6e1ca; }
+.app-shell[data-native-workspace='true'] .sidebar-account a:hover { color: #fff; }
 .sidebar-projects { list-style: none; margin: .4rem 0 0; padding: 0; }
 .sidebar-projects li { min-width: 0; }
 .sidebar-projects a, .sidebar-more {
@@ -69,6 +71,9 @@
 .workspace-list-summary span { color: var(--muted); font-size: .83rem; }
 @media (max-width: 47rem) {
   .app-shell[data-native-workspace='true'] .project-sidebar { max-height: min(65dvh, 34rem); gap: .7rem; }
+  .app-shell[data-native-workspace='true'] :is(.sidebar-account a, .sidebar-account button, .sidebar-projects a, .sidebar-more) {
+    display: block; min-height: 2.75rem; align-content: center;
+  }
   .workspace-toolbar { gap: .65rem; }
   .workspace-search { max-width: 100%; }
   .workspace-search input { width: min(11rem, 100%); }
