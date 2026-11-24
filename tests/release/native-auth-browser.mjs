@@ -20,7 +20,8 @@ const browser = await chromium.launch({
 });
 let stage = 'browser launch';
 try {
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
   const head = (name) => page.getByRole('heading', { name, exact: true }).waitFor();
   const url = (path) => page.waitForURL(new URL(path, origin).href);
   stage = 'enrollment';
@@ -37,7 +38,7 @@ try {
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create administrator' }).click();
   await head('Administrator account created');
-  assert.equal((await page.context().cookies()).some((cookie) => cookie.name === cookieName), false);
+  assert.equal((await context.cookies()).some((cookie) => cookie.name === cookieName), false);
 
   stage = 'shipped sign-in';
   await page.getByRole('link', { name: 'Continue to sign in' }).click();
@@ -52,20 +53,22 @@ try {
   await head('Projects');
 
   stage = 'authenticated cookie and logout';
-  const cookie = (await page.context().cookies()).find(({ name }) => name === cookieName);
+  const cookie = (await context.cookies()).find(({ name }) => name === cookieName);
   assert.ok(cookie?.secure && cookie.httpOnly);
   assert.equal(cookie.sameSite, 'Lax');
   assert.equal(cookie.path, '/');
   assert.equal(cookie.domain, 'planner.example.test');
   assert.equal(await page.evaluate((name) => document.cookie.includes(name), cookieName), false);
   assert.equal(await page.evaluate(async () => (await fetch('/api/v1/session', { method: 'DELETE' })).status), 403);
-  const old = await page.context().newPage();
-  await old.goto(`${origin}/workspace`);
+  const old = await context.newPage();
+  assert.equal((await old.goto(`${origin}/workspace`)).url(), `${origin}/workspace`);
+  await old.getByRole('heading', { name: 'Projects', exact: true }).waitFor();
+  await page.bringToFront();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await url('/sign-in');
   await head('Sign in');
-  assert.equal((await page.context().cookies()).some(({ name }) => name === cookieName), false);
-  await page.context().addCookies([cookie]);
+  assert.equal((await context.cookies()).some(({ name }) => name === cookieName), false);
+  await context.addCookies([cookie]);
   assert.equal(await page.evaluate(async () => (await fetch('/api/v1/session')).status), 401);
   await old.reload();
   await old.waitForURL(`${origin}/sign-in`);
