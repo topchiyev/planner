@@ -99,7 +99,7 @@ function CardFace({ card, workspace, search, list, showStatus = true }: Face) {
   const { showCreator, showCardAge } = workspace.preferences;
   return <div className="board-card-face">
     <CardFrontCover cover={card.cover} />
-    <Link id={cardOpenerId(card.id)} to={{ pathname: cardPath(card.boardId, card.id), search }}
+    <Link id={cardOpenerId(card.id)} data-clipboard-card={card.id} to={{ pathname: cardPath(card.boardId, card.id), search }}
       state={pathname === boardPath ? { cardReturnKey: key } : undefined}
       onClick={(event) => {
         if (pathname === boardPath && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey)

@@ -188,6 +188,12 @@ The native workspace uses separate actor-scoped project and favorite queries. Se
 
 Project favorites use the relationship registry at `PUT /api/v1/projects/:id/favorite` and `DELETE /api/v1/projects/:id/favorite`. Send the current quoted project revision, an idempotency key and the browser CSRF token. A favorite changes the actor's edge and keeps the shared project revision. Board, project and nested card links reload their own authorized data. Only workspace destinations and supported query fields survive password sign-in and MFA.
 
+### Board clipboard and description drafts
+
+Cut or copy one card with the inspector controls or press `Ctrl+X` or `Ctrl+C` on a focused card link. Navigate within Planner to an editable board and press `Ctrl+V` or choose **Paste card**. Use Command instead of Ctrl on macOS. Pick an active or closed list and a position. A paste uses the existing move or duplicate command, so the source, destination and placement versions are checked again. If the response is interrupted, **Retry paste** checks the same attempt. An acknowledged cut clears the selection. A copy stays available for another deliberate paste. Closing or refreshing the tab clears the board clipboard.
+
+When you edit a card description, the browser records the Markdown draft for that installation generation, account and card. Reopen the card with current edit access to recover the draft within seven days of your last text edit. If another edit changed the card, compare the local and saved descriptions before keeping, copying or discarding the draft. Saving or discarding clears the version you acted on. If browser storage is unavailable, you can still edit and save normally.
+
 ### Native backup and staged restore
 
 Run `plannerctl backup create --json` as root on a running, ready Planner installation. It returns the private backup directory and the manifest SHA-256. Keep a trusted record of the hash separate from the copy. The archive contains ordered BSON for every Planner generation, matched private media, and a restricted source configuration and MFA key bundle. Keep the directory and its copies under operator control. The archive permissions are `0700` for directories and `0600` for files.

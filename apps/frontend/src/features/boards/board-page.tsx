@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, type KeyboardEvent } from 'react';
 import type { loadBrowserSession } from '../auth/browser-session.js';
-import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useRouteLoaderData, useSearchParams } from 'react-router';
+import { Link, Outlet, useLoaderData, useLocation, useMatch, useNavigation, useOutletContext, useParams, useRouteLoaderData, useSearchParams } from 'react-router';
 import { EmptyState, PageHeading, RouteNotFound } from '../../app/page-state.js';
 
 import type { BoardReadRefusal, loadNativeBoard } from '../workspace/workspace-loaders.js';
@@ -11,6 +11,8 @@ import { BoardFieldGroups } from '../fields/workspace-fields.js';
 import { ActivityFeed } from '../discussions/feed.js';
 import { BoardFilters } from './board-filters.js';
 import { BoardCards, cardOpenerId, getCardOpener, type BoardView } from '../cards/board-cards.js';
+import { BoardPasteControls, clipboardShortcut, selectClipboardCard } from '../cards/card-clipboard.js';
+import { useBoardClipboard } from '../cards/card-clipboard-state.js';
 import { BoardRefreshContext } from './board-refresh.js';
 import { readBoardEntryView, readBoardView, saveBoardEntryView, saveBoardView } from './board-filter-store.js';
 import { useLiveBoard, type LiveBoard, type LiveCard } from './use-live-board.js';
@@ -32,6 +34,9 @@ const views = [
 export function BoardPage() {
   const initial = useLoaderData<Awaited<ReturnType<typeof loadNativeBoard>>>();
   const [params] = useSearchParams();
+  const { boardId } = useParams();
+  const clipboard = useBoardClipboard();
+  const paste = useRef<HTMLButtonElement>(null);
   const navigation = useNavigation();
   const { deniedBoard, refuseBoard, presentBoard } = useOutletContext<BoardReadRefusal>();
   const { key, pathname, search, state: routeState } = useLocation();
@@ -49,6 +54,25 @@ export function BoardPage() {
       ? { source: initial, board: concealed ? null : board ?? null } : undefined);
     return () => presentBoard(undefined);
   }, [initial, board, deniedBoard, live.phase, concealed, refuseBoard, presentBoard]);
+  useEffect(() => {
+    const selected = clipboard?.selected;
+    if (!selected) return;
+    if (board && board.recipeScope !== selected.scope) { clipboard.discard(selected); return; }
+    if (selected.boardId !== boardId) return;
+    if (initial === null || live.phase === 'missing') { clipboard.discard(selected); return; }
+    if (live.phase !== 'visible') return;
+    const permissions = board?.board.permissions;
+    if (permissions && !(selected.action === 'cut' ? permissions.canEdit : permissions.canDuplicateFrom)) {
+      clipboard.discard(selected);
+      return;
+    }
+    if (clipboard.attempt) return;
+    const source = live.card?.id === selected.cardId ? live.card : board?.cardsPage?.data.find(({ id }) => id === selected.cardId);
+    const permitted = source && (selected.action === 'cut' ? source.permissions.canMove : source.permissions.canDuplicateFrom);
+    if (live.removed?.has(selected.cardId) || (cardId === selected.cardId && live.card === null) || (source && !permitted)) {
+      clipboard.discard(selected);
+    }
+  }, [clipboard, board, boardId, initial, live.phase, cardId, live.card, live.removed]);
   const context = contexts.find(({ id }) => id === params.get('context')) ?? contexts[0];
   const availableViews = context.id === 'board' ? views : views.filter(({ id }) => id !== 'kanban');
   const defaultView = context.id === 'board' ? board?.preferences.defaultView ?? 'kanban' : 'list';
@@ -98,6 +122,20 @@ export function BoardPage() {
     return { pathname, search: `?${nextParams}` };
   }
 
+  function clipboardKeys(event: KeyboardEvent<HTMLElement>) {
+    if (!board || !clipboard || clipboard.busy || concealed || pending) return;
+    const shortcut = clipboardShortcut(event);
+    if (!shortcut) return;
+    if (shortcut === 'paste') {
+      if (paste.current && !paste.current.disabled) { event.preventDefault(); paste.current.click(); }
+      return;
+    }
+    const target = event.target as HTMLElement;
+    const id = target.closest<HTMLElement>('[data-clipboard-card]')?.dataset.clipboardCard;
+    const card = board.cardsPage?.data.find((item) => item.id === id);
+    if (card && selectClipboardCard(shortcut, card, board.recipeScope, clipboard.select)) event.preventDefault();
+  }
+
   if (initial === null || live.phase === 'missing' || (initial && deniedBoard === initial)) return <RouteNotFound />;
   const lists = board?.lists.filter(({ kind }) => context.id === 'board' ? kind === 'active' || kind === 'closed' : kind === context.id);
 
@@ -105,7 +143,7 @@ export function BoardPage() {
     {concealed && <section className="page"><p role="status">{live.phase === 'checking' ? 'Checking board access…' : 'The board connection is unavailable.'}</p>
       {live.phase === 'unavailable' && <button className="workspace-button" type="button" onClick={live.recheck}>Retry</button>}
     </section>}
-    <div hidden={concealed} inert={concealed}><div className="board-layout" data-inspector-open={inspectorOpen}>
+    <div hidden={concealed} inert={concealed}><div className="board-layout" data-inspector-open={inspectorOpen} onKeyDown={clipboardKeys}>
       <section className="page board-page" aria-labelledby="page-heading">
         <header className="page-header">
           <nav aria-label="Breadcrumb" className="workspace-breadcrumb">
@@ -117,6 +155,7 @@ export function BoardPage() {
           {board && <BoardManagement key={board.board.id} workspace={board} />}
           {board && <BoardAffiliations key={'affiliations:' + board.board.id} workspace={board} />}
           {board && <BoardFieldGroups key={'fields:' + board.board.id} workspace={board} />}
+          {board && <BoardPasteControls key={board.recipeScope + '/' + board.board.id} workspace={board} trigger={paste} />}
         </header>
         <div className="board-controls">
           <nav aria-label="Board context" className="context-nav">

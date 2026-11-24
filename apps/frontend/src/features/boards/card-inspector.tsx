@@ -8,6 +8,8 @@ import { CardChecklists } from '../checklists/card-checklists.js';
 import { CardAttachments } from '../media/card-attachments.js';
 import { CardComments } from '../discussions/comments.js';
 import { ActivityFeed } from '../discussions/feed.js';
+import { CardClipboardActions, clipboardShortcut, selectClipboardCard } from '../cards/card-clipboard.js';
+import { useBoardClipboard } from '../cards/card-clipboard-state.js';
 import { CardEditing } from '../cards/card-editing.js';
 import type { BoardInspectorContext } from './board-page.js';
 import { PageHeading } from '../../app/page-state.js';
@@ -18,9 +20,14 @@ export function CardInspector() {
   const card = liveCard === undefined ? initial : liveCard;
   const { search, state } = useLocation();
   const session = useRouteLoaderData<Awaited<ReturnType<typeof loadBrowserSession>>>('app-shell');
+  const clipboard = useBoardClipboard();
   const scope = [session?.account.id, workspace?.recipeScope, card?.boardId, card?.id].join('/');
   return (
-    <aside className="card-inspector" aria-labelledby="card-heading">
+    <aside className="card-inspector" aria-labelledby="card-heading" onKeyDown={(event) => {
+      if (!workspace || !card || !clipboard || clipboard.busy) return;
+      const shortcut = clipboardShortcut(event);
+      if (shortcut && shortcut !== 'paste' && selectClipboardCard(shortcut, card, workspace.recipeScope, clipboard.select)) event.preventDefault();
+    }}>
       <header className="inspector-header">
         <PageHeading id="card-heading" level="h2">{card?.name ?? (card === null ? 'Page not found' : 'Card')}</PageHeading>
         <Link aria-label="Close card" className="close-card" to={{ pathname: '..', search }} state={{ cardReturnKey: state?.cardReturnKey }}>
@@ -29,9 +36,10 @@ export function CardInspector() {
       </header>
       {card && typeof state?.transferNotice === 'string' && <p className="inspector-status" role="status">{state.transferNotice}</p>}
       {card === undefined && <p className="inspector-status">Card details are unavailable.</p>}
+      {card && workspace && <CardClipboardActions card={card} scope={workspace.recipeScope} />}
       {card && workspace && <CardInspectorTransitions key={'placement:' + scope} card={card} workspace={workspace} />}
       {card && workspace && <CardAffiliationControls key={`affiliations:${scope}`} card={card} workspace={workspace} />}
-      {card && <CardEditing key={'content:' + scope} card={card} restriction={workspace?.preferences.restrictedCardType} />}
+      {card && <CardEditing key={'content:' + scope} card={card} restriction={workspace?.preferences.restrictedCardType} draftScope={workspace?.recipeScope} />}
       {card && <CardAttachments key={`attachments:${scope}`} card={card} />}
       {card && <CardChecklists key={`checklists:${scope}`}
         card={card} groups={card.checklists} expand={workspace?.preferences.expandChecklists ?? false} />}
