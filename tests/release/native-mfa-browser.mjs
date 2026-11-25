@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [executablePath, certificateKey, stageTicketPath] = process.argv.slice(2);
+const [executablePath, certificateKey, stageTicketPath, stagedMode] = process.argv.slice(2);
 const { chromium } = await import(new URL('./playwright-core/index.mjs', import.meta.url));
 const { Secret, TOTP } = await import('file:///opt/planner/current/node_modules/otpauth/dist/otpauth.node.mjs');
 const origin = 'https://planner.example.test';
@@ -45,13 +45,22 @@ try {
 
   if (stageTicketPath) {
     stage = 'staged imported recovery';
-    assert.equal((await page.goto(`${origin}/enroll-mfa`)).status(), 200);
+    const recovering = stagedMode === '--migration-recovery';
+    assert.equal((await page.goto(`${origin}${recovering ? '/account-recovery' : '/enroll-mfa'}`)).status(), 200);
     assert.equal(await page.evaluate(() => isSecureContext), true);
     for (const [path, method] of [
       ['/api/v1/session', 'GET'], ['/api/v1/session/login', 'POST'], ['/files/synthetic', 'HEAD'],
       ['/api/v1/boards/synthetic/events', 'GET'], ['/oauth/consent', 'GET'], ['/workspace', 'GET'],
     ]) assert.equal(await status(path, method), 503);
-    await page.getByLabel('Enrollment ticket').fill((await readFile(stageTicketPath, 'utf8')).trim());
+    const ticket = (await readFile(stageTicketPath, 'utf8')).trim();
+    if (recovering) {
+      await page.getByLabel('Recovery grant').fill(ticket);
+      await page.getByLabel('New password').fill(password);
+      await page.getByLabel('Confirm password').fill(password);
+      await button('Set password').click();
+      await heading('Set up your authenticator');
+      assert.equal(await status('/account-recovery'), 503);
+    } else await page.getByLabel('Enrollment ticket').fill(ticket);
     await button('Set up authenticator').click();
     const text = await page.getByLabel('Authenticator setup key').textContent();
     const totp = new TOTP({ secret: Secret.fromBase32(text), digits: 6, period: 30, algorithm: 'SHA1' });
@@ -60,7 +69,7 @@ try {
     await codeList();
     assert.equal(await cookie(sessionName), undefined);
     await button('I saved my recovery codes').click();
-    await heading('Authenticator set up');
+    await heading(recovering ? 'Administrator recovery complete' : 'Authenticator set up');
     assert.equal(await status('/health/ready'), 503);
     assert.equal(await status('/api/v1/session'), 503);
     assert.equal(await status('/oauth/consent'), 503);
