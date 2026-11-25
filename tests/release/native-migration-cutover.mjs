@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, fork, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { request } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -73,7 +73,7 @@ async function qualify() {
   const origin = 'https://planner.example.test';
   function api(path, { method = 'GET', body, session, headers } = {}) {
     return new Promise((resolve, reject) => {
-      const encoded = body === undefined ? undefined : JSON.stringify(body);
+      const encoded = Buffer.isBuffer(body) ? body : body === undefined ? undefined : JSON.stringify(body);
       const outgoing = request({ hostname: '127.0.0.1', servername: 'planner.example.test', ca, path, method,
         headers: { Host: 'planner.example.test', Origin: origin,
           ...(encoded !== undefined && { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(encoded) }),
@@ -160,6 +160,15 @@ async function qualify() {
   assert.equal(forbidden.json.error.code, 'WORKSPACE_READ_ONLY');
   assert.equal((await api(`/api/v1/cards/${cardId}/notifications/read`, { method: 'POST', session: owner, body: {},
     headers: { 'Idempotency-Key': randomUUID() } })).json.error.code, 'WORKSPACE_READ_ONLY');
+  const stagedBefore = await readdir('/var/lib/planner/staging');
+  const boundary = 'synthetic-migration-drill';
+  const form = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="probe.txt"\r\n`
+    + `Content-Type: text/plain\r\n\r\nsynthetic\r\n--${boundary}--\r\n`);
+  const upload = await api(`${cardPath}/attachment-files`, { method: 'POST', session: owner, body: form,
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'If-Match': `"${revision}"`, 'Idempotency-Key': randomUUID() } });
+  assert.equal(upload.status, 409);
+  assert.equal(upload.json.error.code, 'WORKSPACE_READ_ONLY');
+  assert.deepEqual(await readdir('/var/lib/planner/staging'), stagedBefore);
   assert.equal(await db.collection('commands').countDocuments({ generationId }), 0);
   app('restart');
   await ready(200);
@@ -189,6 +198,10 @@ async function qualify() {
     refuses('rollback-fenced', 'rollback', '--expect-generation', generationId);
     app('start');
     await ready(200);
+    const recovery = JSON.parse(execFileSync('/usr/bin/plannerctl', ['backup', 'create', '--json'], { encoding: 'utf8' }));
+    assert.match(recovery.manifestSha256, /^[0-9a-f]{64}$/u);
+    assert.notEqual(recovery.backupId, backup.backupId);
+    assert.equal((await db.collection('commands').findOne({ _id: stored._id })).status, 'building');
     assert.equal((await change()).status, 200);
     assert.equal((await change()).status, 200);
     assert.equal((await db.collection('cards').findOne({ generationId, id: cardId })).name, name);
