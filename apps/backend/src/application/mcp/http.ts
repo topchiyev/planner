@@ -1,7 +1,9 @@
 import {
-  classifyInboundRequest, CLIENT_CAPABILITIES_META_KEY, createMcpHandler, isJsonContentType, McpServer,
-  PROTOCOL_VERSION_META_KEY, type AuthInfo, type JSONRPCRequest, type McpRequestContext, type ServerCapabilities, type ServerEventBus,
+  classifyInboundRequest, CLIENT_CAPABILITIES_META_KEY, createMcpHandler, isJsonContentType, InMemoryServerEventBus, INVALID_PARAMS, McpServer,
+  PROTOCOL_VERSION_META_KEY, type AuthInfo, type JSONRPCRequest, type RequestId, type McpRequestContext, type ServerCapabilities, type ServerEventBus,
 } from '@modelcontextprotocol/server';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { McpBoardSubscription, McpBoardSubscriptions, McpListenAccess } from './board-subscriptions.js';
 import { PLANNER_VERSION } from '@planner/contracts';
 import type { McpReadSnapshot } from './read-tools.js';
 import { oauthMetadata, protectedResourceMetadataPath, readScope, writeScope } from '../oauth/provider.js';
@@ -21,6 +23,7 @@ export interface McpActor {
   grantId: string;
   scopes: string[];
   read?: McpReadSnapshot;
+  listen?: McpListenAccess;
   write?: (name: string, input: unknown) => Promise<CallToolResult>;
 }
 
@@ -29,14 +32,15 @@ export interface McpSurface {
   capabilities?(era: McpRequestContext['era']): ServerCapabilities;
   admitListen?(actor: McpActor, notifications: unknown): boolean | Promise<boolean>;
   bus?: ServerEventBus;
+  boardSubscriptions?: McpBoardSubscriptions;
 }
 
 function requestsWorkspaceMutation(message: Pick<JSONRPCRequest, 'method' | 'params'>) {
   return message.method === 'tools/call' && typeof message.params?.name === 'string' && mcpMutationNamed(message.params.name) !== undefined;
 }
 
-export function mcpError(status: number, message: string, code = -32000) {
-  return Response.json({ jsonrpc: '2.0', id: null, error: { code, message } },
+export function mcpError(status: number, message: string, code = -32000, id: RequestId | null = null) {
+  return Response.json({ jsonrpc: '2.0', id, error: { code, message } },
     { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -58,7 +62,16 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
   const metadataUrl = origin + protectedResourceMetadataPath;
   const stopping = new AbortController();
   let closing: Promise<void> | undefined;
-  type Admission = { token?: string; rpc: Pick<JSONRPCRequest, 'method' | 'params'>; refusal?: Response };
+  type Admission = {
+    token?: string;
+    rpc: Pick<JSONRPCRequest, 'method' | 'params'> & { id?: RequestId };
+    refusal?: Response;
+    bus?: ServerEventBus;
+    subscription?: McpBoardSubscription;
+  };
+  const responses = new WeakMap<Response, McpBoardSubscription>();
+  const live = new Map<McpBoardSubscription, () => Promise<void>>();
+  const boardSubscriptions = surface?.boardSubscriptions;
   const pending = new WeakMap<Request, Admission | 'discovery'>();
   const refuse = (admission: Admission, response: Response): never => {
     admission.refusal = response;
@@ -67,7 +80,7 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
 
   // The SDK validates modern routing headers before calling its factory. It only permits the
   // factory to return a server, so the fetch wrapper supplies the HTTP response for policy refusals.
-  const sdk = createMcpHandler(async ({ era, authInfo, requestInfo }) => {
+  async function factory({ era, authInfo, requestInfo }: McpRequestContext) {
     if (!requestInfo) throw new Error('Missing MCP request context.');
     const admission = pending.get(requestInfo);
     if (!admission) throw new Error('Missing MCP admission.');
@@ -83,9 +96,20 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
         return refuse(admission, Response.json({ error: 'insufficient_scope' }, { status: 403, headers: { 'Cache-Control': 'no-store',
           'WWW-Authenticate': `Bearer error="insufficient_scope", scope="${readScope} ${writeScope}", resource_metadata="${metadataUrl}"` } }));
       }
-      if (rpc.method === 'subscriptions/listen'
-          && !await surface?.admitListen?.(actor, rpc.params?.notifications)) {
-        return refuse(admission, mcpError(403, 'Subscription is unavailable.'));
+      if (rpc.method === 'subscriptions/listen') {
+        if (boardSubscriptions && admission.bus && era === 'modern') {
+          if (requestInfo.headers.has('last-event-id')
+            || Object.keys(rpc.params ?? {}).some((key) => key !== '_meta' && key !== 'notifications')) {
+            return refuse(admission, mcpError(400, 'Invalid board subscription.', INVALID_PARAMS, rpc.id));
+          }
+          const result = await boardSubscriptions.subscribe(actor, rpc.params?.notifications, admission.bus, requestInfo.signal);
+          if (result.kind === 'invalid') return refuse(admission, mcpError(400, 'Invalid board subscription.', INVALID_PARAMS, rpc.id));
+          if (result.kind === 'limit') return refuse(admission, mcpError(429, 'Too many board subscriptions.', undefined, rpc.id));
+          if (result.kind !== 'accepted') return refuse(admission, mcpError(403, 'Subscription is unavailable.', undefined, rpc.id));
+          admission.subscription = result.subscription;
+        } else if (!await surface?.admitListen?.(actor, rpc.params?.notifications)) {
+          return refuse(admission, mcpError(403, 'Subscription is unavailable.'));
+        }
       }
       if (closing) return refuse(admission, mcpError(503, 'Planner MCP is unavailable.'));
       authInfo.clientId = actor.clientId;
@@ -98,7 +122,8 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
     });
     if (actor) surface?.register(server, actor, era);
     return server;
-  }, { legacy: 'stateless', responseMode: 'auto', maxRequestBodySize: mcpBodyLimit, maxSubscriptions: 64,
+  }
+  const sdk = createMcpHandler(factory, { legacy: 'stateless', responseMode: 'auto', maxRequestBodySize: mcpBodyLimit, maxSubscriptions: 64,
     ...(surface?.bus && { bus: surface.bus }) });
 
   async function fetch(request: Request, options?: { parsedBody?: unknown }) {
@@ -141,15 +166,48 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
     }
 
     const rpc = (route.kind === 'modern' ? route.message : message) as Admission['rpc'];
-    const admission: Admission = { token, rpc };
+    // The pinned SDK owns validation and framing. Each production listen owns a separate bus and one SDK router.
+    const bus = boardSubscriptions && route.kind === 'modern' && route.messageKind === 'request' && rpc.method === 'subscriptions/listen'
+      ? new InMemoryServerEventBus() : undefined;
+    const scoped = bus && createMcpHandler(factory, {
+      legacy: 'reject', maxRequestBodySize: mcpBodyLimit, maxSubscriptions: 1, keepAliveMs: 0, bus,
+    });
+    const admission: Admission = { token, rpc, bus };
     pending.set(forwarded, admission);
     const authInfo: AuthInfo = { token: '', clientId: '', scopes: [],
       resource: new URL(resource), resourceMetadataUrl: metadataUrl };
     try {
-      const response = await dispatch(authInfo);
+      const response = scoped ? await scoped.fetch(forwarded, { parsedBody: body, authInfo }) : await dispatch(authInfo);
+      const subscription = admission.subscription;
+      if (scoped && subscription && !admission.refusal && response.body && response.headers.get('content-type')?.startsWith('text/event-stream')) {
+        responses.set(response, subscription);
+        live.set(subscription, () => scoped.close());
+        void subscription.finished.then(async () => {
+          live.delete(subscription);
+          await scoped.close();
+        }).catch(() => undefined);
+        return response;
+      }
+      subscription?.release();
+      await scoped?.close();
       return admission.refusal ?? response;
+    } catch (error) {
+      admission.subscription?.release();
+      await scoped?.close();
+      throw error;
     } finally { pending.delete(forwarded); }
   }
 
-  return { fetch, close: () => closing ??= sdk.close().finally(() => stopping.abort()) };
+  return {
+    fetch,
+    subscriptionFor: (response: Response) => responses.get(response),
+    close: () => closing ??= (async () => {
+      await sdk.close();
+      await Promise.all([...live].map(async ([subscription, end]) => {
+        await end();
+        const completed = await Promise.race([subscription.finished.then(() => true), delay(2000, false, { ref: false })]);
+        if (!completed) subscription.release();
+      }));
+    })().finally(() => stopping.abort()),
+  };
 }

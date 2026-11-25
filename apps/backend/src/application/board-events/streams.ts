@@ -2,6 +2,7 @@ import type { BoardEventFrame } from '@planner/contracts';
 import { signedInt64TextSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { CleanCommandRejection, type CommandGate } from '../command-gate/gate.js';
+import type { McpBoardSubscriptions } from '../mcp/board-subscriptions.js';
 import type { OutboxSignal } from '../command-journal/journal.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../workspace/authorization.js';
 import type { BoardEventCursors, BoardEventScope } from './cursor.js';
@@ -39,7 +40,11 @@ interface Subscriber {
 
 export function createBoardEventStreams(
   getDatabase: () => Promise<Db>, installationId: string, gate: CommandGate, cursors: BoardEventCursors,
-  { now = () => new Date(), heartbeatMs = boardHeartbeatMs } = {},
+  { now = () => new Date(), heartbeatMs = boardHeartbeatMs, mcp }: {
+    now?: () => Date;
+    heartbeatMs?: number;
+    mcp?: McpBoardSubscriptions;
+  } = {},
 ) {
   const subscribers = new Set<Subscriber>();
   let stopped = false;
@@ -180,6 +185,7 @@ export function createBoardEventStreams(
     },
 
     accept(signal: OutboxSignal) {
+      mcp?.accept(signal);
       const parsed = signedInt64TextSchema.safeParse(signal.sequence);
       if (!parsed.success) return;
       const sequence = BigInt(parsed.data);
@@ -197,20 +203,23 @@ export function createBoardEventStreams(
       }
     },
 
-    revalidateActor(database: Db, actorId: string) {
-      return revalidate(database, (scope) => scope.actorId === actorId);
+    async revalidateActor(database: Db, actorId: string) {
+      await Promise.all([revalidate(database, (scope) => scope.actorId === actorId), mcp?.revalidateActor(database, actorId)]);
     },
 
-    revalidateBoards(database: Db, generationId: string, boards: ReadonlySet<string>) {
-      return revalidate(database, (scope) => scope.generationId === generationId && boards.has(scope.boardId));
+    async revalidateBoards(database: Db, generationId: string, boards: ReadonlySet<string>) {
+      await Promise.all([revalidate(database, (scope) => scope.generationId === generationId && boards.has(scope.boardId)),
+        mcp?.revalidateBoards(database, generationId, boards)]);
     },
 
     disconnectAll() {
+      mcp?.disconnectAll();
       for (const subscriber of subscribers) close(subscriber);
     },
 
     stop() {
       stopped = true;
+      mcp?.stop();
       for (const subscriber of subscribers) close(subscriber);
     },
   };

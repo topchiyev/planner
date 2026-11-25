@@ -8,6 +8,7 @@ import type { BoardEventCursors } from '../board-events/cursor.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { WorkspaceAccessError } from '../workspace/authorization.js';
 import { WorkspaceReadLimit } from '../workspace/records.js';
+import type { McpBoardSubscriptions } from './board-subscriptions.js';
 import type { McpSurface } from './http.js';
 import { mcpMutationCatalog, mcpMutationNamed, mcpMutationWireSchema } from './mutation-catalog.js';
 import { mcpMutationError } from './mutations.js';
@@ -88,17 +89,29 @@ function scopeOf(principal: McpReadPrincipal, era: string, operation: string): C
   };
 }
 
-function resourceUri(kind: z.infer<typeof resourcePosition>['kind'], id: string) {
+export function resourceUri(kind: z.infer<typeof resourcePosition>['kind'], id: string) {
   return 'planner://' + kind + '/' + id;
 }
 
-export function createReadMcpSurface(origin: string, cursors: BoardEventCursors, includeWrites = false): McpSurface {
+export function parseResourceUri(uri: string) {
+  const [, kind, id] = /^planner:\/\/(boards|cards)\/([^/]+)$/u.exec(uri) ?? [];
+  if (id?.length !== 36) return null;
+  const resource = resourcePosition.safeParse({ kind, id });
+  return resource.success ? resource.data : null;
+}
+
+export function createReadMcpSurface(
+  origin: string, cursors: BoardEventCursors, includeWrites = false, boardSubscriptions?: McpBoardSubscriptions,
+): McpSurface {
   const declarations = [...mcpReadTools.map(({ declaration }) => declaration), ...(includeWrites ? writeDeclarations : [])];
   const catalogPosition = z.number().int().positive().lt(declarations.length);
   const catalogScope = includeWrites ? 'mcp.tools.list.withWrites' : 'mcp.tools.list';
   return {
-    capabilities: () => ({
-      tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false },
+    boardSubscriptions,
+    capabilities: (era) => ({
+      tools: { listChanged: false },
+      resources: { listChanged: false, ...(boardSubscriptions && { subscribe: era === 'modern' }) },
+      prompts: { listChanged: false },
     }),
     register(mcp, actor, era) {
       const { server } = mcp;
@@ -179,12 +192,12 @@ export function createReadMcpSurface(origin: string, cursors: BoardEventCursors,
       }));
 
       server.setRequestHandler('resources/read', ({ params: { uri } }) => {
-        const [, kind, rawId] = /^planner:\/\/(boards|cards)\/([^/]+)$/u.exec(uri) ?? [];
-        const id = publicIdSchema.safeParse(rawId);
-        if (!id.success || rawId.length !== 36) throw new ProtocolError(INVALID_PARAMS, 'Choose a Planner board or card resource URI.');
+        const resource = parseResourceUri(uri);
+        if (!resource) throw new ProtocolError(INVALID_PARAMS, 'Choose a Planner board or card resource URI.');
+        const { kind, id } = resource;
         return rpc(async ({ workspace }) => {
           const operation = kind === 'boards' ? workspaceOperations.boardGet : workspaceOperations.cardGet;
-          const data = kind === 'boards' ? await workspace.boardGet({ id: id.data }) : await workspace.cardGet({ id: id.data });
+          const data = kind === 'boards' ? await workspace.boardGet({ id }) : await workspace.cardGet({ id });
           const dto = operation.output.parse(data);
           const files = browserFiles(operation.id, dto, origin);
           return bounded({ contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(dto) }],

@@ -62,12 +62,15 @@ function deterministicId(buffer: Buffer) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export type OAuthRevocation = { generationId: string } & ({ grantId: string } | { tokenId: string });
+export type OnOAuthRevocation = (identity: OAuthRevocation) => void | Promise<void>;
+
 export class OAuthUnavailable extends CleanCommandRejection {
   constructor() { super('The Planner authorization service is unavailable.'); }
 }
 
 export function createOAuthStorage(
-  installationId: string, gate: CommandGate, secrets: OAuthSecrets, now = () => new Date(),
+  installationId: string, gate: CommandGate, secrets: OAuthSecrets, now = () => new Date(), onRevoked?: OnOAuthRevocation,
 ) {
   const requests = new AsyncLocalStorage<Scope>();
   const artifacts = (db: Db) => db.collection<Artifact>('oauthArtifacts');
@@ -134,7 +137,11 @@ export function createOAuthStorage(
   }
 
   async function revokeGrant(db: Db, generationId: string, providerGrantId: string, revokedAt: Date) {
-    await connections(db).updateOne({ generationId, providerGrantId, revokedAt: { $type: 'null' } }, { $set: { revokedAt } }, durable);
+    const revoked = await connections(db).findOneAndUpdate(
+      { generationId, providerGrantId, revokedAt: { $type: 'null' } }, { $set: { revokedAt } },
+      { ...durable, projection: { id: 1 } },
+    );
+    if (revoked) await onRevoked?.({ generationId, grantId: revoked.id });
   }
 
   function adapter(kind: string): Adapter {
@@ -197,6 +204,7 @@ export function createOAuthStorage(
           }
           const saved = await artifacts(db).updateOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } },
             { $set: { consumedAt: time } }, durable);
+          if (saved.modifiedCount === 1 && kind === 'AccessToken') await onRevoked?.({ generationId, tokenId: identity.id });
           return saved.modifiedCount === 1;
         });
         if (!consumed) throw new errors.InvalidGrant('The authorization artifact expired or was already consumed.');
@@ -204,8 +212,10 @@ export function createOAuthStorage(
       async destroy(rawId) {
         await run(true, async ({ db, generationId }) => {
           if (kind === 'Grant') await revokeGrant(db, generationId, grantKey(generationId, rawId), now());
-          await artifacts(db).deleteOne({ ...artifactIdentity(generationId, kind, rawId),
+          const identity = artifactIdentity(generationId, kind, rawId);
+          const deleted = await artifacts(db).deleteOne({ ...identity,
             ...(kind === 'RefreshToken' && { consumedAt: { $type: 'null' } }) }, durable);
+          if (deleted.deletedCount === 1 && kind === 'AccessToken') await onRevoked?.({ generationId, tokenId: identity.id });
         });
       },
       async revokeByGrantId(rawId) {
@@ -245,7 +255,7 @@ export function createOAuthStorage(
         || (grant.resource !== undefined && payload.aud !== grant.resource) || payload.accountId !== grant.userId || payload.clientId !== grant.clientId
         || !payload.scope.split(' ').every((scope) => grant.scope.split(' ').includes(scope))) return null;
     return { generationId, userId: grant.userId, clientId: grant.clientId,
-      audience: payload.aud, scope: payload.scope, grantId: grant.id, actor: grant.actor,
+      audience: payload.aud, scope: payload.scope, grantId: grant.id, tokenId: identity.id, actor: grant.actor,
       expiresAtMs: Math.min(row.expiresAt.getTime(), grant.expiresAt.getTime()) };
   }
 
@@ -343,6 +353,7 @@ export function createOAuthStorage(
       return access && accessTokenProofCurrent(access.expiresAtMs) ? access : null;
     },
     accessTokenProofCurrent,
+    accessDeliveryCurrent: (expiresAtMs: number) => gate.ready && accessTokenProofCurrent(expiresAtMs),
     withAccessTokenRead<T>(token: string, operation: (database: Db, access: NonNullable<Awaited<ReturnType<typeof currentAccessToken>>>) => Promise<T>) {
       return run(false, async (scope) => {
         const access = await currentAccessToken(scope, token);

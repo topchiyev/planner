@@ -9,6 +9,8 @@ import { WorkspaceAccessError, createWorkspaceAuthorization } from '../applicati
 import type { PrivateMediaStore } from '../storage/blobs/private-store.js';
 import { oauthMetadata, readScope, writeScope } from '../application/oauth/provider.js';
 import type { NativeOAuthRuntime } from './oauth-routes.js';
+import { serveNativeMcpSubscription } from './mcp-subscriptions.js';
+import type { McpListenAccess, McpListenProof } from '../application/mcp/board-subscriptions.js';
 
 export interface NativeMcpWrites {
   store: PrivateMediaStore;
@@ -29,8 +31,24 @@ export function registerNativeMcpRoutes(app: FastifyInstance, oauth: NativeOAuth
       current.clientId === access.clientId && current.grantId === access.grantId && current.audience === resource &&
       current.scope === access.scope && registry.allowsId(current.clientId);
     const clientId = writes && scopes.includes(writeScope) ? registry.auditId(access.clientId) : null;
+    const listenProof = (current: Binding & Pick<McpListenProof, 'actor' | 'expiresAtMs'>): McpListenProof => ({
+      generationId: current.generationId, clientId: current.clientId, grantId: current.grantId, actor: current.actor,
+      expiresAtMs: current.expiresAtMs, valid: () => storage.accessDeliveryCurrent(current.expiresAtMs),
+    });
+    const listen: McpListenAccess | undefined = surface?.boardSubscriptions && {
+      tokenId: access.tokenId,
+      read: (operation) => oauth.request(() => storage.withAccessTokenRead(token, (database, current) => {
+        if (!matches(current) || current.tokenId !== access.tokenId) return Promise.resolve(null);
+        return operation(database, listenProof(current));
+      })),
+      async currentUnderWriter(database) {
+        const current = await storage.currentAccessTokenForCommand(database, access.generationId, token);
+        if (!current || !matches(current) || current.tokenId !== access.tokenId) return null;
+        return listenProof(current);
+      },
+    };
     return {
-      generationId: access.generationId, userId: access.userId, clientId: access.clientId, grantId: access.grantId, scopes,
+      generationId: access.generationId, userId: access.userId, clientId: access.clientId, grantId: access.grantId, scopes, listen,
       read: (operation) => oauth.request(() => storage.withAccessTokenRead(token, (database, current) => {
         if (!matches(current)) return Promise.resolve(null);
         return operation(database, {
@@ -81,7 +99,11 @@ export function registerNativeMcpRoutes(app: FastifyInstance, oauth: NativeOAuth
     async handler(request, reply) {
       reply.hijack();
       reply.raw.setHeader('Cache-Control', 'no-store');
-      await nodeHandler(request.raw, reply.raw, request.body);
+      const body = request.body;
+      if (surface?.boardSubscriptions && body && typeof body === 'object' && 'method' in body && body.method === 'subscriptions/listen') {
+        return serveNativeMcpSubscription(handler, request.raw, reply.raw, body);
+      }
+      await nodeHandler(request.raw, reply.raw, body);
     },
   });
   app.addHook('preClose', handler.close);

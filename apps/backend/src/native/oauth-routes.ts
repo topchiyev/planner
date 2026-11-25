@@ -11,7 +11,7 @@ import { readSessionCookie } from '../application/auth/credentials.js';
 import type { CommandGate } from '../application/command-gate/gate.js';
 import { oauthSecrets } from '../application/oauth/keys.js';
 import { acceptsClientRedirect, createOAuthClientRegistry, parseOAuthClientRegistrations, type PlannerOAuthClient } from '../application/oauth/clients.js';
-import { createOAuthStorage } from '../application/oauth/storage.js';
+import { createOAuthStorage, type OnOAuthRevocation } from '../application/oauth/storage.js';
 import {
   authorizationPath, createPlannerProvider, interactionPath, issuerMetadataPath, keysPath, oauthMetadata,
   offlineScope, protectedResourceMetadataPath, readScope, requestedPlannerScopes, tokenPath, writeScope,
@@ -44,22 +44,23 @@ function nativeClientRegistrations() {
   } finally { closeSync(file); }
 }
 
-export function createNativeOAuth(config: NativeInstallationConfig, gate: CommandGate, key: KeyObject) {
+export function createNativeOAuth(config: NativeInstallationConfig, gate: CommandGate, key: KeyObject, onRevoked?: OnOAuthRevocation) {
+  const clients = nativeClientRegistrations();
   return createNativeOAuthRuntime(config.publicUrl, config.installationId, gate, key, async (operation) => {
     const client = await connectConfiguredNativeMongo(config);
     try { return await operation(client.db(databaseName)); }
     finally { await client.close(); }
-  }, nativeClientRegistrations());
+  }, clients, undefined, onRevoked);
 }
 
 export function createNativeOAuthRuntime(
   origin: string, installationId: string, gate: CommandGate, key: KeyObject,
   withDatabase: <T>(run: (db: Db) => Promise<T>) => Promise<T>, clients: readonly PlannerOAuthClient[] = [], registry = createOAuthClientRegistry(clients),
-  onGrantRevoked?: (identity: { generationId: string; grantId: string }) => void | Promise<void>,
+  onRevoked?: OnOAuthRevocation,
   now?: () => Date,
 ) {
   const secrets = oauthSecrets(key, installationId);
-  const storage = createOAuthStorage(installationId, gate, secrets, now);
+  const storage = createOAuthStorage(installationId, gate, secrets, now, onRevoked);
   let provider: ReturnType<typeof loadProvider> | undefined;
   async function loadProvider(db: Db) {
     const instance = createPlannerProvider(origin, storage, secrets.cookies, await storage.keys(db), registry);
@@ -70,11 +71,7 @@ export function createNativeOAuthRuntime(
     withCommandDatabase: <T>(operation: (db: Db, gate: CommandGate, installationId: string) => Promise<T>) =>
       withDatabase((db) => operation(db, gate, installationId)),
     listConnections: (token: string, after?: string) => withDatabase((db) => storage.listConnections(db, token, after)),
-    async revokeConnection(token: string, id: string) {
-      const result = await withDatabase((db) => storage.revokeConnection(db, token, id));
-      if (result) await onGrantRevoked?.(result);
-      return result;
-    },
+    revokeConnection: (token: string, id: string) => withDatabase((db) => storage.revokeConnection(db, token, id)),
     request: <T>(operation: () => Promise<T>) => withDatabase((db) => storage.withRequest(db, operation)),
     withProvider: <T>(operation: (value: Awaited<ReturnType<typeof loadProvider>>) => Promise<T>) => withDatabase(async (db) => {
       const pending = provider ??= loadProvider(db);

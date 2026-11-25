@@ -75,8 +75,8 @@ try {
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement, createNativeBackup(config, gate, mfaKey, mediaStore));
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth,
-      oauth: createNativeOAuth(config, gate, mfaKey.key),
-      mcp: createReadMcpSurface(config.publicUrl, events.cursors, true),
+      oauth: createNativeOAuth(config, gate, mfaKey.key, events.mcp.revoked),
+      mcp: createReadMcpSurface(config.publicUrl, events.cursors, true, events.mcp),
       mcpWrites: { store: mediaStore, decode: mediaDecoder, onCommitted: events.wake, afterCommit: events.streams.revalidateBoards },
       workspace: createNativeWorkspaceReader(config, gate, events.cursors),
       relationships: createNativeWorkspaceRelationships(config, gate, events.wake, events.streams.revalidateBoards),

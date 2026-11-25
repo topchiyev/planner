@@ -4,6 +4,7 @@ import type { MongoClient } from 'mongodb';
 import { createBoardEventCursors } from '../application/board-events/cursor.js';
 import { createBoardEventStreams } from '../application/board-events/streams.js';
 import type { CommandGate } from '../application/command-gate/gate.js';
+import { createMcpBoardSubscriptions } from '../application/mcp/board-subscriptions.js';
 import { CommandJournal } from '../application/command-journal/journal.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
@@ -27,7 +28,8 @@ export function startNativeBoardEvents(config: NativeInstallationConfig, gate: C
   };
 
   const cursors = createBoardEventCursors(installationKey);
-  const streams = createBoardEventStreams(getDatabase, config.installationId, gate, cursors);
+  const mcp = createMcpBoardSubscriptions();
+  const streams = createBoardEventStreams(getDatabase, config.installationId, gate, cursors, { mcp });
 
   async function dispatch() {
     if (!gate.ready) {
@@ -61,6 +63,7 @@ export function startNativeBoardEvents(config: NativeInstallationConfig, gate: C
   return {
     cursors,
     streams,
+    mcp,
     wake() {
       if (active) needsWake = true;
       else schedule(0);
