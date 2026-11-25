@@ -248,6 +248,29 @@ To register a public client locally, create `/etc/planner/oauth-clients.json` as
 
 The account holder must grant workspace read access. Write and continued access each require their own approval. Access tokens last up to 15 minutes. A refreshed connection cannot outlive its original 30-day deadline. Reusing an already used refresh credential closes that connection and requires a new sign-in and consent. The account Security page lists the signed-in account’s connections and lets the user disconnect one client without signing out other browsers or closing other connections.
 
+### Connect Codex CLI
+
+Codex CLI 0.172.0 on Linux negotiated MCP 2025-11-25 in the signed native qualification. Replace the example origin with your Planner installation's canonical HTTPS origin.
+
+```sh
+codex mcp add planner --url https://planner.example.test/mcp
+codex mcp get planner --json
+```
+
+Open the consent browser on the same host as Codex so it can return to Codex's temporary `127.0.0.1` callback. Sign in to Planner and complete your account's MFA when prompted. If `mcp add` opens consent, leave write and continued access unchecked to create the initial read-only connection. To change that grant, disconnect it under Planner **Security → Connected clients**, then run the login command for the scope you want.
+
+```sh
+# Read and continued access
+codex mcp login planner --scopes offline_access,planner:read
+
+# Read, write and continued access
+codex mcp login planner --scopes offline_access,planner:read,planner:write
+```
+
+Select **Keep this connection available between sign-ins** for continued access. Select **Allow changes you have permission to make** only for the write connection, then click **Allow**. Use **Security → Connected clients → Disconnect** to revoke a grant.
+
+The native Codex app-server discovered 85 tools, read a synthetic board and card, and wrote one audited card change through the write grant. The read-only grant received HTTP 403 for a write. After disconnection the existing write thread received HTTP 401 and the independent read thread continued reading. The qualification used a synthetic Planner account without a model turn.
+
 ## MCP HTTP transport
 
 The HTTPS endpoint is `POST /mcp`. Planner uses `@modelcontextprotocol/server` 2.4.0 for protocol dispatch and `@modelcontextprotocol/node` 2.1.2 for the Node HTTP bridge. An explicit `Origin` must match the configured Planner origin. Either profile accepts one JSON-RPC message per POST with `Content-Type: application/json` and `Accept: application/json, text/event-stream`. Requests are limited to 64 KiB.
