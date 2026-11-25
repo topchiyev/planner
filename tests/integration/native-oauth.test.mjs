@@ -159,6 +159,11 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
     let server = await serve(app(), fixture);
     const call = (path, options) => server.call(path, options);
     const post = (path, body, jar, type = json, headers = { Origin: origin }) => call(path, { method: 'POST', body, type, jar, headers });
+    const probeMcp = (headers = {}, path = '/mcp') => post(path, {
+      jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'OAuth fixture', version: '1' },
+      },
+    }, undefined, json, { Accept: 'application/json, text/event-stream', ...headers });
     const requestCode = (overrides = {}) => '/oauth/authorize?' + new URLSearchParams({
       response_type: 'code', client_id: clientId, redirect_uri: redirect, state: 'synthetic-state', resource,
       scope: 'planner:read planner:write', code_challenge_method: 'S256', code_challenge: challenge, ...overrides,
@@ -200,7 +205,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.deepEqual(discovery.json, { resource, authorization_servers: [origin], scopes_supported: ['planner:read', 'planner:write'],
         bearer_methods_supported: ['header'] });
       assert.equal((await call('/.well-known/oauth-protected-resource/mcp', { headers: { 'x-test-proxy': 'unmarked' } })).status, 403);
-      const unauthorized = await call('/mcp');
+      const unauthorized = await probeMcp();
       assert.equal(unauthorized.status, 401);
       assert.equal(unauthorized.headers['www-authenticate'], `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="planner:read"`);
       const metadata = (await call('/.well-known/oauth-authorization-server')).json;
@@ -286,8 +291,8 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal(full.status, 200);
       assert.deepEqual(full.json.scope.split(' ').sort(), ['planner:read', 'planner:write']);
       const bearer = { Authorization: 'Bearer ' + full.json.access_token };
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
-      assert.equal((await call('/mcp?access_token=' + full.json.access_token)).status, 401);
+      assert.equal((await probeMcp(bearer)).status, 200);
+      assert.equal((await probeMcp({}, '/mcp?access_token=' + full.json.access_token)).status, 401);
 
       const persistent = { scope: 'planner:read planner:write offline_access' };
       const rejectedOffline = await token(await approve(await interaction(persistent), false));
@@ -302,7 +307,9 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.notEqual(rotated.json.refresh_token, family.json.refresh_token);
       const scoped = { Authorization: 'Bearer ' + rotated.json.access_token };
       const insufficient = await post('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call',
-        params: { name: 'card_update', arguments: { id: randomUUID() } } }, undefined, json, scoped);
+        params: { name: 'card_update', arguments: { id: randomUUID() } } }, undefined, json, {
+        Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25', ...scoped,
+      });
       assert.equal(insufficient.status, 403);
       assert.match(insufficient.headers['www-authenticate'], /insufficient_scope/u);
       const broadened = await refresh(rotated.json.refresh_token, { scope: 'planner:read planner:write' });
@@ -311,12 +318,12 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const wrongAudience = await refresh(family.json.refresh_token, { resource: origin + '/not-mcp' });
       assert.equal(wrongAudience.status, 400);
       assert.equal(wrongAudience.json.error, 'invalid_target');
-      assert.equal((await call('/mcp', { headers: scoped })).status, 501);
+      assert.equal((await probeMcp(scoped)).status, 200);
       const replayed = await refresh(family.json.refresh_token);
       assert.equal(replayed.status, 400);
       assert.equal(replayed.json.error, 'invalid_grant');
-      assert.equal((await call('/mcp', { headers: scoped })).status, 401);
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(scoped)).status, 401);
+      assert.equal((await probeMcp(bearer)).status, 200);
 
       privateAnswer = true;
       assert.equal((await call(requestCode({ client_id: dynamic[0].id, redirect_uri: dynamic[0].callback }))).status, 400);
@@ -336,7 +343,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
         assert.equal((await token(pinnedCode, { ...input, redirect_uri: otherCallback.href })).status, 400);
         const admitted = await token(pinnedCode, input);
         assert.equal(admitted.status, 200, admitted.text);
-        assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + admitted.json.access_token } })).status, 501);
+        assert.equal((await probeMcp({ Authorization: 'Bearer ' + admitted.json.access_token })).status, 200);
       }
       assert.equal(metadataReads.length, dynamic.length + 1);
       const own = await call('/api/v1/me/connections', { jar });
@@ -361,7 +368,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal((await disconnect(codex.id)).status, 204);
       assert.equal((await disconnect(codex.id)).status, 204);
       assert.ok(revoked.some(({ grantId }) => grantId === codex.id));
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(bearer)).status, 200);
 
       const race = await token(await approve(await interaction(persistent), false, true));
       assert.equal(race.status, 200);
@@ -369,15 +376,15 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const wrongClient = await refresh(race.json.refresh_token, { client_id: dynamic[0].id });
       assert.equal(wrongClient.status, 400);
       assert.equal(wrongClient.json.error, 'invalid_grant');
-      assert.equal((await call('/mcp', { headers: raceBearer })).status, 501);
+      assert.equal((await probeMcp(raceBearer)).status, 200);
       const [left, right] = await Promise.all([refresh(race.json.refresh_token), refresh(race.json.refresh_token)]);
       assert.ok([left, right].every((item) => item.status === 200 || (item.status === 400 && item.json.error === 'invalid_grant')));
       assert.ok([left, right].some((item) => item.status === 400));
       for (const result of [left, right]) if (result.status === 200) {
-        assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + result.json.access_token } })).status, 401);
+        assert.equal((await probeMcp({ Authorization: 'Bearer ' + result.json.access_token })).status, 401);
       }
-      assert.equal((await call('/mcp', { headers: raceBearer })).status, 401);
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(raceBearer)).status, 401);
+      assert.equal((await probeMcp(bearer)).status, 200);
 
       const closingFamily = await token(await approve(await interaction(persistent), false, true));
       assert.equal(closingFamily.status, 200);
@@ -386,16 +393,16 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const accessTokens = db.collection('oauthArtifacts');
       const shortLived = await accessTokens.findOne({ generationId, kind: 'AccessToken', providerGrantId: latest.providerGrantId });
       await accessTokens.updateOne({ _id: shortLived._id }, { $set: { expiresAt: new Date(0) } });
-      assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + closingFamily.json.access_token } })).status, 401);
+      assert.equal((await probeMcp({ Authorization: 'Bearer ' + closingFamily.json.access_token })).status, 401);
       const refreshedBeforeDeadline = await refresh(closingFamily.json.refresh_token);
       assert.equal(refreshedBeforeDeadline.status, 200);
-      assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + refreshedBeforeDeadline.json.access_token } })).status, 501);
+      assert.equal((await probeMcp({ Authorization: 'Bearer ' + refreshedBeforeDeadline.json.access_token })).status, 200);
       const familyRows = await db.collection('oauthArtifacts').find({ generationId, kind: 'RefreshToken', providerGrantId: latest.providerGrantId }).toArray();
       assert.equal(familyRows.length, 2);
       assert.ok(familyRows.every((row) => row.expiresAt.getTime() <= latest.expiresAt.getTime()));
       await connections.updateOne({ _id: latest._id }, { $set: { expiresAt: new Date(0) } });
       assert.equal((await refresh(refreshedBeforeDeadline.json.refresh_token)).json.error, 'invalid_grant');
-      assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + refreshedBeforeDeadline.json.access_token } })).status, 401);
+      assert.equal((await probeMcp({ Authorization: 'Bearer ' + refreshedBeforeDeadline.json.access_token })).status, 401);
 
       const thirdCode = await approve(await interaction());
       const badResource = await token(thirdCode, { resource: origin + '/not-mcp' });
@@ -428,7 +435,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       server = await serve(app(), fixture);
       assert.deepEqual((await call('/oauth/jwks')).json, publicKeys);
       assert.ok(csrfFrom(await call(pendingRestart, { jar })));
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(bearer)).status, 200);
       const afterRestart = await refresh(beforeRestart.json.refresh_token);
       assert.equal(afterRestart.status, 200);
 
@@ -443,7 +450,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const loggedOutSwap = await token(codeBeforeLogout);
       assert.equal(loggedOutSwap.status, 400);
       assert.equal(loggedOutSwap.json.error, 'invalid_grant');
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(bearer)).status, 200);
 
       const readBearer = { Authorization: 'Bearer ' + inactiveBrowserToken.json.access_token };
       const sessionsCollection = db.collection('sessions');
@@ -458,14 +465,14 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const actor = { _id: workspaceKey(generationId, actorId) };
       await users.updateOne(actor, { $set: { 'preferences.autoLogout': '2m' } });
       assert.equal((await call('/api/v1/session', { headers: initialBrowser })).status, 401);
-      assert.equal((await call('/mcp', { headers: readBearer })).status, 501);
+      assert.equal((await probeMcp(readBearer)).status, 200);
 
       await server.close();
       server = await serve(app([]), fixture);
-      assert.equal((await call('/mcp', { headers: bearer })).status, 401);
+      assert.equal((await probeMcp(bearer)).status, 401);
       await server.close();
       server = await serve(app(), fixture);
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(bearer)).status, 200);
 
       // Verify each durable condition independently of the revocation sweeps.
       const saved = await users.findOne(actor);
@@ -475,14 +482,14 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
         ['disabledAt', new Date(), null],
       ]) {
         await users.updateOne(actor, { $set: { [field]: changed } });
-        assert.equal((await call('/mcp', { headers: bearer })).status, 401);
+        assert.equal((await probeMcp(bearer)).status, 401);
         await users.updateOne(actor, { $set: { [field]: original } });
-        assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+        assert.equal((await probeMcp(bearer)).status, 200);
       }
 
       await connections.updateOne({ _id: firstConnection._id }, { $set: { revokedAt: new Date() } });
-      assert.equal((await call('/mcp', { headers: readBearer })).status, 401);
-      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      assert.equal((await probeMcp(readBearer)).status, 401);
+      assert.equal((await probeMcp(bearer)).status, 200);
       const reauth = await post('/api/v1/session/login', { identifier, password, requireMfaChallenge: true }, jar);
       const verified = await post('/api/v1/session/verify-mfa', { challengeId: reauth.json.challengeId,
         recoveryCode: factor.recoveryCodes[1] }, jar);
@@ -490,11 +497,11 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const disabled = await call('/api/v1/me/mfa', { method: 'DELETE', type: json, jar,
         headers: { Origin: origin, 'X-CSRF-Token': verified.json.csrfToken }, body: { password, recoveryCode: factor.recoveryCodes[2] } });
       assert.equal(disabled.status, 204);
-      assert.equal((await call('/mcp', { headers: bearer })).status, 401);
+      assert.equal((await probeMcp(bearer)).status, 401);
       assert.equal(await connections.countDocuments({ generationId, userId: actorId, revokedAt: null }), 0);
 
       access = { kind: 'enrollment', step: 'account-recovery' };
-      assert.equal((await call('/mcp')).status, 503);
+      assert.equal((await probeMcp()).status, 503);
       assert.equal((await call(requestCode())).status, 503);
       access = { kind: 'ready' };
       await publishSyntheticMigration(db, { installationId, generationId, actorId });

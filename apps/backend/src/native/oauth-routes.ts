@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual, type KeyObject } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
-import { isOAuthInteractionPath, oauthConnectionPageSchema, relationshipCommands, workspaceSignInPath } from '@planner/contracts';
+import { isOAuthInteractionPath, oauthConnectionPageSchema, workspaceSignInPath } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from 'mongodb';
@@ -159,18 +159,6 @@ function oauthError(reply: FastifyReply, error: unknown) {
   return reply.code(503).header('Cache-Control', 'no-store').send(unavailable);
 }
 
-const operatorCommands = new Set(['projects.delete', 'boards.delete', 'cards.purge', 'lists.clearTrash']);
-const writeTools = new Set(Object.keys(relationshipCommands).filter((operation) => !operatorCommands.has(operation)).map((operation) => {
-  const [collection, action] = operation.split('.');
-  return collection.slice(0, -1) + '_' + action.replace(/[A-Z]/gu, (letter) => '_' + letter.toLowerCase());
-}));
-
-function requestsWorkspaceMutation(body: unknown) {
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
-  const { method, params } = body as { method?: unknown; params?: { name?: unknown } };
-  return method === 'tools/call' && typeof params?.name === 'string' && writeTools.has(params.name);
-}
-
 export function registerNativeOAuthRoutes(app: FastifyInstance, oauth: NativeOAuthRuntime) {
   const { origin, registry, storage } = oauth;
   const metadata = oauthMetadata(origin);
@@ -180,31 +168,6 @@ export function registerNativeOAuthRoutes(app: FastifyInstance, oauth: NativeOAu
   app.get(issuerMetadataPath, { config }, (request, reply) => {
     if (canProxy(request, reply)) return reply.send(metadata.issuerMetadata);
   });
-  const permitsWrites = new WeakMap<FastifyRequest, boolean>();
-  app.route({ method: ['GET', 'POST', 'DELETE'], url: '/mcp', config, async onRequest(request, reply) {
-    if (!canProxy(request, reply)) return;
-    reply.header('Cache-Control', 'no-store');
-    const token = /^Bearer ([A-Za-z0-9_-]{20,300})$/iu.exec(request.headers.authorization ?? '')?.[1];
-    if (token) {
-      try {
-        const access = await oauth.request(() => storage.accessToken(token));
-        const scopes = access?.scope?.split(' ') ?? [];
-        if (access?.audience === metadata.resource && scopes.includes(readScope) && registry.allowsId(access.clientId)) {
-          permitsWrites.set(request, scopes.includes(writeScope));
-          return;
-        }
-      } catch (error) { return oauthError(reply, error); }
-    }
-    return reply.code(401).header('WWW-Authenticate', metadata.challenge).send({ error: 'invalid_token' });
-  }, async handler(request, reply) {
-    if (!permitsWrites.get(request) && requestsWorkspaceMutation(request.body)) {
-      return reply.code(403).header('WWW-Authenticate',
-        `Bearer error="insufficient_scope", scope="${readScope} ${writeScope}", resource_metadata="${origin + protectedResourceMetadataPath}"`)
-        .send({ error: 'insufficient_scope' });
-    }
-    return reply.code(501).send({ error: 'unsupported_operation' });
-  } });
-
   async function providerRequest(request: FastifyRequest, reply: FastifyReply) {
     if (!canProxy(request, reply)) return;
     if (request.routeOptions.url === authorizationPath && !await readAuthorizationRequest(request, metadata.resource, registry)) {
