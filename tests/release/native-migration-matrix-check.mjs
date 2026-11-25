@@ -6,9 +6,7 @@ import { request } from 'node:https';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { connectVerifiedNativeMongo } from '/opt/planner/current/apps/backend/dist/native/mongo-readiness.js';
-import { acquireNativeWriter } from '/opt/planner/current/apps/backend/dist/native/writer.js';
 import { legacyPublicId } from '/opt/planner/current/apps/backend/dist/storage/identity.js';
-import { createPasswordHasher } from '/opt/planner/current/apps/backend/dist/application/auth/password.js';
 import { sha256, sharedImageKey, sharedTextKey, privateTextKey, missingOriginal } from './planka/matrix-oracle.mjs';
 
 const [runId, cert, codePath, fixtures, release, scenario, work] = process.argv.slice(2);
@@ -163,23 +161,13 @@ try {
   const accountScope = { generationId, id: { $in: accountIds }, requiresMfaEnrollment: false };
   const stripCredential = ({ localAuth, revision, ...record }) => record;
   assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, null);
-  const lease = acquireNativeWriter();
-  try {
-    const before = await readGeneration('users', accountScope);
-    assert.equal(before.length, 4);
-    for (const { id: userId, localAuth, disabledAt } of before) {
-      assert.deepEqual(localAuth, { passwordVerifier: null, credentialsVersion: 1, mfa: 'none' });
-      assert.equal(disabledAt !== null, userId === accountIds[3]);
-    }
-    const edgesBefore = await aclEdges();
-    const passwordVerifier = await createPasswordHasher().encode(syntheticPassword);
-    const updated = await db.collection('users').updateMany(accountScope, {
-      $set: { localAuth: { passwordVerifier, credentialsVersion: 2, mfa: 'none' } }, $inc: { revision: 1 },
-    }, { writeConcern: { w: 1, j: true } });
-    assert.equal(updated.modifiedCount, 4);
-    assert.deepEqual((await readGeneration('users', accountScope)).map(stripCredential), before.map(stripCredential));
-    assert.deepEqual(await aclEdges(), edgesBefore);
-  } finally { lease.release(); }
+  const before = await readGeneration('users', accountScope);
+  assert.equal(before.length, 4);
+  for (const { id: userId, localAuth, disabledAt } of before) {
+    assert.deepEqual(localAuth, { passwordVerifier: null, credentialsVersion: 1, mfa: 'none' });
+    assert.equal(disabledAt !== null, userId === accountIds[3]);
+  }
+  const edgesBefore = await aclEdges();
 
   const archivedId = id('card', '9007199254740996');
   const [archivedMap] = await readGeneration('importIds', { entity: 'card', sourceId: '9007199254740996' });
@@ -202,6 +190,27 @@ try {
   execFileSync('/usr/bin/systemctl', ['start', 'planner.service']);
   await activate(manifestSha256, Number(!clean));
   const admin = await signIn('iris@planner-fixture.invalid', '  Owned äccount 🗝️ pass & %  ', (await readFile(codePath, 'utf8')).trim());
+  for (const { id: userId, disabledAt, revision } of before) {
+    const requested = await api(`${apiRoot}/admin/accounts/${userId}/recovery`, {
+      method: 'POST', session: admin, body: { revision },
+    });
+    if (disabledAt !== null) {
+      assert.equal(requested.status, 403);
+      assert.equal(requested.json.error.code, 'FORBIDDEN');
+      continue;
+    }
+    assert.equal(requested.status, 202);
+    const approved = JSON.parse(execFileSync('/usr/bin/plannerctl',
+      ['accounts', 'confirm', requested.json.id, '--yes', '--json'], { encoding: 'utf8' }));
+    const recovered = await api(apiRoot + '/recovery/consume', { method: 'POST',
+      body: { grant: approved.recovery.grant, password: syntheticPassword } });
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.json.status, 'confirmed');
+  }
+  const after = await readGeneration('users', accountScope);
+  assert.deepEqual(after.map(stripCredential), before.map(stripCredential));
+  assert.deepEqual(after.find(({ id: userId }) => userId === accountIds[3]), before.find(({ id: userId }) => userId === accountIds[3]));
+  assert.deepEqual(await aclEdges(), edgesBefore);
   const owner = await signIn('rowan@planner-fixture.invalid', syntheticPassword);
   const viewer = await signIn('sage@planner-fixture.invalid', syntheticPassword);
   const silentViewer = await signIn('teal@planner-fixture.invalid', syntheticPassword);
