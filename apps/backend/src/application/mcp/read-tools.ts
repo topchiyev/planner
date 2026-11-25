@@ -1,5 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/server';
-import { boardFilterIds, boardFilterKeys, mediaOperations, relationshipReads, workspaceOperations,
+import { boardFilterIds, boardFilterKeys, boardRecipeSchema, mediaOperations, relationshipReads, workspaceOperations,
   type RelationshipRead, type RelationshipReadInput, type WorkspaceReadInput, type WorkspaceReadOperation } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { BoardEventCursors } from '../board-events/cursor.js';
@@ -31,6 +31,15 @@ export function workspaceSnapshot(database: Db, principal: McpReadPrincipal, cur
 }
 
 type Snapshot = ReturnType<typeof workspaceSnapshot>;
+
+export const mcpBoardTriageFilters = boardRecipeSchema.extend({
+  context: workspaceOperations.boardCards.input.shape.context,
+  limit: boardRecipeSchema.shape.limit.default(25),
+  q: boardRecipeSchema.shape.q.default(''),
+  unassigned: boardRecipeSchema.shape.unassigned.default(false),
+  labelsAny: boardFilterIds.default([]), labelsNone: boardFilterIds.default([]),
+  members: boardFilterIds.default([]), listIds: boardFilterIds.default([]),
+});
 
 function typedArguments(shape: z.ZodRawShape) {
   const fields: Record<string, z.core.$ZodType> = { ...shape };

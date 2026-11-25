@@ -245,7 +245,8 @@ export function createOAuthStorage(
         || (grant.resource !== undefined && payload.aud !== grant.resource) || payload.accountId !== grant.userId || payload.clientId !== grant.clientId
         || !payload.scope.split(' ').every((scope) => grant.scope.split(' ').includes(scope))) return null;
     return { generationId, userId: grant.userId, clientId: grant.clientId,
-      audience: payload.aud, scope: payload.scope, grantId: grant.id, actor: grant.actor };
+      audience: payload.aud, scope: payload.scope, grantId: grant.id, actor: grant.actor,
+      expiresAtMs: Math.min(row.expiresAt.getTime(), grant.expiresAt.getTime()) };
   }
 
   return {
@@ -329,14 +330,16 @@ export function createOAuthStorage(
       return run(false, async (scope) => {
         const access = await currentAccessToken(scope, token);
         if (!access) return null;
-        const { actor: _actor, ...binding } = access;
+        const { actor: _actor, expiresAtMs: _expiresAtMs, ...binding } = access;
         return binding;
       });
     },
     withAccessTokenRead<T>(token: string, operation: (database: Db, access: NonNullable<Awaited<ReturnType<typeof currentAccessToken>>>) => Promise<T>) {
       return run(false, async (scope) => {
         const access = await currentAccessToken(scope, token);
-        return access ? operation(scope.db, access) : null;
+        if (!access) return null;
+        const result = await operation(scope.db, access);
+        return now().getTime() < access.expiresAtMs ? result : null;
       });
     },
   };

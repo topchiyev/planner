@@ -2,13 +2,14 @@ import { INTERNAL_ERROR, INVALID_PARAMS, ProtocolError, ResourceNotFoundError,
   type CallToolResult, type Resource } from '@modelcontextprotocol/server';
 import { workspaceOperations } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
+import { MongoServerError } from 'mongodb';
 import { z } from 'zod';
 import type { BoardEventCursors } from '../board-events/cursor.js';
 import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/cursor.js';
 import { WorkspaceAccessError } from '../workspace/authorization.js';
 import { WorkspaceReadLimit } from '../workspace/records.js';
 import type { McpSurface } from './http.js';
-import { browserFiles, InvalidMcpRead, mcpReadTools, workspaceSnapshot, type McpReadPrincipal } from './read-tools.js';
+import { browserFiles, InvalidMcpRead, mcpBoardTriageFilters, mcpReadTools, workspaceSnapshot, type McpReadPrincipal } from './read-tools.js';
 
 const toolsByName = new Map(mcpReadTools.map((tool) => [tool.declaration.name, tool]));
 const toolPageSize = 10;
@@ -29,6 +30,18 @@ const prompts = [
     instructions: 'Summarize the visible cards that may need triage. Explain the basis for each observation and note that this is a single card page.' },
 ];
 const promptInput = z.strictObject({ boardId: publicIdSchema });
+const triageInput = promptInput.extend({ filters: z.string().max(12_000).optional() });
+
+function triageFilters(raw?: string) {
+  let input: unknown = {};
+  if (raw !== undefined) {
+    try { input = JSON.parse(raw); }
+    catch { throw new InvalidMcpRead('Check the board triage filters.'); }
+  }
+  const filters = mcpBoardTriageFilters.safeParse(input);
+  if (!filters.success) throw new InvalidMcpRead('Check the board triage filters.');
+  return filters.data;
+}
 
 function bounded<T>(result: T): T {
   if (Buffer.byteLength(JSON.stringify(result), 'utf8') > resultBytes) throw new WorkspaceReadLimit();
@@ -75,7 +88,9 @@ function resourceUri(kind: z.infer<typeof resourcePosition>['kind'], id: string)
 
 export function createReadMcpSurface(origin: string, cursors: BoardEventCursors): McpSurface {
   return {
-    capabilities: () => ({ tools: {}, resources: {}, prompts: {} }),
+    capabilities: () => ({
+      tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false },
+    }),
     register(mcp, actor, era) {
       const { server } = mcp;
       type Snapshot = ReturnType<typeof workspaceSnapshot>;
@@ -131,7 +146,10 @@ export function createReadMcpSurface(origin: string, cursors: BoardEventCursors)
           const rows = await records.aggregate<{ id: string; name: string }>(kind,
             start?.kind === kind ? { id: { $gt: start.id } } : {}, [
               ...stages, { $sort: { id: 1 } }, { $limit: resourcePageSize + 1 - entries.length }, { $project: { _id: 0, id: 1, name: 1 } },
-            ], { maxTimeMS: 5_000 });
+            ], { maxTimeMS: 5_000 }).catch((error: unknown) => {
+              if (error instanceof MongoServerError && error.code === 50) throw new WorkspaceReadLimit();
+              throw error;
+            });
           entries.push(...rows.map((row) => ({ kind, ...row })));
           if (entries.length > resourcePageSize) break;
         }
@@ -146,7 +164,7 @@ export function createReadMcpSurface(origin: string, cursors: BoardEventCursors)
       server.setRequestHandler('resources/read', ({ params: { uri } }) => {
         const [, kind, rawId] = /^planner:\/\/(boards|cards)\/([^/]+)$/u.exec(uri) ?? [];
         const id = publicIdSchema.safeParse(rawId);
-        if (!id.success) throw new ProtocolError(INVALID_PARAMS, 'Choose a Planner board or card resource URI.');
+        if (!id.success || rawId.length !== 36) throw new ProtocolError(INVALID_PARAMS, 'Choose a Planner board or card resource URI.');
         return rpc(async ({ workspace }) => {
           const operation = kind === 'boards' ? workspaceOperations.boardGet : workspaceOperations.cardGet;
           const data = kind === 'boards' ? await workspace.boardGet({ id: id.data }) : await workspace.cardGet({ id: id.data });
@@ -159,20 +177,27 @@ export function createReadMcpSurface(origin: string, cursors: BoardEventCursors)
 
       server.setRequestHandler('prompts/list', ({ params }) => rpc(async () => {
         if (params?.cursor !== undefined) throw new InvalidPageCursor('The page cursor is invalid or no longer applies.');
-        return { prompts: prompts.map(({ name, description }) => ({ name, description,
-          arguments: [{ name: 'boardId', description: 'Planner board UUID.', required: true }] })) };
+        return { prompts: prompts.map(({ name, description }) => ({ name, description, arguments: [
+          { name: 'boardId', description: 'Planner board UUID.', required: true },
+          ...(name === 'board_triage' ? [{ name: 'filters', description: 'JSON object of optional board-card filters: context, q, labelsAny, labelsNone, members, listIds, unassigned, and limit (1–100). UUID filters are arrays.' }] : []),
+        ] })) };
       }));
 
-      server.setRequestHandler('prompts/get', ({ params }) => rpc(async ({ workspace }) => {
+      server.setRequestHandler('prompts/get', ({ params }) => rpc(async ({ workspace, access }) => {
         const prompt = prompts.find(({ name }) => name === params.name);
-        const input = promptInput.safeParse(params.arguments);
-        if (!prompt || !input.success) throw new InvalidMcpRead('Choose a board prompt and supply a board UUID.');
-        const id = input.data.boardId;
-        const data = prompt.name === 'board_status'
-          ? workspaceOperations.boardWorkspace.output.parse(await workspace.boardWorkspace({ id }))
-          : workspaceOperations.boardCards.output.parse(await workspace.boardCards({
-            id, context: 'board', q: '', labelsAny: [], labelsNone: [], members: [], listIds: [], unassigned: false, limit: 25,
-          }));
+        const boardId = publicIdSchema.safeParse(params.arguments?.boardId);
+        if (!prompt || !boardId.success) throw new InvalidMcpRead('Choose a board prompt and supply a board UUID.');
+        const id = boardId.data;
+        let data;
+        if (prompt.name === 'board_status') {
+          if (!promptInput.safeParse(params.arguments).success) throw new InvalidMcpRead('Check the board status arguments.');
+          data = workspaceOperations.boardWorkspace.output.parse(await workspace.boardWorkspace({ id }));
+        } else {
+          const board = await access.requireBoard(id);
+          const input = triageInput.safeParse(params.arguments);
+          if (!input.success) throw new InvalidMcpRead('Check the board triage filters.');
+          data = workspaceOperations.boardCards.output.parse(await workspace.boardCards({ id, ...triageFilters(input.data.filters) }, board));
+        }
         return bounded({ description: prompt.description, messages: [
           { role: 'user' as const, content: { type: 'text' as const, text: prompt.instructions } },
           { role: 'user' as const, content: { type: 'text' as const, text: JSON.stringify(data) } },
