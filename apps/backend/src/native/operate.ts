@@ -672,7 +672,9 @@ async function migrationVerification(runId: string, verify: boolean, manifestSha
         const { run, input, cursors } = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
         if (manifestSha256 !== undefined && manifestSha256 !== run.manifestSha256)
           throw new MigrationError('source-changed', 'The expected manifest does not match the protected migration run.');
-        if (!verify || run.state === 'verified' || run.state === 'blocked') return readMigrationVerification(directory, migrationOwner, run);
+        if (!verify || run.state === 'verified' || run.state === 'blocked') {
+          return await readMigrationVerification(directory, migrationOwner, run);
+        }
         const controller = new AbortController();
         const cancel = () => controller.abort();
         process.once('SIGINT', cancel);
