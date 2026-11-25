@@ -248,6 +248,12 @@ To register a public client locally, create `/etc/planner/oauth-clients.json` as
 
 The account holder must grant workspace read access. Write and continued access each require their own approval. Access tokens last up to 15 minutes. A refreshed connection cannot outlive its original 30-day deadline. Reusing an already used refresh credential closes that connection and requires a new sign-in and consent. The account Security page lists the signed-in account’s connections and lets the user disconnect one client without signing out other browsers or closing other connections.
 
+## MCP HTTP transport
+
+The HTTPS endpoint is `POST /mcp`. Planner uses `@modelcontextprotocol/server` 2.4.0 for protocol dispatch and `@modelcontextprotocol/node` 2.1.2 for the Node HTTP bridge. An explicit `Origin` must match the configured Planner origin. Either profile accepts one JSON-RPC message per POST with `Content-Type: application/json` and `Accept: application/json, text/event-stream`. Requests are limited to 64 KiB.
+
+A valid 2026-07-28 `server/discover` request returns static capabilities without credentials. Modern requests pair the protocol and method headers with their JSON-RPC envelope, and named tool, prompt and resource requests include the matching `Mcp-Name` header. The legacy profile uses the 2025-11-25 `initialize` and `notifications/initialized` handshake. Send the negotiated revision in `MCP-Protocol-Version` on subsequent legacy requests. Both profiles use bearer authorization for workspace traffic. Planner returns `405 Allow: POST` for MCP GET and DELETE and never issues an MCP session ID.
+
 ## Runtime status and setup access
 
 `GET /health/live` tracks the HTTP process. `GET /health/ready` returns 503 during pending setup, migration, database downtime, staging errors, schema verification or recovery. Both responses carry `status`, `version` and a generated `requestId`, with `Cache-Control: no-store`.

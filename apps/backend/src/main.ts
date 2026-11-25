@@ -109,6 +109,7 @@ try {
     try {
       stopRecovery?.();
       stopMediaCleanup?.();
+      await app?.closeMcp?.();
       boardEvents?.stop();
       await Promise.all([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
       await Promise.all([closeMedia?.(), boardEvents?.close()]);
@@ -127,6 +128,7 @@ try {
 } catch {
   stopRecovery?.();
   stopMediaCleanup?.();
+  await Promise.allSettled([app?.closeMcp?.()]);
   boardEvents?.stop();
   await Promise.allSettled([commandGate?.closeAndDrain(), app?.close(), closeAdmin?.(), closeProxy?.()]);
   await Promise.allSettled([closeMedia?.(), boardEvents?.close()]);

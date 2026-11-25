@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
+import type { McpSurface } from './application/mcp/http.js';
+import { registerNativeMcpRoutes } from './native/mcp-routes.js';
 import type { BoardEventStreams } from './application/board-events/streams.js';
 import { registerFrontendShell } from './frontend-shell.js';
 import { registerAccountRoutes } from './native/account-routes.js';
@@ -20,6 +22,7 @@ type NativeAuthBoundary = NativeHttpBoundary & {
   media?: MediaAccess;
   boardEvents?: BoardEventStreams;
   oauth?: NativeOAuthRuntime;
+  mcp?: McpSurface;
 };
 
 export type AppDependencies = {
@@ -33,11 +36,15 @@ export type AppDependencies = {
 export function buildApp({ isReady, frontendRoot, native, transportFixture }: AppDependencies) {
   const app = Fastify({ requestIdHeader: false, genReqId: () => randomUUID() });
   const transport = native ?? transportFixture;
+  let closeMcp: (() => Promise<void>) | undefined;
   app.decorateRequest('plannerConnection', null);
   if (transport) registerNativeHttpBoundary(app, transport);
   if (native) {
     registerNativeBrowserAuth(app, native.auth);
-    if (native.oauth) registerNativeOAuthRoutes(app, native.oauth);
+    if (native.oauth) {
+      registerNativeOAuthRoutes(app, native.oauth);
+      closeMcp = registerNativeMcpRoutes(app, native.oauth, native.mcp);
+    }
     if (native.auth) registerOAuthConnectionRoutes(app, native.oauth);
     if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);
     if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
@@ -75,5 +82,5 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
   });
 
   if (frontendRoot) registerFrontendShell(app, frontendRoot, transport !== undefined, native !== undefined);
-  return app;
+  return Object.assign(app, { closeMcp });
 }

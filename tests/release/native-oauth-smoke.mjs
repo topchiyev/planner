@@ -44,6 +44,15 @@ function call(path, { method = 'GET', body, form = false, browser = false, heade
   });
 }
 
+function probeMcp(headers = {}) {
+  return call('/mcp', {
+    method: 'POST', headers: { Accept: 'application/json, text/event-stream', ...headers },
+    body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+      protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Offline OAuth fixture', version: '1' },
+    } },
+  });
+}
+
 async function readiness(expected) {
   for (let attempt = 0; attempt < 120; attempt++) {
     if ((await call('/health/ready').catch(() => undefined))?.status === expected) return;
@@ -57,7 +66,7 @@ const recover = await call('/api/v1/recovery/consume', { method: 'POST', browser
   body: { grant: setup.firstAdminGrant.token, name: 'Offline OAuth operator', email: dummyEmail, password: dummyPassword } });
 assert.equal(recover.status, 200);
 await readiness(200);
-const challenge = await call('/mcp');
+const challenge = await probeMcp();
 assert.equal(challenge.status, 401);
 assert.match(challenge.headers['www-authenticate'], /scope="planner:read"/u);
 const metadata = await call('/.well-known/oauth-authorization-server');
@@ -103,7 +112,7 @@ assert.equal(issued.json.scope, 'planner:read');
 assert.equal(issued.json.expires_in, 900);
 assert.match(issued.json.refresh_token, /^[A-Za-z0-9_-]+$/u);
 const tokenHeaders = { Authorization: 'Bearer ' + issued.json.access_token };
-assert.equal((await call('/mcp', { headers: tokenHeaders })).status, 501);
+assert.equal((await probeMcp(tokenHeaders)).status, 200);
 const rotated = await call('/oauth/token', { method: 'POST', form: true, body: {
   grant_type: 'refresh_token', client_id: clientId, refresh_token: issued.json.refresh_token,
 } });
@@ -122,5 +131,5 @@ assert.equal(own.text.includes(issued.json.refresh_token), false);
 const revoke = await call('/api/v1/me/connections/' + grant.id, { method: 'DELETE', browser: true,
   headers: { 'X-CSRF-Token': login.json.csrfToken } });
 assert.equal(revoke.status, 204);
-assert.equal((await call('/mcp', { headers: tokenHeaders })).status, 401);
+assert.equal((await probeMcp(tokenHeaders)).status, 401);
 assert.equal((await call('/api/v1/session', { browser: true })).status, 200);
