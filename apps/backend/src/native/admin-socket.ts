@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { PLANNER_VERSION } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { accountErrors, AccountActionError } from '../application/auth/account-policy.js';
+import { WorkspaceReadOnly } from '../application/migration/cutover.js';
 import type { AccountCredentials } from '../application/auth/account-credentials.js';
 import { backupCreateEndpoint } from './backup-state.js';
 import type { RuntimeAccess } from './runtime-access.js';
@@ -48,6 +49,8 @@ export async function startAdminSocket(
       if (error instanceof AccountActionError) {
         const [status, code, message] = accountErrors[error.kind];
         reply.writeHead(status).end(JSON.stringify({ code, message }));
+      } else if (error instanceof WorkspaceReadOnly) {
+        reply.writeHead(error.statusCode).end(JSON.stringify({ code: error.code, message: error.message }));
       } else {
         reply.writeHead(503).end(JSON.stringify({ code: 'UNAVAILABLE', message: 'Planner is unavailable.' }));
       }

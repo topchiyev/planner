@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { connectVerifiedNativeMongo } from '/opt/planner/current/apps/backend/dist/native/mongo-readiness.js';
 import { acquireNativeWriter } from '/opt/planner/current/apps/backend/dist/native/writer.js';
 import { legacyPublicId } from '/opt/planner/current/apps/backend/dist/storage/identity.js';
-import { createPasswordHasher } from '/opt/planner/current/apps/backend/dist/application/auth/password.js';
 import { CommandGate } from '/opt/planner/current/apps/backend/dist/application/command-gate/gate.js';
 import { CommandJournal } from '/opt/planner/current/apps/backend/dist/application/command-journal/journal.js';
 import { resolveBrowserWorkspace } from '/opt/planner/current/apps/backend/dist/application/workspace/authorization.js';
@@ -119,15 +118,6 @@ async function qualify() {
   const id = (table, source) => legacyPublicId(run.source.instanceId, table, source);
   const ownerId = id('user_account', '102');
   const secondPassword = 'Synthetic retained Planner credential';
-  const seed = acquireNativeWriter();
-  try {
-    // The guest has two synthetic users to check ordinary ACL and media reads after cutover.
-    const passwordVerifier = await createPasswordHasher().encode(secondPassword);
-    const updated = await db.collection('users').updateOne({ generationId, id: ownerId, requiresMfaEnrollment: false }, {
-      $set: { localAuth: { passwordVerifier, credentialsVersion: 2, mfa: 'none' } }, $inc: { revision: 1 },
-    }, { writeConcern: { w: 1, j: true } });
-    assert.equal(updated.matchedCount, 1);
-  } finally { seed.release(); }
   app('start');
   await ready(503);
   refuses('approval-invalid', 'activate', '--run', runId, '--expect-manifest', '0'.repeat(64));
@@ -137,8 +127,21 @@ async function qualify() {
   assert.equal(operator('status', '--run', runId).state, 'activeReadOnly');
   await ready(200);
   const admin = await signIn('iris@planner-fixture.invalid', '  Owned äccount 🗝️ pass & %  ', (await readFile(codePath, 'utf8')).trim());
-  const owner = await signIn('rowan@planner-fixture.invalid', secondPassword);
   assert.equal(admin.actor, id('user_account', '101'));
+  const ownerAccount = await db.collection('users').findOne({ generationId, id: ownerId });
+  const accountsPath = `/api/v1/admin/accounts/${ownerId}`;
+  for (const change of [{ action: 'role', role: 'boardUser' }, { action: 'availability', disabled: true }]) {
+    const denied = await api(accountsPath, { method: 'PATCH', session: admin, body: { ...change, revision: ownerAccount.revision } });
+    assert.equal(denied.status, 409);
+    assert.equal(denied.json.error.code, 'WORKSPACE_READ_ONLY');
+  }
+  const requested = await api(`${accountsPath}/recovery`, { method: 'POST', session: admin, body: { revision: ownerAccount.revision } });
+  assert.equal(requested.status, 202);
+  const approved = JSON.parse(execFileSync('/usr/bin/plannerctl', ['accounts', 'confirm', requested.json.id, '--yes', '--json'], { encoding: 'utf8' }));
+  const recovered = await api('/api/v1/recovery/consume', { method: 'POST', body: { grant: approved.recovery.grant, password: secondPassword } });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.json.status, 'confirmed');
+  const owner = await signIn('rowan@planner-fixture.invalid', secondPassword);
   assert.equal(owner.actor, ownerId);
   const privateBoard = `/api/v1/boards/${id('board', '302')}`;
   assert.equal((await api(privateBoard, { session: admin })).status, 404);
@@ -208,8 +211,16 @@ async function qualify() {
     assert.equal(await db.collection('commands').countDocuments({ generationId, idempotencyKey: key, status: 'committed' }), 1);
     assert.equal(await db.collection('auditEntries').countDocuments({ generationId, commandId: stored.id }), 1);
     assert.equal(await db.collection('events').countDocuments({ generationId, commandId: stored.id }), 1);
+    const member = await db.collection('users').findOne({ generationId, id: id('user_account', '103') });
+    const request = await api(`/api/v1/admin/accounts/${member.id}`, { method: 'PATCH', session: admin,
+      body: { action: 'availability', disabled: true, revision: member.revision } });
+    assert.equal(request.status, 202);
+    const approved = JSON.parse(execFileSync('/usr/bin/plannerctl', ['accounts', 'confirm', request.json.id, '--yes', '--json'], { encoding: 'utf8' }));
+    assert.equal(approved.outcome, 'applied');
+    assert.ok((await db.collection('users').findOne({ _id: member._id })).disabledAt instanceof Date);
+    assert.equal(await db.collection('commands').countDocuments({ generationId, operationId: 'account.access-approval', status: 'committed' }), 1);
     refuses('rollback-fenced', 'rollback', '--expect-generation', generationId);
-    console.log('Native post-fence rollback refusal and exact authenticated journal replay passed.');
+    console.log('Native post-fence rollback refusal, authenticated replay, and guarded account approval passed.');
   }
 }
 

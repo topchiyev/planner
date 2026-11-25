@@ -176,7 +176,7 @@ sudo plannerctl migration status --run "$run_id" --format json
 
 Append `--approve-missing-assets /root/planka-capture/missing-approved.json` to activation only if the independent report calls for approval and the operator has accepted every listed missing original. Exact activation retries use the same manifest digest and, when applicable, the same canonical approval. Status exposes the selected run, active generation, report digest, cutover state and whether a first write fenced rollback.
 
-While status reports `activeReadOnly`, sign in as the recovered administrator and representative workspace members. Check access to permitted boards and private media, and confirm a user outside the scope cannot read them. Workspace edits and changes to inbox preferences, inbox read state, consent or files are rejected. Login, necessary MFA, logout, authorized reads and passive event streams remain available. Record a protected Planner backup using `plannerctl backup create --json` and retain its exact backup ID and manifest hash before enabling writes.
+While status reports `activeReadOnly`, sign in as the recovered administrator and representative workspace members. Check access to permitted boards and private media, and confirm a user outside the scope cannot read them. Workspace edits, account roles or availability, inbox preferences, inbox read state, consent and file changes are paused. Login, password recovery, necessary MFA, logout, authorized reads and passive event streams remain available. Record a protected Planner backup using `plannerctl backup create --json` and retain its exact backup ID and manifest hash before enabling writes.
 
 ```sh
 sudo plannerctl migration enable-writes --run "$run_id" --format json

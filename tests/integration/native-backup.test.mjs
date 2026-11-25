@@ -370,6 +370,11 @@ test('a prior active route requires its exact retained backup and a matching liv
           await assert.rejects(activate({ ...request, priorBackup: undefined }), { fault: 'activation-conflict' });
           await assert.rejects(activate({ ...request, priorBackup: { ...request.priorBackup,
             receipt: { ...request.priorBackup.receipt, backupId: randomUUID() } } }), { fault: 'activation-conflict' });
+          const changedSetup = { ...setup, enrollmentGenerationId: priorGeneration };
+          const installations = db.collection('installation');
+          await installations.updateOne({ _id: 'installation' }, { $set: { setup: changedSetup } });
+          await assert.rejects(activate({ ...request, prior: { generationId: priorGeneration, setup: changedSetup } }), { fault: 'activation-conflict' });
+          await installations.updateOne({ _id: 'installation' }, { $set: { setup } });
           const modified = await f.insert('labels', randomUUID(), { boardId: ids.privateBoard, name: 'Write after backup' });
           await assert.rejects(activate(), { fault: 'activation-conflict' });
           assert.equal((await readInstallation(db, installationId)).activeGenerationId, priorGeneration);

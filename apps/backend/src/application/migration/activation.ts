@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { migrationDigestSchema } from '@planner/contracts';
 import { generationIdSchema, publicIdSchema, revisionSchema } from '@planner/contracts/storage';
-import type { Db } from 'mongodb';
+import { BSON, type Db } from 'mongodb';
 import { z } from 'zod';
 import { readInstallation, requireCurrentSchema, type InstallationDocument } from '../../storage/schema.js';
 import { workspaceKey } from '../../storage/identity.js';
@@ -53,8 +53,12 @@ async function rollbackPoint(db: Db, installation: InstallationDocument, generat
     const verified = await inspectBackup(backup.path, backup.owner, receipt.data.manifestSha256);
     try {
       const { manifest } = verified.archive;
+      const archived = BSON.deserialize(BSON.serialize(verified.source));
       if (manifest.backupId !== receipt.data.backupId || manifest.installationId !== installation.installationId
-        || manifest.activeGenerationId !== generationId || verified.source.mfaKeyDigest !== installation.mfaKeyDigest) throw activationFailure();
+        || manifest.activeGenerationId !== generationId || manifest.schemaVersion !== installation.schemaVersion
+        || archived.mfaKeyDigest !== installation.mfaKeyDigest || !isDeepStrictEqual(archived.setup, installation.setup)
+        || !isDeepStrictEqual(archived.migrationActivation, installation.migrationActivation)
+        || !isDeepStrictEqual(archived.restoration, installation.restoration)) throw activationFailure();
       // A backup may predate staging, but its prior active generation must still match exactly.
       for (const part of manifest.collections) {
         if (part.name === 'installation') continue;

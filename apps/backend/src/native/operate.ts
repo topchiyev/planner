@@ -500,6 +500,9 @@ async function handleAccountApproval(operation: 'inspect' | 'confirm', id: strin
           if (body.length > 4096) throw new NativeMongoError('The Planner operator response is invalid.');
         }
         if (response.statusCode !== 200) {
+          if (response.statusCode === 409 && JSON.parse(body).code === 'WORKSPACE_READ_ONLY') {
+            throw new NativeMongoError('Workspace writes are paused during migration cutover.');
+          }
           throw new NativeMongoError('The account approval is unavailable. Check its expiration, actor and target.');
         }
         return JSON.parse(body);

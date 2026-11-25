@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import test from 'node:test';
 import { AccountActionError } from '../../apps/backend/dist/application/auth/account-policy.js';
 import { tokenDigest } from '../../apps/backend/dist/application/auth/credentials.js';
+import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
+import { enableMigrationWrites } from '../../apps/backend/dist/application/migration/cutover.js';
 import { GateUnavailableError } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { openActiveWorkspace } from '../../apps/backend/dist/storage/scoped.js';
 import { accountFixture, callSocket, changedPassword, password, proxyHeaders } from '../support/account-fixture.mjs';
+import { publishSyntheticMigration } from '../support/migration-activation-fixture.mjs';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
 import { assertOwnedMongoEnvironment } from '../support/mongo-environment.ts';
 
@@ -318,5 +322,62 @@ test('reset replay fails closed before completing a revoked grant', { timeout: 7
       assert.equal((await f.sessions().login({ identifier: target.email, password: changedPassword })).status, 'authenticated');
       assert.equal(await db.collection('auditEntries').countDocuments({ ...f.scope, action: 'account.reset-consumed' }), 1);
     } finally { await f.close(); }
+  });
+});
+
+test('a read-only import refuses account-access changes and the first approval fences before private replay', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    const { db, generationId, installationId } = f;
+    const browser = await f.startBrowser(origin);
+    const operator = await f.startOperator();
+    try {
+      const admin = await f.seed('admin@example.test', { role: 'admin' });
+      const roleTarget = await f.seed('role@example.test');
+      const availabilityTarget = await f.seed('availability@example.test');
+      const recoveryTarget = await f.seed('recover@example.test', { password: false });
+      const me = await f.sessions().login({ identifier: admin.email, password });
+      const service = f.accountServices();
+      const request = (target, action) => service.requestApproval(me.token, admin.id, target.id, 1, action);
+      const cases = [
+        [roleTarget, { action: 'role', role: 'projectOwner' }],
+        [availabilityTarget, { action: 'availability', disabled: true }],
+      ];
+      const prior = await Promise.all(cases.map(([target, action]) => request(target, action)));
+      const runId = await publishSyntheticMigration(db, { generationId, installationId, actorId: admin.id });
+      for (const [index, [target, action]] of cases.entries()) {
+        const denied = await callSocket(browser.path, `${url}/${target.id}`, { method: 'PATCH', body: { ...action, revision: 1 },
+          headers: { ...proxyHeaders(origin), Origin: origin, Cookie: `__Host-planner-session=${me.token}`, 'X-CSRF-Token': me.session.csrfToken },
+        });
+        assert.equal(denied.status, 409);
+        assert.equal(denied.data.error.code, 'WORKSPACE_READ_ONLY');
+        const confirm = await callSocket(operator.path, `/accounts/approvals/${prior[index].id}/confirm`, { method: 'POST' });
+        assert.equal(confirm.status, 409);
+        assert.equal(confirm.data.code, 'WORKSPACE_READ_ONLY');
+      }
+      const passwordRecovery = await request(recoveryTarget, { action: 'recovery' });
+      assert.ok((await service.confirmApproval(passwordRecovery.id)).recovery.grant);
+      assert.equal(await db.collection('commands').countDocuments({ generationId }), 0);
+      assert.equal((await db.collection('users').findOne({ _id: roleTarget._id })).role, roleTarget.role);
+      assert.equal((await db.collection('users').findOne({ _id: availabilityTarget._id })).disabledAt, null);
+      await f.close();
+      const owner = { uid: process.getuid(), gid: process.getgid() };
+      const lease = acquireWriterDirectory(join(f.directory, 'writer'), owner, owner);
+      try { await enableMigrationWrites(db, lease, installationId, runId); } finally { lease.release(); }
+      await f.reboot();
+
+      const interrupted = f.accountServices(() => { throw new Error('test interruption'); });
+      await assert.rejects(interrupted.confirmApproval(prior[0].id), /test interruption/u);
+      const command = await db.collection('commands').findOne({ generationId, operationId: 'account.access-approval' });
+      assert.equal(command.status, 'committed');
+      assert.equal((await db.collection('installation').findOne()).migrationActivation.fence.commandId, command.id);
+      assert.equal((await db.collection('users').findOne({ _id: roleTarget._id })).accountChange.kind, 'role');
+      await f.reboot();
+      assert.equal((await db.collection('users').findOne({ _id: roleTarget._id })).role, 'projectOwner');
+      assert.equal(await db.collection('auditEntries').countDocuments({ generationId, action: 'account.role' }), 1);
+      assert.equal((await f.accountServices().confirmApproval(prior[1].id)).outcome, 'applied');
+      assert.ok((await db.collection('users').findOne({ _id: availabilityTarget._id })).disabledAt instanceof Date);
+      assert.equal(await db.collection('commands').countDocuments({ generationId, operationId: 'account.access-approval', status: 'committed' }), 2);
+    } finally { await operator.close(); await browser.close(); await f.close(); }
   });
 });

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { chmod, mkdir } from 'node:fs/promises';
@@ -14,12 +14,13 @@ import { createWorkspaceAccess } from '../../apps/backend/dist/application/comma
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { canonicalJournalData, commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
 import { enableMigrationWrites, inspectMigrationCutover, rollbackMigration, WorkspaceReadOnly } from '../../apps/backend/dist/application/migration/cutover.js';
-import { completedMigrationTable, importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
+import { completedMigrationTable, importRunKey } from '../../apps/backend/dist/application/migration/checkpoint.js';
 import { maximumBatchBytes, packBatches } from '../../apps/backend/dist/application/command-journal/records.js';
 import { keepCommandRecovery } from '../../apps/backend/dist/native/command-recovery.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace } from '../../apps/backend/dist/storage/scoped.js';
+import { publishSyntheticMigration } from '../support/migration-activation-fixture.mjs';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
 import { assertOwnedMongoEnvironment } from '../support/mongo-environment.ts';
 import {
@@ -426,39 +427,13 @@ test('batch bounds account for BSON bytes and journal data rejects sensitive fie
   assert.throws(() => packBatches(command, [effect(0, { refresh_token: 'secret' })]), /prohibited/u);
 });
 
-async function publishSyntheticMigration(db) {
-  const runId = randomUUID();
-  const fingerprintSha256 = 'a'.repeat(64);
-  const manifestSha256 = 'b'.repeat(64);
-  const reportSha256 = 'c'.repeat(64);
-  const mfaKeyDigest = 'd'.repeat(64);
-  const cursors = migrationCursors(randomBytes(32));
-  const position = { pass: 'media', table: 'user_account', lastSourceId: '101' };
-  const checkpoint = { ...position, token: cursors.seal({ runId, generationId, fingerprint: fingerprintSha256, ...position }, '101') };
-  const current = new Date(Date.now() - 10);
-  const prior = { generationId: null, setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: generationId } };
-  const run = { ...importRunKey({ runId, generationId, installationId }), state: 'verified',
-    fingerprint: { sha256: fingerprintSha256 }, manifestSha256, createdAt: current, updatedAt: current, checkpoint,
-    source: { instanceId: randomUUID(), release: '2.3.1', edition: 'community' }, verification: { reportSha256, detailSha256: '0'.repeat(64) } };
-  run.stageCompletion = cursors.sealCompletion(run);
-  const binding = { verification: { runId, generationId, manifestSha256, fingerprintSha256, reportSha256, missingOriginals: 0, approvalSha256: null },
-    prior, rollback: { kind: 'cold', manifestSha256, fingerprintSha256 },
-    administrator: { userId: actorId, credentialsVersion: 1, revision: 1, factorId: null },
-    mfaKeyDigest, stageCompletion: run.stageCompletion, schemaVersion: 1 };
-  await db.collection('importRuns').insertOne({ ...run, activation: binding });
-  await db.collection('installation').updateOne({ _id: 'installation' }, { $set: {
-    setup: { mode: 'import', pendingAction: 'complete', enrollmentGenerationId: generationId }, mfaKeyDigest,
-    migrationActivation: { state: 'activeReadOnly', activatedAt: current, binding },
-  } });
-  return runId;
-}
 
 for (const [checkpoint, mayRollback] of [['batchStored', true], ['firstWriteFenced', false]]) {
   test(`migration cutover ${mayRollback ? 'permits rollback before' : 'refuses rollback after'} the durable first-write fence`,
     { timeout: 55_000 }, async () => withFixtureMongo(async (fixture) => {
       const { db } = fixture;
       const ownerDirectory = await seed(fixture);
-      const runId = await publishSyntheticMigration(db);
+      const runId = await publishSyntheticMigration(db, { installationId, generationId, actorId });
       const readonly = open(db, ownerDirectory);
       try {
         await readonly.journal.recover();

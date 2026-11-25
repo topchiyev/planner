@@ -8,8 +8,10 @@ import type { Db } from 'mongodb';
 import { applyCommandEffect } from '../../storage/command-effects.js';
 import { isStoredDate, newPublicId, workspaceKey } from '../../storage/identity.js';
 import type { CommandGate } from '../command-gate/gate.js';
-import { commandUuid, CommandRecoveryError } from '../command-journal/operation.js';
-import { assertChanged, durable } from '../command-journal/records.js';
+import { CommandJournal } from '../command-journal/journal.js';
+import { canonicalJournalData, commandUuid, CommandRecoveryError, journalDigest } from '../command-journal/operation.js';
+import { assertChanged, checkCommand, commands, durable } from '../command-journal/records.js';
+import { assertWorkspaceWritable } from '../migration/cutover.js';
 import { accountById, accountEpoch, accountLookup, AccountActionError, nextAccountRevision, protectLastAdmin, requireSiteAdmin, usableAdmin } from './account-policy.js';
 import { accounts, type AccountRecord } from './accounts.js';
 import { newToken, tokenDigest } from './credentials.js';
@@ -19,6 +21,7 @@ import { getFactor } from './mfa-account.js';
 import { activeAccountGeneration, loadCurrentBrowserSession } from './sessions.js';
 
 const approvalLifetimeMs = 10 * 60_000;
+const accessApprovalOperation = 'account.access-approval';
 
 interface Approval extends ProtectedGrant {
   kind: 'account-approval';
@@ -118,12 +121,31 @@ async function verifyAppliedApproval(db: Db, installationId: string, account: Ac
   return approval;
 }
 
+function accessApprovalExpectation(approval: Approval) {
+  const { actorEpoch, targetEpoch, targetRevision, userId, change } = approval;
+  return { actorEpoch, targetEpoch, targetRevision, userId, change };
+}
+
+async function assertAccountAccessApproval(db: Db, installationId: string, approval: Approval) {
+  const { generationId, actorId, id } = approval;
+  if (!await assertWorkspaceWritable(db, installationId, generationId)) return;
+  const commandId = commandUuid(generationId, ['command', actorId, accessApprovalOperation, id]);
+  const command = await commands(db).findOne({ _id: workspaceKey(generationId, commandId), generationId,
+    id: commandId, actorId, operationId: accessApprovalOperation, idempotencyKey: id, status: 'committed',
+  }, { promoteLongs: false });
+  if (!command || command.requestHash !== journalDigest(canonicalJournalData(accessApprovalExpectation(approval)))) {
+    throw new CommandRecoveryError('The account access change has no committed workspace approval.');
+  }
+  checkCommand(command);
+}
+
 async function finishAccountChange(db: Db, installationId: string, account: AccountRecord) {
   const change = inspectChange(account);
   const { generationId, id: userId } = account;
   const scope = { generationId, installationId };
   const time = change.appliedAt;
   const approval = change.approval && await verifyAppliedApproval(db, installationId, account, change);
+  if (approval && approval.change.action !== 'recovery') await assertAccountAccessApproval(db, installationId, approval);
 
   if (change.recoveryId) {
     const grant = await recoveryGrants(db).findOne({
@@ -253,6 +275,7 @@ export function createAccountCredentials(
       return gate.runCommand(async () => {
         const { stored: actor, generationId, time } = await current(token, actorId);
         requireSiteAdmin(actor);
+        if (change.action !== 'recovery') await assertWorkspaceWritable(database, installationId, generationId);
         const target = await accountById(database, generationId, targetId);
         if (target.revision !== revision) throw new AccountActionError('revision');
         nextAccountRevision(revision);
@@ -274,10 +297,37 @@ export function createAccountCredentials(
     inspectApproval(id: string) {
       return gate.readSnapshot(async () => describeApproval((await pendingApproval(id)).approval));
     },
-    confirmApproval(id: string) {
+    async confirmApproval(id: string) {
+      const expected = await gate.readSnapshot(async () => {
+        const { approval } = await pendingApproval(id);
+        if (approval.change.action === 'recovery' || !await assertWorkspaceWritable(database, installationId, approval.generationId)) {
+          return null;
+        }
+        return approval;
+      });
+      if (expected) {
+        const expectation = accessApprovalExpectation(expected);
+        const authorize = async (context: { actorId: string; generationId: string }) => {
+          const { approval } = await pendingApproval(id);
+          if (context.generationId !== approval.generationId || context.actorId !== approval.actorId
+            || !isDeepStrictEqual(accessApprovalExpectation(approval), expectation)) throw new AccountActionError('approval');
+        };
+        // Reserve the exact access change before the protected transition writes any credential material.
+        const journal = new CommandJournal(gate, database, installationId, { operations: {
+          [accessApprovalOperation]: {
+            normalize: () => expectation,
+            authorize,
+            plan: () => ({ effects: [], result: null, audit: {
+              resourceType: 'account', resourceId: expected.userId, action: accessApprovalOperation, origin: 'operator',
+            } }),
+          },
+        } });
+        await journal.execute({ operationId: accessApprovalOperation, actorId: expected.actorId, idempotencyKey: id, input: null });
+      }
       return gate.runCommand(async () => {
         const { approval, target, time } = await pendingApproval(id);
         const { change } = approval;
+        if (change.action !== 'recovery') await assertAccountAccessApproval(database, installationId, approval);
         const claim = { id, actorEpoch: approval.actorEpoch, targetEpoch: approval.targetEpoch, change };
         const identity = { id, approval: claim, actorId: approval.actorId, origin: 'operator', appliedAt: time } as const;
         const result = { outcome: 'applied', approval: describeApproval(approval) } as const;
