@@ -6,6 +6,8 @@ import { csrfToken, readSessionCookie } from '../../apps/backend/dist/applicatio
 import { createPlannerMcpHandler } from '../../apps/backend/dist/application/mcp/http.js';
 import { mcpMutationCatalog, mcpMutationWireSchema } from '../../apps/backend/dist/application/mcp/mutation-catalog.js';
 import { executeMcpMutation, mcpMutationError } from '../../apps/backend/dist/application/mcp/mutations.js';
+import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
+import { createRelationshipJournalOperations } from '../../apps/backend/dist/application/workspace/relationship-commands.js';
 import { createMediaService } from '../../apps/backend/dist/application/media/service.js';
 import { workspaceCollections } from '../../apps/backend/dist/storage/catalog.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
@@ -275,4 +277,73 @@ test('the 64 write descriptors run once through MCP and replay the same authoriz
       }
       assert.deepEqual(failures.map(({ message }) => message), []);
     } finally { await deny.close(); await f.close(); }
+  }));
+
+
+test('durable mutation recovery retains the first client and current authorization conceals foreign targets',
+  { timeout: 45000 }, async () => withFixtureMongo(async (mongo) => {
+    const f = await makeWorkspaceAccessFixture(mongo);
+    const cookie = cookieOf(await f.login(actor));
+    const editorCookie = cookieOf(await f.login(ids.firstEditor));
+    const scopeFor = (cookie) => () => resolveBrowserWorkspace(f.db, f.installationId, readSessionCookie(cookie), f.now());
+    const resolution = scopeFor(cookie);
+    const actorFor = (userId, authCookie) => ({
+      database: f.db, installationId: f.installationId, gate: f.gate,
+      actorId: userId, resolve: scopeFor(authCookie), attribution: { origin: 'mcp', clientId: 'claude-code' },
+    });
+    try {
+      await seed(f);
+      for (const [checkpoint, revision, client] of [['building', 1, 'codex'], ['prepared', 2, 'claude-connector']]) {
+        const input = { id: board, expectedRevision: revision, name: 'Recovered ' + checkpoint };
+        const idempotencyKey = randomUUID();
+        const cut = new Error('Synthetic interruption after ' + checkpoint);
+        const first = new CommandJournal(f.gate, f.db, f.installationId, {
+          operations: createRelationshipJournalOperations(f.db, resolution),
+          attribution: { origin: 'mcp', clientId: client },
+          checkpoint: (step) => { if (step === checkpoint) throw cut; },
+        });
+        await assert.rejects(first.execute({ actorId: actor, operationId: 'boards.update', idempotencyKey, input }), cut);
+        assert.equal(f.gate.ready, false);
+        await new CommandJournal(f.gate, f.db, f.installationId).recover();
+        const receipt = await executeMcpMutation(actorFor(actor, cookie), 'board_update', { ...input, idempotencyKey });
+        assert.equal(receipt.structuredContent.data.board.name, input.name);
+        const command = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey });
+        const audits = await f.db.collection('auditEntries').find({ ...f.scope, commandId: command.id }).toArray();
+        assert.equal(audits.length, 1);
+        assert.deepEqual([audits[0].actorId, audits[0].origin, audits[0].clientId], [actor, 'mcp', client]);
+      }
+
+      const blocked = async (name, args) => JSON.parse((await executeMcpMutation(actorFor(ids.firstEditor, editorCookie), name,
+        { ...args, idempotencyKey: randomUUID() }).catch(mcpMutationError)).content[0].text);
+      const concealed = { ...cases.card_move, toListId: ids.hiddenActiveList, destinationBoardId: ids.hiddenBoard };
+      const missing = { ...concealed, toListId: randomUUID(), destinationBoardId: randomUUID() };
+      assert.deepEqual(await blocked('card_move', concealed), await blocked('card_move', missing));
+      const foreign = await blocked('notification_update', cases.notification_update);
+      assert.equal(foreign.code, 'NOT_FOUND');
+      assert.deepEqual(foreign, await blocked('notification_update', { ...cases.notification_update, id: randomUUID() }));
+      assert.equal((await f.db.collection('notifications').findOne({ ...f.scope, id: notice })).readAt, null);
+
+      // A large imported field group is valid for REST and can exceed the MCP result limit.
+      for (let i = 0; i < 350; i += 1) {
+        await f.insert('fieldDefinitions', fixtureId(6000 + i), {
+          fieldGroupId: group, name: 'Field ' + i + ' ' + 'x'.repeat(60), rank: String((i + 1) * 1024),
+        });
+      }
+      const oversized = { id: group, expectedRevision: 1, name: 'Large field group' };
+      const rejectedKey = randomUUID();
+      const refused = await executeMcpMutation(actorFor(actor, cookie), 'field_update_group',
+        { ...oversized, idempotencyKey: rejectedKey }).catch(mcpMutationError);
+      assert.equal(JSON.parse(refused.content[0].text).code, 'RESULT_TOO_LARGE');
+      assert.equal((await f.db.collection('fieldGroups').findOne({ ...f.scope, id: group })).revision, 1);
+      const entry = mcpMutationCatalog.find(({ name }) => name === 'field_update_group');
+      const committedKey = randomUUID();
+      const { path, options } = restTarget(entry, oversized, committedKey, cookie);
+      const web = await f.call(path, cookie, options);
+      assert.equal(web.status, 200);
+      assert.equal(web.data.data.group.definitions.length, 350);
+      const replay = await executeMcpMutation(actorFor(actor, cookie), 'field_update_group',
+        { ...oversized, idempotencyKey: committedKey });
+      assert.deepEqual(replay.structuredContent, { data: { acknowledged: true, resultOmitted: true } });
+      assert.equal((await f.db.collection('fieldGroups').findOne({ ...f.scope, id: group })).revision, 2);
+    } finally { await f.close(); }
   }));
