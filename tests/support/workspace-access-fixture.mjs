@@ -27,7 +27,7 @@ export const origin = 'https://planner.example.test';
 export const ids = workspaceIds;
 export const fixtureId = (sequence) => `65160d3b-4e42-4023-880e-${sequence.toString(16).padStart(12, '0')}`;
 
-export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia, configureMcp, clock, heartbeatMs, browserOrigin } = {}) {
+export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmission, configureMedia, configureMcp, mcpBoardSubscriptions, clock, heartbeatMs, browserOrigin } = {}) {
   const publicOrigin = browserOrigin ?? origin;
   const installationId = randomUUID();
   const generationId = ids.generation;
@@ -103,7 +103,7 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   const cursorKey = createSecretKey(randomBytes(32));
   const cursors = createBoardEventCursors(cursorKey);
   const reader = createWorkspaceReader(db, installationId, gate, cursors, now);
-  const streams = createBoardEventStreams(async () => db, installationId, gate, cursors, { now, heartbeatMs });
+  const streams = createBoardEventStreams(async () => db, installationId, gate, cursors, { now, heartbeatMs, mcp: mcpBoardSubscriptions });
   const media = await configureMedia?.({ db, directory, installationId, generationId, gate, now });
   const manage = mfaKey && createMfaManagement(db, installationId, gate, mfaKey, hasher, now);
   const mcp = await configureMcp?.({ db, installationId, gate, mfaKey, cursors, origin: publicOrigin });
@@ -149,6 +149,7 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
       return call('/api/v1/session/login', null, { method: 'POST', headers: { Origin: publicOrigin },
         body: { identifier: account.email, password } });
     },
+    closeMcp: app.closeMcp,
     close: async () => { streams.stop(); await closeProxy(); await app.close(); await gate.closeAndDrain(); },
   };
 }

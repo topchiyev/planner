@@ -31,6 +31,7 @@ export interface McpBoardSubscription {
   readonly finished: Promise<void>;
   attach(heartbeat: () => boolean): void;
   send(frame: 'ack' | 'update' | 'final', write: () => boolean, uri?: string): Promise<boolean>;
+  quiesce(): void;
   release(graceful?: boolean): void;
 }
 
@@ -48,7 +49,8 @@ type Subscriber = {
   writeHeartbeat?: () => boolean;
   acknowledged: boolean;
   inFlight?: string;
-  writing: boolean;
+  writing?: Promise<boolean>;
+  finishing: boolean;
   closed: boolean;
 };
 
@@ -88,11 +90,11 @@ export function createMcpBoardSubscriptions({ now = Date.now, heartbeatMs = defa
   }
 
   function schedule(subscriber: Subscriber) {
-    if (subscriber.closed || !subscriber.acknowledged || subscriber.writing || subscriber.inFlight || subscriber.pump || !subscriber.pending.size) return;
+    if (subscriber.closed || subscriber.finishing || !subscriber.acknowledged || subscriber.writing || subscriber.inFlight || subscriber.pump || !subscriber.pending.size) return;
     subscriber.pump = setImmediate(() => {
       subscriber.pump = undefined;
       const board = subscriber.pending.values().next().value;
-      if (subscriber.closed || subscriber.writing || !board) return;
+      if (subscriber.closed || subscriber.finishing || subscriber.writing || !board) return;
       subscriber.pending.delete(board);
       const uri = subscriber.inFlight = resourceUri('boards', board);
       try { subscriber.bus.publish({ kind: 'resource_updated', uri }); }
@@ -101,21 +103,30 @@ export function createMcpBoardSubscriptions({ now = Date.now, heartbeatMs = defa
     subscriber.pump.unref();
   }
 
-  async function writeAuthorized(subscriber: Subscriber, write: () => boolean) {
-    if (subscriber.closed || subscriber.writing) return false;
-    subscriber.writing = true;
-    try {
-      const result = await subscriber.access.read(async (database, proof) => {
-        await requireBoards(database, proof, subscriber.boards);
-        if (subscriber.closed || stopped || !proof.valid()) return false;
-        // The socket handoff is synchronous. A backpressured sink is dropped without waiting under the lease.
-        try { return write(); } catch { return false; }
-      });
-      if (result === true) return true;
-    } catch { /* Loss of access or readiness closes this stream. */ }
-    finally { subscriber.writing = false; }
-    disconnect(subscriber);
-    return false;
+  function writeAuthorized(subscriber: Subscriber, write: () => boolean) {
+    if (subscriber.closed || subscriber.writing) return Promise.resolve(false);
+    const delivery = (async () => {
+      try {
+        const result = await subscriber.access.read(async (database, proof) => {
+          await requireBoards(database, proof, subscriber.boards);
+          if (subscriber.closed || stopped || !proof.valid()) return false;
+          // The socket handoff is synchronous. A backpressured sink is dropped without waiting under the lease.
+          try { return write(); } catch { return false; }
+        });
+        if (result === true) return true;
+      } catch { /* Loss of access or readiness closes this stream. */ }
+      disconnect(subscriber);
+      return false;
+    })().finally(() => { subscriber.writing = undefined; });
+    subscriber.writing = delivery;
+    return delivery;
+  }
+
+  function quiesce(subscriber: Subscriber) {
+    subscriber.finishing = true;
+    clearInterval(subscriber.heartbeat);
+    clearImmediate(subscriber.pump);
+    subscriber.pending.clear();
   }
 
   async function revalidate(database: Db, applies: (subscriber: Subscriber) => boolean) {
@@ -152,7 +163,7 @@ export function createMcpBoardSubscriptions({ now = Date.now, heartbeatMs = defa
       const subscriber: Subscriber = {
         identity: { generationId: actor.generationId, userId: actor.userId, grantId: actor.grantId },
         access, boards, bus, high: new Map(), pending: new Set(), abort: new AbortController(),
-        acknowledged: false, writing: false, closed: false,
+        acknowledged: false, finishing: false, closed: false,
       };
       subscribers.add(subscriber);
       const cancel = () => disconnect(subscriber);
@@ -191,6 +202,10 @@ export function createMcpBoardSubscriptions({ now = Date.now, heartbeatMs = defa
         finished,
         attach(heartbeat) { subscriber.writeHeartbeat = heartbeat; },
         async send(frame, write, uri) {
+          if (frame === 'final') {
+            quiesce(subscriber);
+            await subscriber.writing;
+          }
           const valid = frame === 'ack' ? !subscriber.acknowledged
             : subscriber.acknowledged && (frame === 'final' || (uri !== undefined && uri === subscriber.inFlight));
           if (!valid || !await writeAuthorized(subscriber, write)) {
@@ -199,17 +214,20 @@ export function createMcpBoardSubscriptions({ now = Date.now, heartbeatMs = defa
           }
           if (frame === 'ack') {
             subscriber.acknowledged = true;
-            subscriber.heartbeat = setInterval(() => {
-              const heartbeat = subscriber.writeHeartbeat;
-              if (!heartbeat || subscriber.closed || subscriber.writing || subscriber.inFlight || subscriber.pending.size) return;
-              void writeAuthorized(subscriber, heartbeat).finally(() => schedule(subscriber));
-            }, heartbeatMs);
-            subscriber.heartbeat.unref();
+            if (!subscriber.finishing) {
+              subscriber.heartbeat = setInterval(() => {
+                const heartbeat = subscriber.writeHeartbeat;
+                if (!heartbeat || subscriber.closed || subscriber.finishing || subscriber.writing || subscriber.inFlight || subscriber.pending.size) return;
+                void writeAuthorized(subscriber, heartbeat).finally(() => schedule(subscriber));
+              }, heartbeatMs);
+              subscriber.heartbeat.unref();
+            }
           }
           if (frame === 'update') subscriber.inFlight = undefined;
           if (frame !== 'final') schedule(subscriber);
           return true;
         },
+        quiesce: () => quiesce(subscriber),
         release,
       };
       return { kind: 'accepted', subscription } as const;
@@ -220,7 +238,7 @@ export function createMcpBoardSubscriptions({ now = Date.now, heartbeatMs = defa
       if (!parsed.success) return;
       const sequence = BigInt(parsed.data);
       for (const subscriber of subscribers) {
-        if (subscriber.identity.generationId !== signal.generationId) continue;
+        if (subscriber.finishing || subscriber.identity.generationId !== signal.generationId) continue;
         const high = subscriber.high.get(signal.boardId);
         if (high === undefined || sequence <= high) continue;
         subscriber.high.set(signal.boardId, sequence);

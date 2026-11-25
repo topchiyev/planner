@@ -1,12 +1,11 @@
 import { toWebRequest } from '@modelcontextprotocol/node';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { mcpBodyLimit, mcpError, type createPlannerMcpHandler } from '../application/mcp/http.js';
+import { maximumListenFrameBytes, mcpBodyLimit, mcpError, type createPlannerMcpHandler } from '../application/mcp/http.js';
 
-const maximumFrameBytes = 4 * 1024;
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 function frameOf(bytes: Uint8Array): { kind: 'ack' | 'update' | 'final'; uri?: string } | null {
-  if (bytes.byteLength > maximumFrameBytes) return null;
+  if (bytes.byteLength > maximumListenFrameBytes) return null;
   try {
     const [, data] = /^event: message\ndata: ([^\r\n]+)\n\n$/u.exec(decoder.decode(bytes)) ?? [];
     if (!data) return null;

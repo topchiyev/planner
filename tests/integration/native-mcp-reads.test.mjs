@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
-import { request } from 'node:https';
 import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { MongoServerError } from 'mongodb';
@@ -13,86 +11,11 @@ import { createNativeOAuthRuntime } from '../../apps/backend/dist/native/oauth-r
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { password } from '../support/account-fixture.mjs';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
+import { client, consentReader, httpsCall, legacy, modern, rpcCall, sdkHttpsFetch } from '../support/mcp-https-fixture.mjs';
 import { tlsBridge } from '../support/tls-bridge.mjs';
 import { cookieOf, fixtureId, ids, makeWorkspaceAccessFixture } from '../support/workspace-access-fixture.mjs';
 
-const modern = '2026-07-28';
-const legacy = '2025-11-25';
-const clientId = 'synthetic-mcp-reader';
-const redirect = 'https://reader.example.test/callback';
-const client = { client_id: clientId, client_name: 'Synthetic MCP reader', redirect_uris: [redirect] };
 const json = 'application/json';
-const form = 'application/x-www-form-urlencoded';
-
-function httpsCall({ origin, certificate }, path, { method = 'GET', body, type = json, cookies, headers } = {}) {
-  const data = body === undefined ? undefined : type === form ? new URLSearchParams(body).toString() : JSON.stringify(body);
-  return new Promise((resolve, reject) => {
-    const req = request(new URL(path, origin), { method, ca: certificate, headers: {
-      ...(data !== undefined && { 'Content-Type': type, 'Content-Length': Buffer.byteLength(data) }),
-      ...(cookies?.size && { Cookie: [...cookies].map(([key, value]) => key + '=' + value).join('; ') }),
-      ...headers,
-    } }, async (response) => {
-      try {
-        const parts = [];
-        for await (const chunk of response) parts.push(chunk);
-        const text = Buffer.concat(parts).toString('utf8');
-        for (const header of response.headers['set-cookie'] ?? []) {
-          const value = header.split(';')[0];
-          const position = value.indexOf('=');
-          if (position !== -1) cookies?.set(value.slice(0, position), value.slice(position + 1));
-        }
-        const contentType = response.headers['content-type'] ?? '';
-        const value = !text ? null : contentType.includes(json) ? JSON.parse(text) : contentType.includes('text/event-stream')
-          ? text.split('\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6))).at(-1) : null;
-        resolve({ status: response.statusCode, headers: response.headers, text, value });
-      } catch (error) { reject(error); }
-    });
-    req.setTimeout(8000, () => req.destroy(new Error('The local Planner HTTPS fixture did not respond.')));
-    req.once('error', reject).end(data);
-  });
-}
-
-function rpcCall(call, version, method, params = {}, token) {
-  const name = params.name ?? params.uri;
-  return call('/mcp', { method: 'POST', headers: {
-    Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': version,
-    ...(version === modern && { 'Mcp-Method': method, ...(name && { 'Mcp-Name': name }) }),
-    ...(token && { Authorization: 'Bearer ' + token }),
-  }, body: { jsonrpc: '2.0', id: 1, method, params: { ...params, ...(version === modern && { _meta: {
-    'io.modelcontextprotocol/protocolVersion': modern, 'io.modelcontextprotocol/clientCapabilities': {},
-  } }) } } });
-}
-
-async function consentReader(call, origin, cookies) {
-  const verifier = randomBytes(32).toString('base64url');
-  const resource = origin + '/mcp';
-  const request = await call('/oauth/authorize?' + new URLSearchParams({
-    response_type: 'code', client_id: clientId, redirect_uri: redirect, state: 'local-fixture',
-    scope: 'planner:read', resource, code_challenge_method: 'S256',
-    code_challenge: createHash('sha256').update(verifier).digest('base64url'),
-  }), { cookies });
-  assert.equal(request.status, 303, request.text);
-  const interaction = request.headers.location;
-  const formPage = await call(interaction, { cookies });
-  assert.equal(formPage.status, 200, formPage.text);
-  const csrf = /name="csrf" value="([A-Za-z0-9_-]+)"/u.exec(formPage.text)?.[1];
-  assert.ok(csrf);
-  const authorize = await call(interaction, {
-    method: 'POST', type: form, cookies, body: { csrf, decision: 'allow' }, headers: { Origin: origin },
-  });
-  assert.equal(authorize.status, 303, authorize.text);
-  const callback = await call(new URL(authorize.headers.location, origin).pathname, { cookies });
-  const result = new URL(callback.headers.location);
-  assert.equal(result.origin + result.pathname, redirect);
-  assert.equal(result.searchParams.get('state'), 'local-fixture');
-  const token = await call('/oauth/token', { method: 'POST', type: form, body: {
-    grant_type: 'authorization_code', client_id: clientId, code: result.searchParams.get('code'),
-    code_verifier: verifier, redirect_uri: redirect, resource,
-  } });
-  assert.equal(token.status, 200, token.text);
-  assert.equal(token.value.scope, 'planner:read');
-  return token.value.access_token;
-}
 
 function readValue(reply) {
   assert.equal(reply.status, 200, reply.text);
@@ -173,7 +96,7 @@ test('official modern and legacy MCP read catalogs match authorized REST DTOs ov
           challengeId: signin.value.challengeId, totpCode: totp.generate({ timestamp: time }),
         });
         assert.equal(proved.value.status, 'authenticated', proved.text);
-        fixtureActors[which] = { id, cookies, token: await consentReader(call, origin, cookies) };
+        fixtureActors[which] = { id, cookies, token: (await consentReader(call, origin, cookies)).access_token };
       }
 
       const label = fixtureId(500);
@@ -245,16 +168,7 @@ test('official modern and legacy MCP read catalogs match authorized REST DTOs ov
         });
         const transport = new StreamableHTTPClientTransport(new URL('/mcp', origin), {
           authProvider: { token: async () => owner.token },
-          async fetch(input, init) {
-            const outgoing = new Request(input, init);
-            const url = new URL(outgoing.url);
-            assert.equal(url.origin, origin);
-            const response = await call(url.pathname + url.search, {
-              method: outgoing.method, headers: Object.fromEntries(outgoing.headers),
-              ...(outgoing.body && { body: await outgoing.json() }),
-            });
-            return new Response(response.text || null, { status: response.status, headers: response.headers });
-          },
+          fetch: (input, init) => sdkHttpsFetch(tls, input, init),
         });
         try {
           await sdk.connect(transport, { timeout: 5000 });

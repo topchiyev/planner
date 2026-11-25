@@ -13,6 +13,9 @@ import { mcpMutationNamed } from './mutation-catalog.js';
 
 export const mcpPath = '/mcp';
 export const mcpBodyLimit = 64 * 1024;
+const maximumListenIdBytes = 4 * 1024;
+// The pinned SDK repeats the id in its final frame. The remainder is fixed metadata and at most 16 board URIs.
+export const maximumListenFrameBytes = 2 * maximumListenIdBytes + 4 * 1024;
 export const modernMcpVersion = '2026-07-28';
 export const legacyMcpVersion = '2025-11-25';
 
@@ -99,6 +102,7 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
       if (rpc.method === 'subscriptions/listen') {
         if (boardSubscriptions && admission.bus && era === 'modern') {
           if (requestInfo.headers.has('last-event-id')
+            || (typeof rpc.id === 'string' && Buffer.byteLength(JSON.stringify(rpc.id), 'utf8') > maximumListenIdBytes)
             || Object.keys(rpc.params ?? {}).some((key) => key !== '_meta' && key !== 'notifications')) {
             return refuse(admission, mcpError(400, 'Invalid board subscription.', INVALID_PARAMS, rpc.id));
           }
@@ -204,8 +208,13 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
     close: () => closing ??= (async () => {
       await sdk.close();
       await Promise.all([...live].map(async ([subscription, end]) => {
+        subscription.quiesce();
         await end();
-        const completed = await Promise.race([subscription.finished.then(() => true), delay(2000, false, { ref: false })]);
+        const timeout = new AbortController();
+        const completed = await Promise.race([
+          subscription.finished.then(() => true),
+          delay(2000, false, { ref: false, signal: timeout.signal }),
+        ]).finally(() => timeout.abort());
         if (!completed) subscription.release();
       }));
     })().finally(() => stopping.abort()),

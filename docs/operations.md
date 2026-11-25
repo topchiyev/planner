@@ -254,6 +254,8 @@ The HTTPS endpoint is `POST /mcp`. Planner uses `@modelcontextprotocol/server` 2
 
 A valid 2026-07-28 `server/discover` request returns static capabilities without credentials. Modern requests pair the protocol and method headers with their JSON-RPC envelope, and named tool, prompt and resource requests include the matching `Mcp-Name` header. The legacy profile uses the 2025-11-25 `initialize` and `notifications/initialized` handshake. Send the negotiated revision in `MCP-Protocol-Version` on subsequent legacy requests. Both profiles use bearer authorization for workspace traffic. Planner returns `405 Allow: POST` for MCP GET and DELETE and never issues an MCP session ID.
 
+Modern clients can request `subscriptions/listen` with `notifications.resourceSubscriptions` containing 1 to 16 distinct `planner://boards/{UUID}` resource URIs. The JSON-encoded request ID is limited to 4 KiB. After acknowledgment, read the resource for its current state. Updates identify the board that changed. Reconnect by starting a new listen request, then read the current state again. A stream closes when the grant expires, the account loses access, or any of its boards becomes unreadable. The 2025-11-25 profile supports individual reads.
+
 ## Runtime status and setup access
 
 `GET /health/live` tracks the HTTP process. `GET /health/ready` returns 503 during pending setup, migration, database downtime, staging errors, schema verification or recovery. Both responses carry `status`, `version` and a generated `requestId`, with `Cache-Control: no-store`.
