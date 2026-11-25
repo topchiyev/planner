@@ -5,7 +5,7 @@ import { mediaOperations, relationshipCommands, relationshipParentRevisionHeader
 import { csrfToken, readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { createPlannerMcpHandler } from '../../apps/backend/dist/application/mcp/http.js';
 import { mcpMutationCatalog, mcpMutationWireSchema } from '../../apps/backend/dist/application/mcp/mutation-catalog.js';
-import { executeMcpMutation } from '../../apps/backend/dist/application/mcp/mutations.js';
+import { executeMcpMutation, mcpMutationError } from '../../apps/backend/dist/application/mcp/mutations.js';
 import { createMediaService } from '../../apps/backend/dist/application/media/service.js';
 import { workspaceCollections } from '../../apps/backend/dist/storage/catalog.js';
 import { resolveBrowserWorkspace } from '../../apps/backend/dist/application/workspace/authorization.js';
@@ -35,7 +35,7 @@ const cases = {
   task_update: target(ordinaryTask, { completed: true }),
   task_move: target(ordinaryTask, { toChecklistId: nextChecklist, beforeTaskId: null, ...order }),
   task_delete: target(ordinaryTask),
-  comment_create: target(card, { text: 'New comment' }),
+  comment_create: target(card, { text: 'New comment for @[Editor](' + ids.firstEditor + ')' }),
   comment_update: target(comment, { text: 'Updated comment' }),
   comment_delete: target(comment),
   notification_update: target(notice, { expectedRevision: 0, read: true }),
@@ -64,7 +64,7 @@ const cases = {
   card_follow: target(card),
   card_unfollow: target(card),
   list_sort: target(active, { field: 'name', direction: 'asc', sourceOrderVersion: 1 }),
-  list_archive_cards: target(active, { archiveListId: ids.privateArchive, ...order }),
+  list_archive_cards: target(closed, { archiveListId: ids.privateArchive, ...order }),
   card_create: target(active, { name: 'New card' }),
   card_duplicate: target(card, { toListId: closed, beforeCardId: null, ...order }),
   card_update: target(card, { name: 'Updated card' }),
@@ -98,7 +98,7 @@ const adminOperations = new Set(['project_add_manager', 'project_remove_manager'
 async function seed(f) {
   await f.insert('tasks', ordinaryTask, { checklistId: checklist, name: 'Ordinary task', completed: false, rank: '2048' });
   await f.insert('checklists', nextChecklist, { cardId: card, name: 'Destination list', rank: '2048', orderVersion: 1 });
-  await f.insert('comments', comment, { cardId: card, text: 'Earlier comment', authorId: actor });
+  await f.insert('comments', comment, { boardId: board, cardId: card, text: 'Earlier comment', authorId: actor });
   await f.insert('notifications', notice, { cardId: card, recipientId: actor, sourceBoardId: board, boardId: board,
     commentId: comment, kind: 'commentCard', actorId: actor, readAt: null });
   await f.insert('fieldGroups', localTemplate, { scopeType: 'project', scopeId: parentProject, name: 'Template', rank: '1024' });
@@ -117,6 +117,13 @@ async function seed(f) {
 
 async function caseSetup(f, name) {
   switch (name) {
+    case 'list_archive_cards':
+      await f.insert('cards', fixtureId(5048), { boardId: board, listId: closed, name: 'Ready to archive',
+        kind: 'board', closed: true, rank: '1024', historySequence: '9007199254740993' });
+      break;
+    case 'project_remove_manager':
+      await f.insert('projectManagers', fixtureId(5049), { projectId: sharedProject, userId: ids.privateOwner });
+      break;
     case 'card_remove_label':
       await f.insert('cardLabels', fixtureId(5050), { cardId: card, labelId: label });
       break;
@@ -181,6 +188,19 @@ test('the 64 write descriptors run once through MCP and replay the same authoriz
         }), { ordered: true });
       }
 
+      async function effectSummary(command) {
+        const [audit, events, activities, notifications] = await Promise.all(['auditEntries', 'events', 'activities', 'notifications']
+          .map((name) => f.db.collection(name).find({ ...f.scope, commandId: command.id }).toArray()));
+        assert.equal(audit.length, 1);
+        const generatedBoard = command.operationId === 'boards.create' ? audit[0].resourceId : null;
+        return {
+          audit: [audit[0].action, audit[0].resourceType, audit[0].actorId],
+          events: events.map(({ boardId, kind }) => [boardId === generatedBoard ? 'created-board' : boardId, kind]).sort(),
+          activities: activities.map(({ boardId, kind }) => [boardId, kind]).sort(),
+          notifications: notifications.map(({ boardId, kind, recipientId }) => [boardId, kind, recipientId]).sort(),
+        };
+      }
+
       const failures = [];
       for (const entry of mcpMutationCatalog) {
         const { name } = entry;
@@ -188,6 +208,7 @@ test('the 64 write descriptors run once through MCP and replay the same authoriz
           const raw = cases[name];
           const idempotencyKey = randomUUID();
           const wire = mcpMutationWireSchema(entry);
+          assert.equal(wire.type, 'object');
           for (const alt of wire.anyOf ?? [wire]) {
             assert.equal(alt.additionalProperties, false);
             assert.ok(alt.required.includes('idempotencyKey'));
@@ -203,11 +224,22 @@ test('the 64 write descriptors run once through MCP and replay the same authoriz
           assert.equal(denied.status, 403);
           assert.match(denied.headers.get('www-authenticate'), /insufficient_scope/u);
           assert.equal(await f.db.collection('commands').countDocuments(f.scope), 0);
-          const result = await executeMcpMutation({
+          const runMutation = (args, key) => executeMcpMutation({
             database: f.db, installationId: f.installationId, gate: f.gate, actorId: userId, media,
             resolve: () => resolveBrowserWorkspace(f.db, f.installationId, token, f.now()),
             attribution: { origin: 'mcp', clientId: 'registered:fixture-a' },
-          }, name, { ...raw, idempotencyKey });
+          }, name, { ...args, idempotencyKey: key });
+          if (name === 'card_move') {
+            const stale = { ...raw, sourceOrderVersion: 999 };
+            const rejected = await runMutation(stale, randomUUID()).catch(mcpMutationError);
+            assert.equal(rejected.isError, true);
+            const { path, options } = restTarget(entry, stale, randomUUID(), cookie);
+            const web = await f.call(path, cookie, options);
+            assert.equal(web.status, 409);
+            const { requestId: _requestId, ...expected } = web.data.error;
+            assert.deepEqual(JSON.parse(rejected.content[0].text), expected);
+          }
+          const result = await runMutation(raw, idempotencyKey);
           assert.ok(result.structuredContent);
           const after = await snapshot();
           const cmd = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey });
@@ -227,6 +259,16 @@ test('the 64 write descriptors run once through MCP and replay the same authoriz
             assert.deepEqual(result.structuredContent, response.data);
           }
           assert.deepEqual(await snapshot(), after, 'REST retry changed a durable command effect');
+
+          const mcpEffects = await effectSummary(cmd);
+          assert.equal(mcpEffects.audit[0], entry.kind === 'relationship' ? entry.operation : mediaOperations[entry.operation].id);
+          await restore();
+          await caseSetup(f, name);
+          const fresh = await f.call(path, cookie, options);
+          assert.equal(fresh.status, status);
+          const webCommand = await f.db.collection('commands').findOne({ ...f.scope, idempotencyKey });
+          assert.equal(webCommand.status, 'committed');
+          assert.deepEqual(await effectSummary(webCommand), mcpEffects);
         } catch (error) {
           failures.push(new Error(name + ' failed: ' + error.message, { cause: error }));
         } finally { await restore(); }

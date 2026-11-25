@@ -61,12 +61,12 @@ export function mcpMutationWireSchema(entry: Definition) {
   }
   function addEnvelope(schema: InputSchema): Record<string, unknown> {
     const { $schema: _schema, anyOf, properties, required, ...inputSchema } = schema;
-    if (anyOf) return { ...inputSchema, anyOf: anyOf.map(addEnvelope) };
+    if (anyOf) return { ...inputSchema, type: 'object', anyOf: anyOf.map(addEnvelope) };
     return { ...inputSchema, properties: { ...properties, idempotencyKey,
       ...(entry.allowImportedRevision && { expectedRevision: { anyOf: [properties?.expectedRevision, { const: 0 }] } }) },
       required: [...(required ?? []), 'idempotencyKey'], additionalProperties: false };
   }
-  return addEnvelope(z.toJSONSchema(entry.input, options));
+  return { ...addEnvelope(z.toJSONSchema(entry.input, options)), type: 'object' as const };
 }
 
 export function parseMcpMutation(entry: Definition, raw: unknown) {
