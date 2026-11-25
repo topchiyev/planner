@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, mkdir, rename, unlink, statfs, type FileHandle } from 'node:fs/promises';
+import { lstat, open, mkdir, rename, rm, unlink, statfs, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { migrationDigestSchema } from '@planner/contracts';
@@ -12,10 +12,12 @@ import { durable } from '../application/command-journal/records.js';
 import { importRunKey, migrationCursors, type ImportRun } from '../application/migration/checkpoint.js';
 import { activationExpectation, canonicalMissingOriginals, parseMigrationApproval } from '../application/migration/approval.js';
 import { MigrationError, sha256 } from '../application/migration/manifest.js';
-import { parseMigrationInput, type inspectMigration, type MigrationInput } from '../application/migration/preflight.js';
+import { assertVerifiedSourceSnapshot, parseMigrationInput, type inspectMigration, type MigrationInput,
+  type VerifiedSourceSnapshot } from '../application/migration/preflight.js';
 import { openMigrationFile } from '../application/migration/prepare.js';
 import { completedMigrationTable } from '../application/migration/stage-base.js';
 import type { MigrationVerification } from '../application/migration/verification.js';
+import { createPrivateMediaStore, type PrivateMediaStore } from '../storage/blobs/private-store.js';
 import { readInstallation, verifyStorageSchema } from '../storage/schema.js';
 
 const root = { uid: 0, gid: 0 };
@@ -176,11 +178,12 @@ export async function persistMigrationPreflight(
     await runs.updateOne(key, { $setOnInsert: row }, { ...durable, upsert: true });
     const savedRun = await runs.findOne(key);
     if (!savedRun) throw publishFailure();
-    const { state, checkpoint, updatedAt, verification, ...original } = savedRun;
+    const { state, checkpoint, updatedAt, verification, verificationStartedAt, ...original } = savedRun;
     const { state: _state, checkpoint: _checkpoint, updatedAt: _updatedAt, ...expected } = row;
     if (!isDeepStrictEqual(original, expected) || !(updatedAt instanceof Date) || !Number.isFinite(updatedAt.valueOf())) throw publishFailure();
     if (state === 'preflighted') {
-      if (checkpoint !== null || verification !== undefined || updatedAt.valueOf() !== createdAt.valueOf()) throw publishFailure();
+      if (checkpoint !== null || verification !== undefined || verificationStartedAt !== undefined
+        || updatedAt.valueOf() !== createdAt.valueOf()) throw publishFailure();
     } else {
       if (!published || !checkpoint) throw publishFailure();
       const lastSourceId = migrationCursors(Buffer.from(saved.checkpointKey, 'base64url')).open({
@@ -188,10 +191,12 @@ export async function persistMigrationPreflight(
       }, checkpoint.token);
       if (lastSourceId !== checkpoint.lastSourceId) throw publishFailure();
       if (state === 'staging') {
-        if (verification !== undefined) throw publishFailure();
+        if (verification !== undefined || verificationStartedAt !== undefined) throw publishFailure();
       } else {
-        if (checkpoint.pass !== 'media' || checkpoint.table !== completedMigrationTable) throw publishFailure();
-        await readMigrationVerification(directory, owner, savedRun);
+        if (!isCompleteVerificationStart(savedRun)) throw publishFailure();
+        if (state === 'verifying') {
+          if (verification !== undefined) throw publishFailure();
+        } else await readMigrationVerification(directory, owner, savedRun);
       }
     }
     await afterMongo?.();
@@ -223,7 +228,38 @@ const reportLimit = 32 * 1024 * 1024;
 const reportName = (runId: string) => publicIdSchema.parse(runId) + '.verification.json';
 const verificationFailure = () => new MigrationError('verification-incomplete', 'The complete protected migration verification report is unavailable.');
 
+function finalMediaCheckpoint(run: ImportRun) {
+  const { checkpoint } = run;
+  return checkpoint?.pass === 'media' && checkpoint.table === completedMigrationTable ? checkpoint : null;
+}
+
+function isCompleteVerificationStart(run: ImportRun) {
+  return !!finalMediaCheckpoint(run) && run.verificationStartedAt instanceof Date && Number.isFinite(run.verificationStartedAt.valueOf())
+    && run.verificationStartedAt >= run.createdAt && run.verificationStartedAt <= run.updatedAt;
+}
+
 export const openNativeMigrationDirectory = () => anchoredDirectory(stateDirectory, root, 0o700);
+
+export async function withNativeVerificationScratch<T>(runId: string, operation: (store: PrivateMediaStore) => Promise<T>) {
+  const directory = join(stateDirectory, '.verify-' + publicIdSchema.parse(runId));
+  try { await mkdir(directory, { mode: 0o700 }); }
+  catch (error) {
+    if (!errno(error, 'EEXIST')) throw error;
+    const interrupted = await anchoredDirectory(directory, root, 0o700);
+    await interrupted.close();
+    await rm(directory, { recursive: true });
+    await mkdir(directory, { mode: 0o700 });
+  }
+  try {
+    const staging = join(directory, 'staging');
+    const blobs = join(directory, 'blobs');
+    await mkdir(staging, { mode: 0o700 });
+    await mkdir(blobs, { mode: 0o700 });
+    const store = await createPrivateMediaStore(staging, blobs);
+    try { return await operation(store); }
+    finally { await store.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
 
 export async function readProtectedMigrationRun(db: Db, installationId: string, directory: FileHandle, owner: Owner, runId: string) {
   try {
@@ -252,13 +288,15 @@ export async function readProtectedMigrationRun(db: Db, installationId: string, 
 function verifyReport(run: ImportRun, report: MigrationVerification) {
   const { summary, checkpoint, reportSha256, details, missing } = report;
   if (summary.formatVersion !== 1 || summary.runId !== run.id || summary.generationId !== run.generationId
+    || !isCompleteVerificationStart(run) || summary.verificationStartedAt !== run.verificationStartedAt?.toISOString()
     || summary.manifestSha256 !== run.manifestSha256 || summary.fingerprintSha256 !== run.fingerprint.sha256
     || (summary.outcome !== 'verified' && summary.outcome !== 'blocked') || !isDeepStrictEqual(checkpoint, run.checkpoint)
     || summary.detailCount !== details.length || summary.detailSha256 !== sha256(Buffer.from(JSON.stringify(details)))
     || reportSha256 !== sha256(Buffer.from(JSON.stringify(summary)))) throw verificationFailure();
   const missingFromDetails = canonicalMissingOriginals(details.filter((entry) => entry.table === 'uploaded_file'
     && entry.reasons.includes('missing-original')).map(({ sourceId }) => ({ type: 'uploaded_file', sourceId, reason: 'missing-original' })));
-  if (summary.assets.missingOriginals !== missing.length || !isDeepStrictEqual(missingFromDetails, missing)) throw verificationFailure();
+  if ((summary.outcome === 'verified' ? summary.assets.missingOriginals !== missing.length : summary.assets.missingOriginals < missing.length)
+    || !isDeepStrictEqual(missingFromDetails, missing)) throw verificationFailure();
 }
 
 export async function readMigrationVerification(directory: FileHandle, owner: Owner, run: ImportRun) {
@@ -285,12 +323,43 @@ export function migrationVerificationPage(report: MigrationVerification, offset:
   return { ...publicMigrationVerification(report), details, nextOffset: after < report.details.length ? after : null };
 }
 
+export async function beginMigrationVerification(lease: WriterLease, db: Db, run: ImportRun, snapshot: VerifiedSourceSnapshot) {
+  lease.assertHeld();
+  assertVerifiedSourceSnapshot(snapshot, true);
+  const checkpoint = finalMediaCheckpoint(run);
+  if (!checkpoint || run.verification !== undefined || (run.state !== 'staging' && run.state !== 'verifying')) throw verificationFailure();
+  if (!isDeepStrictEqual(run.fingerprint, snapshot.fingerprint) || run.manifestSha256 !== snapshot.manifestSha256
+    || run.source.instanceId !== snapshot.capture.sourceInstanceId) throw verificationFailure();
+  const remaining = await snapshot.readBatch(completedMigrationTable, checkpoint.lastSourceId, 1);
+  if (remaining.rows.length !== 0 || remaining.hasMore) throw verificationFailure();
+  const installation = await readInstallation(db, run.installationId);
+  if (installation.activeGenerationId === run.generationId || installation.setup?.enrollmentGenerationId === run.generationId)
+    throw verificationFailure();
+  const key = importRunKey({ runId: run.id, generationId: run.generationId, installationId: run.installationId });
+  const runs = db.collection<ImportRun>('importRuns');
+  const current = await runs.findOne(key);
+  if (!current || !isDeepStrictEqual(current, run)) throw verificationFailure();
+  if (run.state === 'verifying') {
+    if (!isCompleteVerificationStart(run)) throw verificationFailure();
+    return run;
+  }
+  const started = new Date();
+  lease.assertHeld();
+  assertVerifiedSourceSnapshot(snapshot, true);
+  const next = await runs.findOneAndUpdate({ ...key, state: 'staging', 'fingerprint.sha256': run.fingerprint.sha256,
+    manifestSha256: run.manifestSha256, 'checkpoint.token': checkpoint.token, verificationStartedAt: { $exists: false },
+    verification: { $exists: false } }, { $set: { state: 'verifying', verificationStartedAt: started, updatedAt: started } },
+  { ...durable, returnDocument: 'after' });
+  if (!next) throw verificationFailure();
+  return next;
+}
+
 export async function persistMigrationVerification(lease: WriterLease, db: Db, directory: FileHandle, owner: Owner,
   run: ImportRun, report: MigrationVerification, beforePublish?: () => Promise<void>) {
   lease.assertHeld();
   verifyReport(run, report);
-  if (run.state !== 'staging' || !run.checkpoint || run.checkpoint.pass !== 'media' || run.checkpoint.table !== completedMigrationTable
-    || run.verification !== undefined) throw verificationFailure();
+  const checkpoint = finalMediaCheckpoint(run);
+  if (run.state !== 'verifying' || !checkpoint || run.verification !== undefined) throw verificationFailure();
   const installation = await readInstallation(db, run.installationId);
   if (installation.activeGenerationId === run.generationId || installation.setup?.enrollmentGenerationId === run.generationId)
     throw verificationFailure();
@@ -310,8 +379,9 @@ export async function persistMigrationVerification(lease: WriterLease, db: Db, d
   await directory.sync();
   await beforePublish?.();
   lease.assertHeld();
-  const result = await runs.updateOne({ ...key, state: 'staging', 'fingerprint.sha256': run.fingerprint.sha256,
-    manifestSha256: run.manifestSha256, 'checkpoint.token': run.checkpoint.token, verification: { $exists: false } }, {
+  const result = await runs.updateOne({ ...key, state: 'verifying', 'fingerprint.sha256': run.fingerprint.sha256,
+    manifestSha256: run.manifestSha256, 'checkpoint.token': checkpoint.token, verificationStartedAt: run.verificationStartedAt,
+    verification: { $exists: false } }, {
     $set: { state: report.summary.outcome, verification: { reportSha256: report.reportSha256, detailSha256: report.summary.detailSha256 }, updatedAt: new Date() },
   }, durable);
   if (result.matchedCount !== 1) throw verificationFailure();

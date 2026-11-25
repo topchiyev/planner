@@ -3,9 +3,12 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Db } from 'mongodb';
 import { workspaceCollections, type WorkspaceCollection } from '../../storage/catalog.js';
 import { nameBasedUuid } from '../../storage/identity.js';
-import type { BlobIdentity, PrivateMediaStore } from '../../storage/blobs/private-store.js';
+import { MediaStorageError, type BlobIdentity, type PrivateMediaStore } from '../../storage/blobs/private-store.js';
+import { BackupError } from '../backup/archive.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { createBoardEventCursors } from '../board-events/cursor.js';
+import type { MediaDecoder } from '../media/decoder.js';
+import { MediaRejection } from '../media/errors.js';
 import { availableMedia, catalogVariants, mediaRecords } from '../media/records.js';
 import { createWorkspaceAuthorization, WorkspaceAccessError } from '../workspace/authorization.js';
 import { createWorkspaceReads } from '../workspace/reads.js';
@@ -13,7 +16,7 @@ import type { WorkspaceRow } from '../workspace/records.js';
 import { canonicalMissingOriginals, type MissingOriginal } from './approval.js';
 import { importRunKey, type ImportIdentity, type ImportRun, type migrationCursors } from './checkpoint.js';
 import { MigrationError, sha256 } from './manifest.js';
-import { createMigrationMediaStage } from './media-stage.js';
+import { createMigrationMediaStage, deriveMigratedMedia } from './media-stage.js';
 import { assertVerifiedSourceSnapshot, type VerifiedSourceSnapshot } from './preflight.js';
 import { sourceTables } from './source-catalog.js';
 import { maximumSourceBatch, projectedSourceTables, sourceKey, type SourceTable } from './source-projections.js';
@@ -25,6 +28,7 @@ type Disposition = 'normal' | 'quarantined' | 'excluded' | 'unavailable' | 'bloc
 type SourceCount = Record<Disposition | 'input', string>;
 type Case = { table: string; sourceId: string; disposition?: Disposition; reasons: string[] };
 type Problem = { type: 'source-count' | 'staged-count' | 'staged-row' | 'storage-media' | 'unsafe-source' | 'scoped-read'; entity: string };
+type VerificationMedia = { verifyBlob: PrivateMediaStore['verifyBlob']; scratch: Pick<PrivateMediaStore, 'stage'>; decode: MediaDecoder };
 const rowFaults: Partial<Record<MigrationError['fault'], Problem['type']>> = {
   'verification-blocked': 'staged-row', 'target-write': 'staged-row', 'asset-integrity': 'storage-media', 'source-read': 'unsafe-source',
 };
@@ -74,12 +78,12 @@ async function sampleWorkspaceReads(db: Db, generationId: string) {
 }
 
 export async function collectMigrationVerification(db: Db, lease: WriterLease, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,
-  cursors: ReturnType<typeof migrationCursors>, mediaStore: Pick<PrivateMediaStore, 'verifyBlob'>, signal: AbortSignal) {
+  cursors: ReturnType<typeof migrationCursors>, mediaStore: VerificationMedia, signal: AbortSignal) {
   lease.assertHeld();
   assertVerifiedSourceSnapshot(snapshot, true);
   const run = await db.collection<ImportRun>('importRuns').findOne(importRunKey(identity));
   const checkpoint = run?.checkpoint;
-  if (!run || run.state !== 'staging' || run.source.instanceId !== snapshot.capture.sourceInstanceId
+  if (!run || run.state !== 'verifying' || !run.verificationStartedAt || run.source.instanceId !== snapshot.capture.sourceInstanceId
     || run.manifestSha256 !== snapshot.manifestSha256 || !isDeepStrictEqual(run.fingerprint, snapshot.fingerprint)
     || !isDeepStrictEqual(identity.fingerprint, snapshot.fingerprint)) throw incomplete();
   if (!checkpoint || checkpoint.pass !== 'media' || checkpoint.table !== completedMigrationTable
@@ -88,6 +92,7 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
 
   const accepted = new Map<WorkspaceCollection, number>();
   const projected = new Map<string, number>();
+  const verifiedProvenance = new Set<string>();
   const cases = new Map<string, Case>();
   const problems: Problem[] = [];
   const note = (table: string, sourceId: string, reasons: string[], disposition?: Disposition) => {
@@ -101,6 +106,9 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
     accept(collection, fields) {
       accepted.set(collection, (accepted.get(collection) ?? 0) + 1);
       if (collection === 'importQuarantine') note(fields.entity, fields.sourceId, fields.reasons, 'quarantined');
+      if (collection === 'importIds' && ['action', 'attachment', 'background_image', 'card', 'project', 'task', 'user_account'].includes(fields.entity)) {
+        verifiedProvenance.add(caseKey(fields.entity, fields.sourceId));
+      }
     },
   });
   const verifiedParts = new Map<string, number>();
@@ -114,19 +122,30 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
     verifiedParts.set(part.digest, part.byteLength);
   };
   const stageMedia = createMigrationMediaStage(records, snapshot, lease, { signal,
-    async verifyBlob(original) {
+    async verifyBlob(key, original, requireImage) {
       if (verifiedCatalogs.has(original.digest) && verifiedParts.get(original.digest) === original.byteLength) return;
+      const scratch = await mediaStore.scratch.stage();
+      let expected: Awaited<ReturnType<typeof deriveMigratedMedia>>;
+      try {
+        expected = await deriveMigratedMedia(scratch, snapshot, key, original, requireImage, mediaStore.decode, signal);
+      } catch (error) {
+        if (error instanceof MediaStorageError) throw incomplete();
+        if (error instanceof MediaRejection) throw new MigrationError('asset-integrity', 'The verified source image could not be decoded.');
+        throw error;
+      } finally { await scratch.dispose(); }
       try {
         const row = await media.catalog(original.digest);
         if (!row || row.lifecycleState !== availableMedia || row.byteLength !== original.byteLength
-          || row.id !== nameBasedUuid(run.source.instanceId, `blob:${original.digest}`)) throw new Error('Invalid catalog.');
+          || row.id !== nameBasedUuid(run.source.instanceId, `blob:${original.digest}`) || row.mimeType !== expected.mimeType
+          || !isDeepStrictEqual(row.variants, expected.variants)) throw new MediaStorageError();
         const variants = catalogVariants(row);
         await verifyPart(original);
         if (variants) { await verifyPart(variants.small); await verifyPart(variants.large); }
         verifiedCatalogs.add(original.digest);
       } catch (error) {
         signal.throwIfAborted();
-        if (error instanceof Error && (error.name === 'MongoServerError' || error.name.startsWith('MongoNetwork'))) throw error;
+        if (!(error instanceof MediaStorageError) && !(error instanceof BackupError) && !(error instanceof MigrationError)
+          && !(error instanceof Error && 'code' in error && ['ENOENT', 'ELOOP', 'EACCES'].includes(String(error.code)))) throw error;
         throw new MigrationError('asset-integrity', 'A staged media object failed verification.');
       }
     },
@@ -136,7 +155,11 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
     checkpoint: () => null,
     async batch(position, apply) {
       if (position.pass === 'media' && position.table === completedMigrationTable) finalPosition = position.lastSourceId;
-      await apply();
+      try { await apply(); }
+      catch (error) {
+        if (!(error instanceof MigrationError) || error.fault !== 'source-read') throw error;
+        problems.push({ type: 'staged-row', entity: position.table });
+      }
     },
     async row({ pass, table }, id, apply) {
       signal.throwIfAborted();
@@ -154,18 +177,24 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
 
   const sourceAssets = { originals: 0, derivatives: 0, missingOriginals: 0, missingDerivatives: 0,
     targetCatalogs: verifiedCatalogs.size, targetBlobParts: verifiedParts.size };
-  const missingOriginals: MissingOriginal[] = [];
+  const originals = new Map<string, { count: number; missing: boolean }>();
   for (const asset of snapshot.assets()) {
     if (asset.kind === 'original') {
       sourceAssets.originals++;
-      if (asset.sha256 === null) {
-        sourceAssets.missingOriginals++;
-        missingOriginals.push({ type: 'uploaded_file', sourceId: sourceKey('uploaded_file', asset.key.split('/')[2]), reason: 'missing-original' });
-      }
+      const isMissing = asset.sha256 === null;
+      if (isMissing) sourceAssets.missingOriginals++;
+      const sourceId = sourceKey('uploaded_file', asset.key.split('/')[2]);
+      const existing = originals.get(sourceId);
+      originals.set(sourceId, { count: (existing?.count ?? 0) + 1, missing: isMissing || existing?.missing === true });
     } else {
       sourceAssets.derivatives++;
       if (asset.sha256 === null) sourceAssets.missingDerivatives++;
     }
+  }
+  const missingOriginals: MissingOriginal[] = [];
+  for (const [sourceId, original] of originals) {
+    if (original.count > 1) note('uploaded_file', sourceId, ['ambiguous-original'], 'blocked');
+    else if (original.missing) missingOriginals.push({ type: 'uploaded_file', sourceId, reason: 'missing-original' });
   }
   const missing = canonicalMissingOriginals(missingOriginals);
   for (const entry of missing) note(entry.type, entry.sourceId, [entry.reason], 'unavailable');
@@ -173,10 +202,12 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
   const observations = collection.find({ generationId, sourceInstanceId: run.source.instanceId }, { batchSize: maximumSourceBatch });
   for await (const { entity, sourceId, provenance } of observations) {
     signal.throwIfAborted();
-    if (!sourceTableIsReservable(entity) || !provenance || typeof sourceId !== 'string') continue;
+    const key = caseKey(entity, sourceId);
+    if (!verifiedProvenance.has(key) || cases.get(key)?.disposition === 'blocked') continue;
     if (provenance.media?.kind === 'file') {
       if (provenance.media.state === 'unavailable') note(entity, sourceId, ['original-unavailable'], 'unavailable');
-      if (provenance.media.derivatives.some((asset) => asset.sha256 === null)) note(entity, sourceId, ['missing-derivative']);
+      if (Array.isArray(provenance.media.derivatives) && provenance.media.derivatives.some((asset) => asset?.sha256 === null))
+        note(entity, sourceId, ['missing-derivative']);
     }
     if (entity === 'card') {
       const previous = provenance.previousListSourceId;
@@ -241,6 +272,7 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
   const detailSha256 = sha256(Buffer.from(JSON.stringify(details)));
   const summary = {
     formatVersion: policyVersion, runId: run.id, generationId, manifestSha256: snapshot.manifestSha256,
+    verificationStartedAt: run.verificationStartedAt.toISOString(),
     fingerprintSha256: snapshot.fingerprint.sha256, outcome: blocked ? 'blocked' as const : 'verified' as const,
     eligibleUnderDefaultPolicy: !blocked && missing.length === 0, tables, assets: sourceAssets, targetRows: collectionCounts, scopedReads,
     reasons, problems, detailSha256, detailCount: details.length,

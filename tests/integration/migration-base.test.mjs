@@ -26,8 +26,8 @@ import { inspectMigration, withMigrationSnapshot } from '../../apps/backend/dist
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { stageBaseWorkspace, stageMigrationWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
 import { collectMigrationVerification } from '../../apps/backend/dist/application/migration/verification.js';
-import { migrationVerificationPage, persistMigrationVerification, prepareMigrationActivation, publicMigrationVerification,
-  readMigrationVerification } from '../../apps/backend/dist/native/migration-state.js';
+import { beginMigrationVerification, migrationVerificationPage, persistMigrationVerification, persistMigrationPreflight, prepareMigrationActivation,
+  publicMigrationVerification, readMigrationVerification, readProtectedMigrationRun } from '../../apps/backend/dist/native/migration-state.js';
 import { registerMediaRoutes } from '../../apps/backend/dist/native/media-routes.js';
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createWorkspaceReads } from '../../apps/backend/dist/application/workspace/reads.js';
@@ -116,7 +116,7 @@ async function loadTarget(fixture, callback) {
   finally { lease.release(); }
 }
 
-function interruptCheckpoint(db, interruptedPass, interruptedTable) {
+function interruptCheckpoint(db, interruptedPass, interruptedTable, skip = 0) {
   return new Proxy(db, { get(target, property) {
     if (property !== 'collection') return Reflect.get(target, property, target);
     return (name, ...options) => {
@@ -125,7 +125,7 @@ function interruptCheckpoint(db, interruptedPass, interruptedTable) {
       return new Proxy(collection, { get(rows, operation) {
         if (operation === 'updateOne') return async (query, update, settings) => {
           const { pass, table } = update.$set.checkpoint;
-          if (pass === interruptedPass && table === interruptedTable) throw new MigrationError('target-write', 'Interrupted after staged effects.');
+          if (pass === interruptedPass && table === interruptedTable && skip-- === 0) throw new MigrationError('target-write', 'Interrupted after staged effects.');
           return rows.updateOne(query, update, settings);
         };
         const value = Reflect.get(rows, operation, rows);
@@ -985,12 +985,18 @@ test('verified PLANKA directory and object media stage exact bytes and independe
       await mkdir(blobs, { mode: 0o700 });
       let store = await createPrivateMediaStore(staging, blobs);
       t.after(() => store.close());
-      const stage = (source, identity, mediaStore = store, database = db) => withMigrationSnapshot(source.input, owner,
+      const stage = (source, identity, mediaStore = store, database = db, cursorSet = cursors) => withMigrationSnapshot(source.input, owner,
         source.config, source.objectConfig, { expectedFingerprint: identity.fingerprint.sha256 }, (snapshot) =>
-          stageMigrationWorkspace(database, lease, identity, snapshot, cursors, { store: mediaStore, decode }, 1)).then(({ value }) => value);
-      const verify = (source, identity) => withMigrationSnapshot(source.input, owner, source.config, source.objectConfig,
-        { expectedFingerprint: identity.fingerprint.sha256 }, (snapshot) => collectMigrationVerification(db, lease, identity,
-          snapshot, cursors, store, new AbortController().signal)).then(({ value }) => value);
+          stageMigrationWorkspace(database, lease, identity, snapshot, cursorSet, { store: mediaStore, decode }, 1)).then(({ value }) => value);
+      const verify = async (source, identity, cursorSet = cursors) => {
+        const run = await db.collection('importRuns').findOne(importRunKey(identity));
+        return (await withMigrationSnapshot(source.input, owner, source.config, source.objectConfig,
+          { expectedFingerprint: identity.fingerprint.sha256 }, async (snapshot) => {
+            await beginMigrationVerification(lease, db, run, snapshot);
+            return collectMigrationVerification(db, lease, identity, snapshot, cursorSet,
+              { verifyBlob: store.verifyBlob, scratch: store, decode }, new AbortController().signal);
+          })).value;
+      };
       const localRun = await createRun(db, installationId, localReceipt);
       const localId = publicIds(localReceipt.capture.source.instanceId);
       const scoped = { generationId: localRun.generationId };
@@ -1014,6 +1020,10 @@ test('verified PLANKA directory and object media stage exact bytes and independe
       await assert.rejects(stage(local, localRun, store, interruptCheckpoint(db, 'media', 'attachment')), refuses('target-write'));
       assert.deepEqual((await saved()).checkpoint, beforeMedia);
       assert.equal(await db.collection('attachments').countDocuments(scoped), 1);
+      await assert.rejects(stage(local, localRun, store, interruptCheckpoint(db, 'media', 'user_account', 1)), refuses('target-write'));
+      assert.equal((await saved()).checkpoint.table, 'user_account');
+      await assert.rejects(verify(local, localRun), refuses('verification-incomplete'));
+      assert.equal((await saved()).state, 'staging');
       const checkpoint = await stage(local, localRun);
       assert.equal(checkpoint.pass, 'media');
       assert.equal(checkpoint.table, 'user_account');
@@ -1080,13 +1090,20 @@ test('verified PLANKA directory and object media stage exact bytes and independe
       const generated = catalogVariants(await objectMedia.catalog(objectImage.blobDigest));
       await Promise.all(Object.values(generated).map((variant) => store.verifyBlob(variant)));
 
-      const absentRun = await (async () => {
-        objects.missing.add(originalKey);
-        const receipt = await inspect(objects);
-        assert.equal(receipt.assets.missingOriginals, 1);
-        return createRun(db, installationId, receipt);
-      })();
-      await stage(objects, absentRun);
+      objects.missing.add(originalKey);
+      const absentReceipt = await inspect(objects);
+      assert.equal(absentReceipt.assets.missingOriginals, 1);
+      const statePath = join(root, 'reports');
+      await mkdir(statePath, { mode: 0o700 });
+      const directory = await open(statePath);
+      t.after(() => directory.close());
+      const capacity = { mongoBytes: '1', blobBytes: '1', stagingBytes: '1' };
+      const savePreflight = () => persistMigrationPreflight(lease, db, installationId, directory, owner, objects.input, absentReceipt, capacity);
+      const preflight = await savePreflight();
+      const load = () => readProtectedMigrationRun(db, installationId, directory, owner, preflight.runId);
+      const { run: initial, cursors: absentCursors } = await load();
+      const absentRun = { runId: initial.id, generationId: initial.generationId, installationId, fingerprint: initial.fingerprint };
+      await stage(objects, absentRun, store, db, absentCursors);
       const absent = mediaRecords(db, absentRun.generationId);
       for (const sourceId of ['601', '602']) {
         const row = await absent.attachment(objectId('attachment', sourceId));
@@ -1097,7 +1114,9 @@ test('verified PLANKA directory and object media stage exact bytes and independe
       assert.equal(unavailable.data.attachments.find(({ id }) => id === objectImage.id).available, false);
       assert.equal(await absent.catalog(objectImage.blobDigest), null);
 
-      const evidence = await verify(objects, absentRun);
+      const evidence = await verify(objects, absentRun, absentCursors);
+      assert.deepEqual(await savePreflight(), preflight);
+      assert.equal((await load()).run.state, 'verifying');
       assert.equal(evidence.summary.outcome, 'verified', JSON.stringify(evidence.summary));
       assert.equal(evidence.summary.eligibleUnderDefaultPolicy, false);
       assert.equal(evidence.summary.assets.missingOriginals, 1);
@@ -1113,20 +1132,22 @@ test('verified PLANKA directory and object media stage exact bytes and independe
       assert.equal(page.details.length, 1);
       assert.equal(page.nextOffset, 1);
 
-      const statePath = join(root, 'reports');
-      await mkdir(statePath, { mode: 0o700 });
-      const directory = await open(statePath);
-      try {
+      {
         const run = await db.collection('importRuns').findOne(importRunKey(absentRun));
         const interrupted = new Error('simulated crash before the verification CAS');
         await assert.rejects(persistMigrationVerification(lease, db, directory, owner, run, evidence, async () => { throw interrupted; }),
           (error) => error === interrupted);
-        assert.equal((await db.collection('importRuns').findOne(importRunKey(absentRun))).state, 'staging');
+        const retry = await db.collection('importRuns').findOne(importRunKey(absentRun));
+        assert.equal(retry.state, 'verifying');
+        assert.deepEqual(retry.verificationStartedAt, run.verificationStartedAt);
+        assert.equal((await verify(objects, absentRun, absentCursors)).reportSha256, evidence.reportSha256);
         await assert.rejects(readMigrationVerification(directory, owner, run), refuses('verification-incomplete'));
         await persistMigrationVerification(lease, db, directory, owner, run, evidence);
         const verified = await db.collection('importRuns').findOne(importRunKey(absentRun));
         const savedReport = await readMigrationVerification(directory, owner, verified);
         assert.equal(savedReport.reportSha256, evidence.reportSha256);
+        assert.deepEqual(await savePreflight(), preflight);
+        assert.equal((await load()).run.state, 'verified');
         await assert.rejects(prepareMigrationActivation(directory, owner, verified, run.manifestSha256), refuses('approval-required'));
         const approvalPath = join(statePath, 'approval.json');
         const approval = { runId: run.id, snapshotSha256: run.manifestSha256, missing: evidence.missing };
@@ -1146,7 +1167,7 @@ test('verified PLANKA directory and object media stage exact bytes and independe
         assertActivationRetry(expectation, await activate());
         assert.throws(() => assertActivationRetry(expectation, { ...expectation, approvalSha256: '1'.repeat(64) }), refuses('approval-invalid'));
         assert.equal((await openActiveWorkspace(db, installationId)).generationId, activeGenerationId);
-      } finally { await directory.close(); }
+      }
 
       const changed = Buffer.from(bytes);
       changed[0] ^= 0xff;
@@ -1163,6 +1184,46 @@ test('verified PLANKA directory and object media stage exact bytes and independe
         await writeFile(join(blobs, digest), bytes);
         await chmod(join(blobs, digest), 0o400);
       }
+
+      const catalog = db.collection('blobs');
+      const catalogMatch = { ...scoped, digest };
+      const originalCatalog = await catalog.findOne(catalogMatch);
+      await catalog.updateOne(catalogMatch, { $set: { mimeType: 'application/octet-stream', variants: null } });
+      const downgraded = await verify(local, localRun);
+      assert.equal(downgraded.summary.outcome, 'blocked');
+      assert.equal(downgraded.summary.reasons['storage-media'], 2);
+      const otherImage = await catalog.findOne({ ...scoped, mimeType: 'image/png', digest: { $ne: digest } });
+      await catalog.updateOne(catalogMatch, { $set: { mimeType: originalCatalog.mimeType, variants: otherImage.variants } });
+      const swapped = await verify(local, localRun);
+      assert.equal(swapped.summary.outcome, 'blocked');
+      assert.equal(swapped.summary.reasons['storage-media'], 2);
+      await catalog.replaceOne(catalogMatch, originalCatalog);
+
+      const ids = db.collection('importIds');
+      await ids.updateOne({ ...scoped, entity: 'action', sourceId: '711' }, { $set: { 'provenance.discussion.decoded.snapshot.fromList': null } });
+      await ids.updateOne({ ...scoped, entity: 'attachment', sourceId: '601' }, { $set: { 'provenance.media.derivatives': null } });
+      const existingBoard = await ids.findOne({ ...scoped, entity: 'board', sourceId: '301' });
+      const extraId = localId('board', '9999');
+      await ids.insertOne({ ...existingBoard, _id: workspaceKey(localRun.generationId, extraId), id: extraId, sourceId: '9999' });
+      const damaged = await verify(local, localRun);
+      assert.equal(damaged.summary.outcome, 'blocked');
+      assert.equal(damaged.summary.tables.action.blocked, '1');
+      assert.equal(damaged.summary.tables.attachment.blocked, '1');
+      assert.ok(damaged.summary.problems.some(({ type, entity }) => type === 'staged-count' && entity === 'importIds'));
+
+      local.update(`INSERT INTO public.attachment (id, card_id, creator_user_id, type, data, name)
+        SELECT 608, card_id, creator_user_id, type, jsonb_set(data, '{filename}', '"Alternate Study.png"'), 'Conflicting original'
+        FROM public.attachment WHERE id = 601;`);
+      const ambiguousReceipt = await inspect(local);
+      assert.equal(ambiguousReceipt.assets.missingOriginals, 1);
+      const ambiguousRun = await createRun(db, installationId, ambiguousReceipt);
+      await stage(local, ambiguousRun);
+      const ambiguous = await verify(local, ambiguousRun);
+      assert.equal(ambiguous.summary.outcome, 'blocked');
+      assert.equal(ambiguous.summary.assets.missingOriginals, 1);
+      assert.equal(ambiguous.summary.reasons['ambiguous-original'], 1);
+      assert.equal(ambiguous.summary.tables.uploaded_file.blocked, '1');
+      assert.deepEqual(ambiguous.missing, []);
       const availableBytes = await readFile(join(objectFiles.input.assetsRoot, 'private/attachments/9007199254741221/Fixture Deck.txt'));
       await assertApprovedUnavailableMedia(db, installationId, absentRun.generationId, objectId, store, decode, availableBytes);
     }));

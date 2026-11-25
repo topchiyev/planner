@@ -22,9 +22,10 @@ export type MigrationCheckpoint = MigrationPosition & { token: string };
 
 export type ImportRun = {
   _id: string; id: string; installationId: string; generationId: string;
-  state: 'preflighted' | 'staging' | 'verified' | 'blocked'; fingerprint: SourceFingerprint;
+  state: 'preflighted' | 'staging' | 'verifying' | 'verified' | 'blocked'; fingerprint: SourceFingerprint;
   manifestSha256: string; createdAt: Date; updatedAt: Date; checkpoint: MigrationCheckpoint | null;
   source: Pick<MigrationCapture['source'], 'instanceId' | 'release' | 'edition'>;
+  verificationStartedAt?: Date;
   verification?: { reportSha256: string; detailSha256: string };
 };
 
