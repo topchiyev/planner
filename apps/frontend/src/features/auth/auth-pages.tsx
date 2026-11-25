@@ -108,7 +108,7 @@ export function FirstAdminPage() {
 export function AccountRecoveryPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<'confirmed' | 'enrollment-required' | null>(null);
+  const [result, setResult] = useState<ReturnType<typeof accountRecoveryOutputSchema.parse> | null>(null);
 
   async function recover(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -127,14 +127,20 @@ export function AccountRecoveryPage() {
       const response = await postJson('/api/v1/recovery/consume', input.data);
       if (response.status === 400) setError('The recovery grant is invalid or has expired.');
       else if (response.status === 429) setError('Too many recovery attempts. Try again later.');
-      else if (response.ok) setStatus(accountRecoveryOutputSchema.parse(await response.json()).status);
+      else if (response.ok) setResult(accountRecoveryOutputSchema.parse(await response.json()));
       else setError('Planner could not reset the password. Try again.');
     } catch { setError('Planner could not reset the password. Try again.'); }
     finally { setBusy(false); }
   }
 
-  if (status) return <AuthPage title="Password set">
-    <p>{status === 'enrollment-required' ? 'This account still requires multifactor enrollment. Contact your Planner administrator.'
+  if (result?.status === 'staged-enrollment-required') return <AuthPage title="Set up your authenticator">
+    <MfaEnrollmentForm enrollmentId={result.enrollmentId} onSaved={() => setResult({ status: 'staged-confirmed' })} />
+  </AuthPage>;
+  if (result?.status === 'staged-confirmed') return <AuthPage title="Administrator recovery complete">
+    <p>Your operator can continue the import.</p>
+  </AuthPage>;
+  if (result) return <AuthPage title="Password set">
+    <p>{result.status === 'enrollment-required' ? 'This account still requires multifactor enrollment. Contact your Planner administrator.'
       : 'Sign in using the password you just set.'}</p>
     <a className="primary-button auth-continue" href="/sign-in">Continue to sign in</a>
   </AuthPage>;

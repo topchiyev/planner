@@ -5,6 +5,8 @@ trap 'printf "Native migration acceptance failed at line %s.\n" "$LINENO" >&2' E
 umask 077
 
 media=${1:?Pass the read-only qualification media mount point}
+administrator_recovery=${2:-}
+[ -z "$administrator_recovery" ] || [ "$administrator_recovery" = --administrator-recovery ]
 [ "$(id -u)" = 0 ]
 [ "$(findmnt -no FSTYPE --target "$media")" = iso9660 ]
 findmnt -no OPTIONS --target "$media" | grep -Eq '(^|,)ro(,|$)'
@@ -443,3 +445,6 @@ test_readiness
 [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
 printf 'NATIVE MIGRATION PREFLIGHT ACCEPTANCE PASSED\n'
 printf 'NATIVE MIGRATION STAGING ACCEPTANCE PASSED\n'
+if [ "$administrator_recovery" = --administrator-recovery ]; then
+    bash "$media/native-migration-admin.sh" "$media" "$run_id"
+fi

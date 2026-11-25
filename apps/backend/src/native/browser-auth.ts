@@ -1,7 +1,7 @@
 import type { KeyObject } from 'node:crypto';
 import {
   accountRecoveryInputSchema, accountRecoveryOutputSchema, boardEventsPath, firstAdminInputSchema, firstAdminOutputSchema, loginInputSchema, loginOutputSchema, loginWithMfaOutputSchema, passiveSessionHeader, sessionSchema,
-  workspaceSignInPath, type BrowserSession, type FirstAdminInput,
+  workspaceSignInPath, type AccountRecoveryInput, type BrowserSession, type FirstAdminInput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -15,6 +15,7 @@ import { createAccountCredentials, type AccountCredentials } from '../applicatio
 import { createAccountDirectory, type AccountDirectory } from '../application/auth/account-directory.js';
 import { AccountActionError } from '../application/auth/account-policy.js';
 import { createFirstAdminEnrollment } from '../application/auth/first-admin.js';
+import { consumeMigrationAdminRecovery } from '../application/auth/migration-admin.js';
 import { readTrustedDeviceCookie } from '../application/auth/mfa-cookie.js';
 import { createMfaManagement } from '../application/auth/mfa-management.js';
 import { createPasswordHasher, HashCapacityError } from '../application/auth/password.js';
@@ -37,6 +38,7 @@ export type NativeAccountManagement = AccountDirectory & AccountCredentials;
 export interface BrowserAuth extends Pick<BrowserSessions, 'login' | 'read' | 'revoke'> {
   accountManagement?: NativeAccountManagement;
   mfa?: NativeMfa;
+  migrationRecovery?: (input: AccountRecoveryInput) => ReturnType<typeof consumeMigrationAdminRecovery>;
   confirm: (input: FirstAdminInput) => Promise<boolean>;
 }
 
@@ -83,6 +85,7 @@ export function createNativeBrowserAuth(
       consumeRecovery: (...args) => withDatabase((database) => credentials(database).consumeRecovery(...args)),
     },
     confirm: (input) => withDatabase((database) => createFirstAdminEnrollment(database, config.installationId, gate, hasher)(input)),
+    migrationRecovery: (input) => withDatabase((database) => consumeMigrationAdminRecovery(database, config.installationId, gate, hasher, input)),
     login: (...args) => withDatabase((database) => sessions(database).login(...args)),
     read: (token, activity) => withDatabase((database) => sessions(database).read(token, activity)),
     async revoke(token) {
@@ -179,6 +182,20 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
 
     routes.post(recoverPath, { bodyLimit }, async (request, reply) => {
       if (!isBrowserMutation(request)) return authError(reply, request, 'origin');
+      if (request.plannerAccess?.kind === 'enrollment' && request.plannerAccess.step === 'account-recovery') {
+        if (!auth.migrationRecovery) return authError(reply, request, 'grant');
+        const input = accountRecoveryInputSchema.safeParse(request.body);
+        if (!input.success) return authError(reply, request, 'badInput');
+        if (!allowEnrollment(input.data.grant, request.plannerConnection!.clientAddress!)) return authError(reply, request, 'limited');
+        try {
+          const result = await auth.migrationRecovery(input.data);
+          return accountRecoveryOutputSchema.parse(result.status === 'confirmed' ? { status: 'staged-confirmed' }
+            : { ...result, status: 'staged-enrollment-required' });
+        } catch (error) {
+          if (error instanceof AccountActionError && error.kind === 'grant') return authError(reply, request, 'grant');
+          throw error;
+        }
+      }
       if (request.plannerAccess?.kind === 'ready' && auth.accountManagement) {
         const input = accountRecoveryInputSchema.safeParse(request.body);
         if (!input.success) return authError(reply, request, 'badInput');

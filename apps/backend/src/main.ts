@@ -4,6 +4,7 @@ import { defaultAppPort } from '@planner/contracts/native';
 import { recoverAccountChanges } from './application/auth/account-credentials.js';
 import { recoverFactorChanges } from './application/auth/mfa-account.js';
 import { recoverFirstAdmin } from './application/auth/first-admin.js';
+import { recoverMigrationAdmin } from './application/auth/migration-admin.js';
 import type { CommandGate } from './application/command-gate/gate.js';
 import { createMediaDecoder } from './application/media/decoder.js';
 import { startMediaCleanup, sweepPrivateMedia, verifyActiveMedia } from './application/media/reconcile.js';
@@ -81,6 +82,7 @@ try {
     stopRecovery = startNativeCommandRecovery(config, gate, async (db, installationId) => {
       await recoverFirstAdmin(db, installationId);
       await recoverAccountChanges(db, installationId, events.streams.revalidateActor);
+      await recoverMigrationAdmin(db, installationId);
       await recoverFactorChanges(db, installationId);
       await verifyActiveMedia(db, installationId, mediaStore);
       await sweepPrivateMedia(db, mediaStore);

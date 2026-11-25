@@ -12,6 +12,7 @@ import { getLocalAccount, type AccountRecord } from './accounts.js';
 import { tokenDigest } from './credentials.js';
 import { matchTotpCounter } from './mfa-crypto.js';
 import { hasConsumedStagedProof, isFactorState, type FactorState } from './mfa-records.js';
+import { readMigrationAdminBinding, readMigrationAdminGrant } from './migration-admin-grant.js';
 
 type MfaAction = 'enabled' | 'disabled' | 'recovery-codes-renewed';
 
@@ -181,6 +182,15 @@ function stagedBinding(installation: InstallationDocument) {
 type StagedBinding = NonNullable<ReturnType<typeof stagedBinding>>;
 
 async function hasStagedRecovery(database: Db, installationId: string, scope: StagedBinding, time: Date) {
+  const installation = await readInstallation(database, installationId);
+  if (installation.setup?.migrationAdminRecovery !== undefined) {
+    const binding = await readMigrationAdminBinding(database, installationId);
+    if (!binding || !binding.requiresMfa || binding.generationId !== scope.generationId || binding.userId !== scope.userId
+      || binding.grantId !== scope.recoveryId || binding.credentialsVersion + 1 !== scope.credentialsVersion
+      || binding.accountRevision + 1 !== scope.accountRevision) return false;
+    const grant = await readMigrationAdminGrant(database, installationId, binding);
+    return !!grant && !grant.claim && grant.revokedAt === null && grant.consumedAt !== null && grant.consumedAt <= time && time < grant.expiresAt;
+  }
   const grant = await database.collection<RecoveryGrant>('recoveryGrants').findOne({
     _id: workspaceKey(scope.generationId, scope.recoveryId), id: scope.recoveryId, installationId,
     generationId: scope.generationId, userId: scope.userId, actorId: scope.userId, kind: 'account-recovery',

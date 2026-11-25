@@ -1,12 +1,52 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
+import { Secret, TOTP } from 'otpauth';
+import { readMigrationAdminActivationProof } from '../apps/backend/dist/application/auth/migration-admin.js';
 import { accountFixture, callSocket, changedPassword, password } from './support/account-fixture.mjs';
+import { migrationAdminFixture, stagedPassword } from './support/migration-admin-fixture.mjs';
 import { tlsBridge } from './support/tls-bridge.mjs';
 import { withFixtureMongo } from './support/fixture-mongo.ts';
 import { assertOwnedMongoEnvironment } from './support/mongo-environment.ts';
 
 assertOwnedMongoEnvironment(process.env);
+
+test('Chromium recovers the designated imported administrator and enrolls MFA while workspace access stays closed', { timeout: 45_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const fixture = await migrationAdminFixture(mongo);
+    const account = await fixture.seed('9007199254741201', { mfa: true });
+    const grant = await fixture.issue({ sourceUserId: '9007199254741201' });
+    await fixture.startGate();
+    let browser;
+    let web;
+    try {
+      web = await tlsBridge(mongo.directory, fixture.startBrowser);
+      browser = await chromium.launch();
+      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 } });
+      const page = await context.newPage();
+      await page.goto(web.origin + '/account-recovery');
+      await page.getByLabel('Recovery grant').fill(grant.grant);
+      await page.getByLabel('New password').fill(stagedPassword);
+      await page.getByLabel('Confirm password').fill(stagedPassword);
+      await page.getByRole('button', { name: 'Set password' }).click();
+      await expect(page.getByRole('heading', { name: 'Set up your authenticator' })).toBeVisible();
+      expect(await readMigrationAdminActivationProof(mongo.db, fixture.run)).toBeNull();
+      await page.getByRole('button', { name: 'Set up authenticator' }).click();
+      const setup = page.getByLabel('Authenticator setup key');
+      await expect(setup).toBeVisible();
+      const totp = new TOTP({ secret: Secret.fromBase32(await setup.textContent()), algorithm: 'SHA1', digits: 6, period: 30 });
+      await page.getByLabel('Authenticator code').fill(totp.generate({ timestamp: fixture.now().valueOf() }));
+      await page.getByRole('button', { name: 'Verify authenticator' }).click();
+      await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
+      await page.getByRole('button', { name: 'I saved my recovery codes' }).click();
+      await expect(page.getByRole('heading', { name: 'Administrator recovery complete' })).toBeVisible();
+      assert.equal((await readMigrationAdminActivationProof(mongo.db, fixture.run))?.userId, account.id);
+      assert.deepEqual(await context.cookies(), []);
+      assert.equal((await context.request.get(web.origin + '/workspace')).status(), 503);
+      assert.equal((await context.request.get(web.origin + '/health/ready')).status(), 503);
+    } finally { await browser?.close(); await web?.close(); await fixture.closeGate(); }
+  });
+});
 
 async function signIn(page, host, email, pass) {
   await page.goto(host + '/sign-in');

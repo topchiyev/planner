@@ -1,12 +1,13 @@
 import { isAbsolute, normalize } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { publicIdSchema } from '@planner/contracts/storage';
+import { accountEmailSchema, accountNameSchema } from '@planner/contracts';
+import { publicIdSchema, signedInt64TextSchema } from '@planner/contracts/storage';
 import { parsePreflightOptions } from '@planner/contracts/native';
 
 type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart' | 'verify-storage' | 'account-inspect' | 'account-confirm'
   | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight' | 'migration-verify' | 'migration-report'
-  | 'migration-stage' | 'migration-resume' | 'migration-status';
+  | 'migration-stage' | 'migration-resume' | 'migration-status' | 'migration-bootstrap-admin';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
 
 const serviceName = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/u;
@@ -77,6 +78,24 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
       const page = paged ? { offset: pageValue('--offset', 0), limit: pageValue('--limit', 100) } : undefined;
       if (args.length || (page && (page.limit < 1 || page.limit > 1000))) throw new Error('Invalid migration verification options.');
       helperArgs = [command, JSON.stringify({ runId, page }), format];
+    } else if (command === 'migration-bootstrap-admin') {
+      const runId = publicIdSchema.parse(flagValue(args, '--run'));
+      const rotate = args.includes('--rotate');
+      if (rotate) args.splice(args.indexOf('--rotate'), 1);
+      const json = args.includes('--json');
+      if (json) args.splice(args.indexOf('--json'), 1);
+      let recipient;
+      if (args.includes('--source-user')) {
+        recipient = { sourceUserId: signedInt64TextSchema.parse(flagValue(args, '--source-user')) };
+      } else {
+        const approval = args.indexOf('--approve-fallback');
+        if (approval === -1) throw new Error('Specify the exact --source-user or explicitly approve a fallback administrator.');
+        args.splice(approval, 1);
+        recipient = { approveFallback: true, name: accountNameSchema.parse(flagValue(args, '--fallback-name')),
+          email: accountEmailSchema.parse(flagValue(args, '--fallback-email')) };
+      }
+      if (args.length) throw new Error('Unexpected migration administrator options.');
+      helperArgs = [command, JSON.stringify({ runId, rotate, ...recipient }), json ? 'json' : 'text'];
     } else if (command === 'backup-restore') {
       const archive = flagValue(args, '--archive');
       const fingerprint = flagValue(args, '--expect-manifest');

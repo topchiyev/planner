@@ -43,9 +43,10 @@ export const preferencesUpdateSchema = z.strictObject({
 });
 export const passwordChangeSchema = z.strictObject({ currentPassword: passwordSchema, password: passwordSchema });
 export const accountRecoveryInputSchema = z.strictObject({ grant: opaqueTokenSchema, password: passwordSchema });
-export const accountRecoveryOutputSchema = z.strictObject({
-  status: z.enum(['confirmed', 'enrollment-required']),
-});
+export const accountRecoveryOutputSchema = z.union([
+  z.strictObject({ status: z.enum(['confirmed', 'enrollment-required', 'staged-confirmed']) }),
+  z.strictObject({ status: z.literal('staged-enrollment-required'), enrollmentId: opaqueTokenSchema }),
+]);
 
 const pageCursorSchema = z.string().regex(/^v1\.[A-Za-z0-9_-]+$/u).max(2048);
 export const accountDirectoryQuerySchema = z.strictObject({

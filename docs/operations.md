@@ -145,6 +145,23 @@ For local reconciliation, add `--offset 0 --limit 100` to the report command and
 
 When verification finds absent originals, the local approval file has `runId`, `snapshotSha256` and `missing` fields. Set `snapshotSha256` to the verified capture manifest SHA-256. Include each reported `uploaded_file` with reason `missing-original` once as `{ "type": "uploaded_file", "sourceId": "…", "reason": "missing-original" }`. Multiple references to the same absent original require one entry. Different original keys for one upload ID block verification. Keep the approval file in a root-owned mode-0700 directory with no permissions for other accounts. Keep the approved file and report digest for an exact retry.
 
+## Recovering the administrator of an inactive import
+
+Verify the intended recipient out of band and select that person's exact source user ID from the verified run. This must be an enabled imported administrator.
+
+```sh
+sudo plannerctl migration bootstrap-admin --run "$run_id" --source-user "$source_user_id"
+```
+
+Give the one-time grant privately to the selected administrator for `/account-recovery`. It expires after 30 minutes. The recipient creates a new password and completes required authenticator setup on that page. Planner keeps sign-in and workspace access closed throughout recovery. An exact repeat displays the expiration without showing the grant again. Use `--rotate` to revoke an unused or incomplete grant and issue a replacement.
+
+When the verified run contains no enabled imported administrator, explicitly approve a separate local administrator. This account requires a new password and authenticator enrollment. Imported roles and account identities are preserved.
+
+```sh
+sudo plannerctl migration bootstrap-admin --run "$run_id" --approve-fallback \
+  --fallback-name "$admin_name" --fallback-email "$admin_email"
+```
+
 ## Workspace storage schema
 
 Setup and the guarded service start verify the installation identity in the dedicated MongoDB instance. A supported schema upgrade runs with the application stopped. Planner copies and verifies any legacy first-administrator grant under its generation-scoped key, creates and checks its collection indexes, and then publishes the new schema version. An interrupted upgrade resumes from the stored phase on the next operator start. The version check preserves the active generation and the setup state.

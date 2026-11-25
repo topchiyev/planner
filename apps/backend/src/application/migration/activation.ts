@@ -7,6 +7,7 @@ import { readInstallation, requireCurrentSchema, type InstallationDocument } fro
 import { workspaceKey } from '../../storage/identity.js';
 import { usableAdmin } from '../auth/account-policy.js';
 import { getFactor, mfaAccounts } from '../auth/mfa-account.js';
+import { readMigrationAdminActivationProof } from '../auth/migration-admin.js';
 import type { Owner } from '../backup/archive.js';
 import { inspectBackup } from '../backup/restore.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
@@ -16,7 +17,7 @@ import { importRunKey, type ImportRun, type migrationCursors } from './checkpoin
 import { MigrationError } from './manifest.js';
 
 const administratorSchema = z.strictObject({ userId: publicIdSchema, revision: revisionSchema,
-  credentialsVersion: z.number().int().positive(), factorId: publicIdSchema });
+  credentialsVersion: z.number().int().positive(), factorId: publicIdSchema.nullable(), recoveryId: publicIdSchema.optional() });
 const backupReceiptSchema = z.strictObject({ backupId: publicIdSchema, manifestSha256: migrationDigestSchema });
 type Administrator = z.infer<typeof administratorSchema>;
 type PendingSetup = NonNullable<InstallationDocument['setup']>;
@@ -96,18 +97,18 @@ export async function activateVerifiedMigration(db: Db, lease: WriterLease, inst
   if (!setup || !isDeepStrictEqual(request.prior.setup, setup) || setup.mode !== 'import'
     || installation.activeGenerationId !== request.prior.generationId || installation.activeGenerationId === generationId
     || installation.mfaKeyDigest !== binding.mfaKeyDigest) throw activationFailure();
-  const admin = await mfaAccounts(db).findOne({ _id: workspaceKey(generationId, binding.administrator.userId),
-    id: binding.administrator.userId, generationId, disabledAt: { $type: 'null' },
-    revision: binding.administrator.revision, 'localAuth.credentialsVersion': binding.administrator.credentialsVersion,
-    'localAuth.factor.id': binding.administrator.factorId, 'localAuth.factorAudit': { $exists: false }, accountChange: { $exists: false } });
-  if (!admin || !usableAdmin(admin) || !getFactor(admin)) throw activationFailure();
+  const { userId, revision, credentialsVersion, factorId, recoveryId } = binding.administrator;
   if (binding.prior.generationId === null) {
-    const staged = setup.stagedMfaEnrollment;
-    if (setup.pendingAction !== 'migration-preflight' || setup.enrollmentGenerationId !== generationId || !staged
-      || staged.userId !== admin.id || !publicIdSchema.safeParse(staged.recoveryId).success
-      || staged.accountRevision + 1 !== admin.revision || staged.credentialsVersion + 1 !== admin.localAuth!.credentialsVersion)
-      throw activationFailure();
-  } else if (setup.pendingAction !== 'complete') throw activationFailure();
+    const proof = await readMigrationAdminActivationProof(db, run);
+    if (!proof || proof.userId !== userId || proof.accountRevision !== revision || proof.credentialsVersion !== credentialsVersion
+      || proof.factorId !== factorId || proof.recoveryId !== recoveryId) throw activationFailure();
+  } else {
+    if (setup.pendingAction !== 'complete' || recoveryId !== undefined || factorId === null) throw activationFailure();
+    const admin = await mfaAccounts(db).findOne({ _id: workspaceKey(generationId, userId), id: userId, generationId,
+      disabledAt: { $type: 'null' }, revision, 'localAuth.credentialsVersion': credentialsVersion, 'localAuth.factor.id': factorId,
+      'localAuth.factorAudit': { $exists: false }, accountChange: { $exists: false } });
+    if (!admin || !usableAdmin(admin) || !getFactor(admin)) throw activationFailure();
+  }
   if (run.activation) matchBinding(run.activation, binding);
   else {
     lease.assertHeld();
@@ -123,7 +124,7 @@ export async function activateVerifiedMigration(db: Db, lease: WriterLease, inst
     setup, mfaKeyDigest: binding.mfaKeyDigest, schemaVersion: binding.schemaVersion, schemaMigration: { $exists: false },
     migrationActivation: { $exists: false }, restoration: { $exists: false } }, {
     $set: { activeGenerationId: generationId, 'setup.pendingAction': 'complete', migrationActivation: receipt },
-    $unset: { 'setup.stagedMfaEnrollment': '' },
+    $unset: { 'setup.stagedMfaEnrollment': '', 'setup.migrationAdminRecovery': '' },
   }, durable);
   if (published.matchedCount !== 1) throw activationFailure();
   await afterPointer?.();

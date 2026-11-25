@@ -89,8 +89,9 @@ export function registerNativeHttpBoundary(app: FastifyInstance, boundary: Nativ
     request.plannerAccess = access ?? null;
     if (access?.kind === 'ready') return;
     if (access?.kind === 'enrollment') {
-      if (read && pathname === (access.step === 'recovery' ? '/recover' : '/enroll-mfa')) return;
-      const allowed = access.step === 'recovery' ? pathname === '/api/v1/recovery/consume' : mfaMethods.has(pathname);
+      const page = { recovery: '/recover', 'account-recovery': '/account-recovery', mfa: '/enroll-mfa' }[access.step];
+      if (read && pathname === page) return;
+      const allowed = access.step === 'mfa' ? mfaMethods.has(pathname) : pathname === '/api/v1/recovery/consume';
       if (allowed && request.method === 'POST' && request.headers.origin === boundary.origin && clientAddress) return;
     }
     return reply.code(503).header('Cache-Control', 'no-store').send({

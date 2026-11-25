@@ -10,9 +10,11 @@ import test from 'node:test';
 import { getCACertificates, setDefaultCACertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
+import { Secret, TOTP } from 'otpauth';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { activateVerifiedMigration } from '../../apps/backend/dist/application/migration/activation.js';
-import { createTotpSecret } from '../../apps/backend/dist/application/auth/mfa-crypto.js';
+import { consumeMigrationAdminRecovery, issueMigrationAdminRecovery, readMigrationAdminActivationProof } from '../../apps/backend/dist/application/auth/migration-admin.js';
+import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { getLocalAccount } from '../../apps/backend/dist/application/auth/accounts.js';
 import { sessionCookieName } from '../../apps/backend/dist/application/auth/credentials.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
@@ -1316,8 +1318,7 @@ test('native migration replay survives SIGKILL before the stage checkpoint and a
         const mfaKey = randomBytes(32);
         const administrator = { userId: publicIds(receipt.capture.source.instanceId)('user_account', '101'),
           revision: 3, credentialsVersion: 3, factorId: randomUUID() };
-        const prior = { generationId: null, setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: generationId,
-          stagedMfaEnrollment: { userId: administrator.userId, recoveryId: randomUUID(), accountRevision: 2, credentialsVersion: 2 } } };
+        const prior = { generationId: null, setup: (await state.findOne({ _id: 'installation' })).setup };
         const verification = { runId, generationId, manifestSha256: receipt.manifestSha256, fingerprintSha256: receipt.fingerprint.sha256,
           reportSha256: '0'.repeat(64), missingOriginals: 0, approvalSha256: null };
         const request = { verification, administrator, prior, mfaKeyDigest: sha256(mfaKey), approval: undefined };
@@ -1328,16 +1329,30 @@ test('native migration replay survives SIGKILL before the stage checkpoint and a
         request.approval = { runId, snapshotSha256: receipt.manifestSha256, missing: report.missing };
         await writeFile(approvalPath, JSON.stringify(request.approval), { mode: 0o600 });
         request.verification = await prepareMigrationActivation(directory, owner, (await reread()).run, receipt.manifestSha256, approvalPath);
-        await state.updateOne({ _id: 'installation' }, { $set: { setup: prior.setup, mfaKeyDigest: request.mfaKeyDigest } });
+        await state.updateOne({ _id: 'installation' }, { $set: { mfaKeyDigest: request.mfaKeyDigest } });
         await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, request), refuses('activation-conflict'));
-        const factor = createTotpSecret(createSecretKey(mfaKey), { installationId, generationId, userId: administrator.userId,
-          factorId: administrator.factorId }, 'Synthetic stage administrator');
-        const passwordVerifier = await createPasswordHasher().encode('synthetic replay fixture');
-        await db.collection('users').updateOne({ ...scoped, id: administrator.userId }, { $set: {
-          revision: administrator.revision, requiresMfaEnrollment: false,
-          localAuth: { passwordVerifier, credentialsVersion: administrator.credentialsVersion, mfa: 'totp',
-            factor: { id: administrator.factorId, encrypted: factor.encrypted, greatestCounter: 0, recoveryDigests: [] } },
-        } });
+        const verifiedRun = (await reread()).run;
+        const issued = await issueMigrationAdminRecovery(db, owned, verifiedRun, { runId, sourceUserId: '101', rotate: false });
+        assert.equal(issued.userId, administrator.userId);
+        const gate = { runCommand: (operation) => { owned.assertHeld(); return operation(); } };
+        const hasher = createPasswordHasher();
+        const recovery = await consumeMigrationAdminRecovery(db, installationId, gate, hasher, {
+          grant: issued.grant, password: 'synthetic replay fixture',
+        });
+        assert.equal(recovery.status, 'enrollment-required');
+        assert.equal(await readMigrationAdminActivationProof(db, verifiedRun), null);
+        const mfa = createMfaManagement(db, installationId, gate, createSecretKey(mfaKey), hasher);
+        const secret = await mfa.begin({ enrollmentId: recovery.enrollmentId });
+        const totp = new TOTP({ secret: Secret.fromBase32(secret.secret), algorithm: 'SHA1', digits: 6, period: 30 });
+        const factors = await mfa.confirm({ enrollmentId: recovery.enrollmentId }, totp.generate());
+        assert.equal(factors.recoveryCodes.length, 10);
+        const proof = await readMigrationAdminActivationProof(db, verifiedRun);
+        assert.equal(proof.userId, administrator.userId);
+        request.administrator = { userId: proof.userId, revision: proof.accountRevision, credentialsVersion: proof.credentialsVersion,
+          factorId: proof.factorId, recoveryId: proof.recoveryId };
+        request.prior = { generationId: null, setup: (await state.findOne({ _id: 'installation' })).setup };
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, { ...request,
+          administrator: { ...request.administrator, recoveryId: randomUUID() } }), refuses('activation-conflict'));
         mfaKey.fill(0);
         const wrongApproval = { ...request, verification: { ...request.verification, approvalSha256: 'a'.repeat(64) } };
         await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, wrongApproval), refuses('approval-invalid'));
@@ -1345,13 +1360,14 @@ test('native migration replay survives SIGKILL before the stage checkpoint and a
         const wrongFingerprint = { ...request, verification: { ...request.verification, fingerprintSha256: '0'.repeat(64) } };
         await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, wrongFingerprint), refuses('activation-conflict'));
         await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, { ...request,
-          prior: { ...prior, generationId: randomUUID() } }), refuses('activation-conflict'));
+          prior: { ...request.prior, generationId: randomUUID() } }), refuses('activation-conflict'));
         assert.equal((await state.findOne({ _id: 'installation' })).activeGenerationId, null);
         owned.release();
         await killMigrationAt(fixture, { ...args, point: 'activation', activation: request });
         const published = await state.findOne({ _id: 'installation' });
         assert.equal(published.activeGenerationId, generationId);
         assert.equal(published.migrationActivation.state, 'activeReadOnly');
+        assert.equal(published.setup.migrationAdminRecovery, undefined);
         owned = acquireWriterDirectory(writer, owner, owner);
         const replay = await activateVerifiedMigration(db, owned, installationId, cursors, request);
         assert.deepEqual(replay, published.migrationActivation);
