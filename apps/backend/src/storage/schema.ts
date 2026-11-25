@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   generationIdSchema, installationIdSchema, normalizedEmailSchema, parseSourceIdentity, publicIdSchema, revisionSchema,
 } from '@planner/contracts/storage';
+import type { MigrationActivationReceipt } from '../application/migration/activation.js';
 import { MongoServerError, type Db, type Filter } from 'mongodb';
 import { ownedIndexes, workspaceCollections, type OwnedIndex, type WorkspaceCollection } from './catalog.js';
 import { isStoredDate, readLongField, readStoredInstant, signedLongFields, storedInstantFields, workspaceKey } from './identity.js';
@@ -23,6 +24,8 @@ export interface InstallationDocument {
   activeGenerationId: string | null;
   schemaVersion: number;
   mfaKeyDigest?: string;
+  migrationActivation?: MigrationActivationReceipt;
+  restoration?: unknown;
   schemaMigration?: MigrationProgress;
   setup?: {
     mode: 'fresh' | 'import';

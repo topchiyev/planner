@@ -86,6 +86,8 @@ export async function collectMigrationVerification(db: Db, lease: WriterLease, i
     || cursors.open({ runId: run.id, generationId: run.generationId, fingerprint: identity.fingerprint.sha256,
       pass: checkpoint.pass, table: checkpoint.table }, checkpoint.token) !== checkpoint.lastSourceId) throw incomplete();
 
+  try { cursors.assertComplete(run); } catch { throw incomplete(); }
+
   const accepted = new Map<WorkspaceCollection, number>();
   const projected = new Map<string, number>();
   const cases = new Map<string, Case>();

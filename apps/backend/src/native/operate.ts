@@ -31,9 +31,10 @@ import {
 import { adminRuntimeDirectory } from './admin-socket.js';
 import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
+import { nativeMigrationMediaPublisher } from './migration-media.js';
 import { assertMigrationTarget, checkMigrationCapacity, migrationVerificationPage, openNativeMigrationDirectory,
   persistMigrationVerification, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
-  readProtectedMigrationRun } from './migration-state.js';
+  publicMigrationStatus, readProtectedMigrationRun, stageProtectedMigrationRun } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
@@ -577,6 +578,48 @@ async function migrationPreflight(input: MigrationInput) {
   });
 }
 
+const migrationStageRequest = z.strictObject({ runId: publicIdSchema });
+
+async function migrationStage(runId: string, statusOnly: boolean) {
+  const run = async (owner: ReturnType<typeof verifyOwnership>) => {
+    const config = readInstallationConfig(owner.appGroup);
+    const restore = readRestoreIntent(owner.receipt);
+    verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
+    if (!config || config.mode !== 'import' || restore) throw new MigrationError('target-setup', 'Select a protected import installation.');
+    const client = await connectOwnedDatabase(config, owner.appGroup);
+    try {
+      const directory = await openNativeMigrationDirectory();
+      try {
+        const db = client.db(databaseName);
+        const saved = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
+        if (statusOnly) return publicMigrationStatus(saved.run);
+        await assertMigrationTarget(db, config.installationId);
+        const source = await migrationConfig('postgres');
+        const objects = saved.input.assetService === undefined ? undefined : await migrationConfig('objects');
+        const wasRunning = appListening(config.appPort, true);
+        if (wasRunning) systemctl('stop', app);
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        process.once('SIGINT', cancel);
+        process.once('SIGTERM', cancel);
+        try {
+          return await withStoppedWriter((writer) => stageProtectedMigrationRun(db, writer, saved, migrationOwner, source, objects, {
+            prepare: nativeMigrationMediaPublisher({ uid: owner.appUid, gid: owner.appGroup }, writer), signal: controller.signal,
+          }));
+        } catch (error) {
+          if (controller.signal.aborted) throw new MigrationError('target-write', 'Migration staging was interrupted. Resume the same run.');
+          throw error;
+        } finally {
+          process.off('SIGINT', cancel);
+          process.off('SIGTERM', cancel);
+          if (wasRunning) await startApplication(config.appPort);
+        }
+      } finally { await directory.close(); }
+    } finally { await client.close(); }
+  };
+  return statusOnly ? run(verifyOwnership()) : withInstallationLock(run);
+}
+
 const migrationVerificationRequest = z.strictObject({ runId: publicIdSchema,
   page: z.strictObject({ offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(1000) }).optional() });
 
@@ -645,6 +688,13 @@ try {
       const result = await migrationPreflight(parseMigrationInput(JSON.parse(args[0])));
       console.log(args[1] === 'json' ? JSON.stringify(result) : `Run ${result.runId} preflighted for manifest ${result.manifestSha256}. Missing originals ${result.assets.missingOriginals}, missing derivatives ${result.assets.missingDerivatives}.`);
     }
+  } else if ((action === 'migration-stage' || action === 'migration-resume' || action === 'migration-status')
+    && args.length === 2 && (args[1] === 'json' || args[1] === 'text')) {
+    const { runId } = migrationStageRequest.parse(JSON.parse(args[0]));
+    const result = await migrationStage(runId, action === 'migration-status');
+    const progress = result.checkpoint ? ` Checkpoint ${result.checkpoint.pass}/${result.checkpoint.table}.` : '';
+    console.log(args[1] === 'json' ? JSON.stringify(result)
+      : `Run ${result.runId} is ${result.stageComplete && result.state === 'staging' ? 'staged' : result.state}.${progress}`);
   } else if ((action === 'migration-verify' || action === 'migration-report') && args.length === 2
       && (args[1] === 'json' || (action === 'migration-verify' && args[1] === 'text'))) {
     const request = migrationVerificationRequest.parse(JSON.parse(args[0]));

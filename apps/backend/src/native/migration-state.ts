@@ -14,7 +14,9 @@ import { activationExpectation, canonicalMissingOriginals, parseMigrationApprova
 import { MigrationError, sha256 } from '../application/migration/manifest.js';
 import { parseMigrationInput, type inspectMigration, type MigrationInput } from '../application/migration/preflight.js';
 import { openMigrationFile } from '../application/migration/prepare.js';
-import { completedMigrationTable } from '../application/migration/stage-base.js';
+import { completedMigrationTable, stageMigrationWorkspace } from '../application/migration/stage-base.js';
+import { withMigrationSnapshot } from '../application/migration/preflight.js';
+import type { MigrationMediaTarget } from '../application/migration/media-stage.js';
 import type { MigrationVerification } from '../application/migration/verification.js';
 import { readInstallation, verifyStorageSchema } from '../storage/schema.js';
 
@@ -245,8 +247,34 @@ export async function readProtectedMigrationRun(db: Db, installationId: string, 
       if (migrationCursors(secret).open({ runId, generationId, fingerprint: run.fingerprint.sha256, pass, table }, token) !== lastSourceId)
         throw verificationFailure();
     }
-    return { run, input: parseMigrationInput(saved.inputs), cursors: migrationCursors(secret) };
+    const cursors = migrationCursors(secret);
+    if (run.stageCompletion !== undefined) cursors.assertComplete(run);
+    return { run, input: parseMigrationInput(saved.inputs), cursors };
   } catch { throw verificationFailure(); }
+}
+
+type ProtectedMigrationRun = Awaited<ReturnType<typeof readProtectedMigrationRun>>;
+
+export function publicMigrationStatus(run: ImportRun) {
+  const checkpoint = run.checkpoint && { pass: run.checkpoint.pass, table: run.checkpoint.table, lastSourceId: run.checkpoint.lastSourceId };
+  return { runId: run.id, generationId: run.generationId, manifestSha256: run.manifestSha256,
+    fingerprintSha256: run.fingerprint.sha256, state: run.state, stageComplete: run.stageCompletion !== undefined, checkpoint };
+}
+
+export async function stageProtectedMigrationRun(db: Db, lease: WriterLease, saved: ProtectedMigrationRun, owner: Owner,
+  sourceConfig: string, objectConfig: string | undefined, media: MigrationMediaTarget, batchSize?: number) {
+  lease.assertHeld();
+  const { run, input, cursors } = saved;
+  if (run.state !== 'preflighted' && run.state !== 'staging')
+    throw new MigrationError('target-write', 'Only a preflighted or staging import run can be resumed.');
+  const identity = { runId: run.id, installationId: run.installationId, generationId: run.generationId, fingerprint: run.fingerprint };
+  await withMigrationSnapshot(input, owner, sourceConfig, objectConfig, {
+    expectedManifestSha256: run.manifestSha256, expectedFingerprint: run.fingerprint.sha256,
+  }, (snapshot) => stageMigrationWorkspace(db, lease, identity, snapshot, cursors, media, batchSize));
+  const current = await db.collection<ImportRun>('importRuns').findOne(importRunKey(identity));
+  if (!current) throw verificationFailure();
+  cursors.assertComplete(current);
+  return publicMigrationStatus(current);
 }
 
 function verifyReport(run: ImportRun, report: MigrationVerification) {
@@ -289,7 +317,7 @@ export async function persistMigrationVerification(lease: WriterLease, db: Db, d
   run: ImportRun, report: MigrationVerification, beforePublish?: () => Promise<void>) {
   lease.assertHeld();
   verifyReport(run, report);
-  if (run.state !== 'staging' || !run.checkpoint || run.checkpoint.pass !== 'media' || run.checkpoint.table !== completedMigrationTable
+  if (run.state !== 'staging' || run.stageCompletion === undefined || !run.checkpoint || run.checkpoint.pass !== 'media' || run.checkpoint.table !== completedMigrationTable
     || run.verification !== undefined) throw verificationFailure();
   const installation = await readInstallation(db, run.installationId);
   if (installation.activeGenerationId === run.generationId || installation.setup?.enrollmentGenerationId === run.generationId)

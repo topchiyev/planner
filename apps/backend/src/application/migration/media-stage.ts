@@ -1,14 +1,14 @@
-import { Readable } from 'node:stream';
 import { mediaNameSchema } from '@planner/contracts';
 import { nameBasedUuid } from '../../storage/identity.js';
-import { MediaStorageError, type BlobIdentity, type MediaPart, type PrivateMediaStore } from '../../storage/blobs/private-store.js';
+import type { BlobIdentity, PrivateMediaStore } from '../../storage/blobs/private-store.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
-import { detectImage, imageTypes, type MediaDecoder } from '../media/decoder.js';
+import type { MediaDecoder } from '../media/decoder.js';
 import { MediaRejection } from '../media/errors.js';
-import { availableMedia, originalType, unavailableMedia } from '../media/records.js';
+import { availableMedia, unavailableMedia } from '../media/records.js';
 import type { VerifiedSourceAsset } from './assets.js';
 import { invalidBaseRow, targetTimes } from './base-fields.js';
 import { MigrationError } from './manifest.js';
+import { localMigrationMediaPublisher, type MigrationMediaPublisher } from './media-publication.js';
 import type { VerifiedSourceSnapshot } from './preflight.js';
 import { SourceJsonNumber, sourceKey, type SourceJson, type SourceRow } from './source-projections.js';
 import type { ImportRecords } from './staged-records.js';
@@ -16,7 +16,8 @@ import type { ImportRecords } from './staged-records.js';
 export const migrationMediaTables = ['attachment', 'background_image', 'uploaded_file', 'user_account'] as const;
 type MediaTable = typeof migrationMediaTables[number];
 export type MigrationMediaRow = { [K in MediaTable]: { table: K; row: SourceRow<K> } }[MediaTable];
-export type MigrationMediaTarget = { store: PrivateMediaStore; decode: MediaDecoder; signal?: AbortSignal };
+export type MigrationMediaTarget = ({ store: PrivateMediaStore; decode: MediaDecoder } | { prepare: MigrationMediaPublisher })
+  & { signal?: AbortSignal };
 type MigrationMediaVerification = { signal?: AbortSignal; verifyBlob(identity: BlobIdentity): Promise<void> };
 
 type UploadType = 'attachment' | 'backgroundImage' | 'userAvatar';
@@ -145,36 +146,30 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
       return persist({ availability: unavailableMedia, blobDigest: null });
     }
 
-    const stage = await target.store.stage();
-    let unpin: (() => void) | undefined;
+    const prepare = 'prepare' in target ? target.prepare : localMigrationMediaPublisher(target.store, target.decode);
+    let prepared: Awaited<ReturnType<MigrationMediaPublisher>> | undefined;
     try {
-      const { identity, prefix } = await snapshot.readAsset(original.key, signal,
-        (bytes, reading) => stage.receive(Readable.from(bytes), byteLength, reading));
-      if (identity.digest !== sha256 || identity.byteLength !== byteLength) {
+      prepared = await prepare({ digest: sha256, byteLength }, (consume, reading) =>
+        snapshot.readAsset(original.key, reading, consume), signal);
+      const { digest, byteLength: storedLength, mimeType, variants } = prepared.media;
+      if (digest !== sha256 || storedLength !== byteLength)
         throw new MigrationError('asset-integrity', 'Staged media does not match the verified source bytes.');
-      }
-      const format = detectImage(prefix);
-      if (!format && file.uploadType !== 'attachment') {
+      if (!variants && file.uploadType !== 'attachment')
         throw new MigrationError('asset-integrity', 'The verified profile or background asset is not a supported image.');
-      }
-      const variants = format ? await target.decode(stage, format, signal) : null;
-      const parts: { part: MediaPart; identity: BlobIdentity }[] = [{ part: 'original', identity }];
-      if (variants) parts.push({ part: 'small', identity: variants.small }, { part: 'large', identity: variants.large });
       signal.throwIfAborted();
       lease.assertHeld();
-      unpin = await stage.publish(parts);
+      await prepared.publish();
       signal.throwIfAborted();
-      const blobId = nameBasedUuid(snapshot.capture.sourceInstanceId, `blob:${identity.digest}`);
-      await records.write('blobs', blobId, { ...identity, mimeType: format ? imageTypes[format] : originalType, variants,
+      const blobId = nameBasedUuid(snapshot.capture.sourceInstanceId, `blob:${digest}`);
+      await records.write('blobs', blobId, { digest, byteLength, mimeType, variants,
         lifecycleState: availableMedia, createdAt: new Date(fallback) });
-      await persist({ availability: availableMedia, blobDigest: identity.digest, byteLength: identity.byteLength });
+      await persist({ availability: availableMedia, blobDigest: digest, byteLength });
     } catch (error) {
+      if (error instanceof MigrationError) throw error;
       if (error instanceof MediaRejection && error.kind === 'image')
         throw new MigrationError('asset-integrity', 'The verified image could not be decoded within the supported limits.');
-      if (error instanceof MediaStorageError)
-        throw new MigrationError('target-write', 'The verified media could not be safely staged and published.');
-      throw error;
-    } finally { try { await stage.dispose(); } finally { unpin?.(); } }
+      throw new MigrationError('target-write', 'The verified media could not be safely staged and published.');
+    } finally { await prepared?.close(); }
   }
 
   return async (entry: MigrationMediaRow) => {

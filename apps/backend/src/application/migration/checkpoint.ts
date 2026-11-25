@@ -3,16 +3,18 @@ import { isDeepStrictEqual } from 'node:util';
 import { migrationDigestSchema, type MigrationCapture } from '@planner/contracts';
 import { generationIdSchema, publicIdSchema } from '@planner/contracts/storage';
 import type { Db, Filter } from 'mongodb';
-import { readInstallation } from '../../storage/schema.js';
+import { currentStorageSchema, readInstallation, requireCurrentSchema } from '../../storage/schema.js';
 import { workspaceKey } from '../../storage/identity.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { durable } from '../command-journal/records.js';
+import type { MigrationActivationBinding } from './activation.js';
 import { MigrationError } from './manifest.js';
 import { assertVerifiedSourceSnapshot, trackSourceOperation, type VerifiedSourceSnapshot } from './preflight.js';
 import type { SourceFingerprint } from './source-fingerprint.js';
 import { compareSourceKeys, projectedSourceTables, sourceKey, sourceProjectionVersion, type SourceTable } from './source-projections.js';
 
 export const migrationPasses = ['reserve', 'base', 'edges', 'deferred', 'projections', 'media'] as const;
+export const completedMigrationTable = 'user_account' satisfies SourceTable;
 export type MigrationPass = typeof migrationPasses[number];
 export type ImportIdentity = { installationId: string; runId: string; generationId: string; fingerprint: SourceFingerprint };
 type CursorScope = { runId: string; generationId: string; fingerprint: string; pass: MigrationPass; table: SourceTable };
@@ -25,6 +27,8 @@ export type ImportRun = {
   state: 'preflighted' | 'staging' | 'verified' | 'blocked'; fingerprint: SourceFingerprint;
   manifestSha256: string; createdAt: Date; updatedAt: Date; checkpoint: MigrationCheckpoint | null;
   source: Pick<MigrationCapture['source'], 'instanceId' | 'release' | 'edition'>;
+  stageCompletion?: string;
+  activation?: MigrationActivationBinding;
   verification?: { reportSha256: string; detailSha256: string };
 };
 
@@ -44,7 +48,21 @@ export function migrationCursors(secret: Uint8Array) {
   if (secret.byteLength !== 32) throw invalid();
   const key = Buffer.from(secret);
   const mac = (payload: Uint8Array) => createHmac('sha256', key).update('planner-import-checkpoint\0').update(payload).digest();
+  function sealCompletion(run: ImportRun) {
+    const { checkpoint } = run;
+    if (!checkpoint || checkpoint.pass !== 'media' || checkpoint.table !== completedMigrationTable
+      || !migrationDigestSchema.safeParse(run.manifestSha256).success) throw invalid();
+    return createHmac('sha256', key).update('planner-import-stage-completion\0').update(JSON.stringify([
+      currentStorageSchema, sourceProjectionVersion, run.installationId, run.id, run.generationId, run.manifestSha256,
+      run.fingerprint, checkpoint,
+    ])).digest('hex');
+  }
   return {
+    sealCompletion,
+    assertComplete(run: ImportRun) {
+      const saved = migrationDigestSchema.safeParse(run.stageCompletion);
+      if (!saved.success || !timingSafeEqual(Buffer.from(saved.data, 'hex'), Buffer.from(sealCompletion(run), 'hex'))) throw invalid();
+    },
     seal(scope: CursorScope, lastSourceId: string | null) {
       const payload = cursorMessage(scope, lastSourceId);
       return payload.toString('base64url') + '.' + mac(payload).toString('base64url');
@@ -107,7 +125,7 @@ export function writeMigrationBatch(lease: WriterLease, db: Db, identity: Import
         const records = db.collection<ImportRun>('importRuns');
         const current = await records.findOne(key);
         if (!current || (current.state !== 'preflighted' && current.state !== 'staging')
-          || !isDeepStrictEqual(current.fingerprint, identity.fingerprint)) throw invalid();
+          || !isDeepStrictEqual(current.fingerprint, identity.fingerprint) || current.stageCompletion !== undefined) throw invalid();
         if (isDeepStrictEqual(current.checkpoint, next)) return next;
         if (!isDeepStrictEqual(current.checkpoint, before)) throw invalid();
         lease.assertHeld();
@@ -116,7 +134,7 @@ export function writeMigrationBatch(lease: WriterLease, db: Db, identity: Import
         lease.assertHeld();
         assertVerifiedSourceSnapshot(snapshot);
         const match: Filter<ImportRun> = {
-          ...key, state: current.state, 'fingerprint.sha256': identity.fingerprint.sha256,
+          ...key, state: current.state, stageCompletion: { $exists: false }, 'fingerprint.sha256': identity.fingerprint.sha256,
           ...(before ? { 'checkpoint.token': before.token, 'checkpoint.pass': before.pass, 'checkpoint.table': before.table,
             'checkpoint.lastSourceId': before.lastSourceId ?? { $type: 'null' } } : { checkpoint: { $type: 'null' } }),
         };
@@ -126,4 +144,28 @@ export function writeMigrationBatch(lease: WriterLease, db: Db, identity: Import
       } finally { activeBatches.delete(lease); }
     });
   } catch (error) { return Promise.reject(error); }
+}
+
+/** Record completion only after a verified source walk has exhausted the final media table. */
+export async function sealMigrationStage(lease: WriterLease, db: Db, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,
+  cursors: ReturnType<typeof migrationCursors>, checkpoint: MigrationCheckpoint | null) {
+  lease.assertHeld();
+  assertVerifiedSourceSnapshot(snapshot, true);
+  const installation = await readInstallation(db, identity.installationId);
+  requireCurrentSchema(installation);
+  if (installation.activeGenerationId === identity.generationId || installation.setup?.enrollmentGenerationId === identity.generationId)
+    throw invalid();
+  const key = importRunKey(identity);
+  const runs = db.collection<ImportRun>('importRuns');
+  const current = await runs.findOne(key);
+  if (!current || current.state !== 'staging' || !checkpoint || !isDeepStrictEqual(current.checkpoint, checkpoint)
+    || current.manifestSha256 !== snapshot.manifestSha256 || !isDeepStrictEqual(current.fingerprint, identity.fingerprint)
+    || !isDeepStrictEqual(current.fingerprint, snapshot.fingerprint)) throw invalid();
+  if (current.stageCompletion !== undefined) return cursors.assertComplete(current);
+  const stageCompletion = cursors.sealCompletion(current);
+  lease.assertHeld();
+  const saved = await runs.updateOne({ ...key, state: 'staging', manifestSha256: current.manifestSha256,
+    'fingerprint.sha256': identity.fingerprint.sha256, 'checkpoint.token': checkpoint.token, stageCompletion: { $exists: false } },
+  { $set: { stageCompletion, updatedAt: new Date() } }, durable);
+  if (saved.matchedCount !== 1) throw invalid();
 }
