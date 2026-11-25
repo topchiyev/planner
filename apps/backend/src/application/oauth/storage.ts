@@ -249,6 +249,8 @@ export function createOAuthStorage(
       expiresAtMs: Math.min(row.expiresAt.getTime(), grant.expiresAt.getTime()) };
   }
 
+  const accessTokenProofCurrent = (expiresAtMs: number) => now().getTime() < expiresAtMs;
+
   return {
     adapter,
     async withRequest<T>(db: Db, operation: () => Promise<T>) {
@@ -338,14 +340,15 @@ export function createOAuthStorage(
       // The command journal already owns the writer lease for this database.
       if (await writableGeneration(db) !== generationId) return null;
       const access = await currentAccessToken({ db, generationId }, token);
-      return access && now().getTime() < access.expiresAtMs ? access : null;
+      return access && accessTokenProofCurrent(access.expiresAtMs) ? access : null;
     },
+    accessTokenProofCurrent,
     withAccessTokenRead<T>(token: string, operation: (database: Db, access: NonNullable<Awaited<ReturnType<typeof currentAccessToken>>>) => Promise<T>) {
       return run(false, async (scope) => {
         const access = await currentAccessToken(scope, token);
         if (!access) return null;
         const result = await operation(scope.db, access);
-        return now().getTime() < access.expiresAtMs ? result : null;
+        return accessTokenProofCurrent(access.expiresAtMs) ? result : null;
       });
     },
   };

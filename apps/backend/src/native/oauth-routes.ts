@@ -56,9 +56,10 @@ export function createNativeOAuthRuntime(
   origin: string, installationId: string, gate: CommandGate, key: KeyObject,
   withDatabase: <T>(run: (db: Db) => Promise<T>) => Promise<T>, clients: readonly PlannerOAuthClient[] = [], registry = createOAuthClientRegistry(clients),
   onGrantRevoked?: (identity: { generationId: string; grantId: string }) => void | Promise<void>,
+  now?: () => Date,
 ) {
   const secrets = oauthSecrets(key, installationId);
-  const storage = createOAuthStorage(installationId, gate, secrets);
+  const storage = createOAuthStorage(installationId, gate, secrets, now);
   let provider: ReturnType<typeof loadProvider> | undefined;
   async function loadProvider(db: Db) {
     const instance = createPlannerProvider(origin, storage, secrets.cookies, await storage.keys(db), registry);
