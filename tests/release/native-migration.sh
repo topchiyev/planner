@@ -461,6 +461,9 @@ if [ "$administrator_recovery" = --cutover ]; then
     mkdir "$work/pre-restore"
     mv /etc/planner "$work/pre-restore/config"
     mv /var/lib/planner "$work/pre-restore/state"
+    install -d -m 0711 /etc/planner /var/lib/planner
+    install -m 0644 "$work/pre-restore/config/.native-installation" /etc/planner/.native-installation
+    install -m 0644 "$work/pre-restore/state/.native-installation" /var/lib/planner/.native-installation
     dpkg -i "$package"
     [ ! -e /var/lib/planner/migration ]
     plannerctl backup restore --archive "$export_root/snapshot" --expect-manifest "$restore_sha" \
