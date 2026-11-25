@@ -148,6 +148,16 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       return /name="csrf" value="([A-Za-z0-9_-]+)"/u.exec(response.text)?.[1];
     };
 
+    async function approve(path, write = true) {
+      const accepted = await consent(path, { csrf: csrfFrom(await call(path, { jar })), decision: 'allow',
+        ...(write && { write: 'yes' }) }, jar);
+      assert.equal(accepted.status, 303, accepted.text);
+      const callback = await follow(accepted, jar);
+      const code = new URL(callback.headers.location).searchParams.get('code');
+      assert.ok(code);
+      return code;
+    }
+
     try {
       const discovery = await call('/.well-known/oauth-protected-resource/mcp', { headers: { Forwarded: 'host=attacker.invalid' } });
       assert.equal(discovery.status, 200);
@@ -210,6 +220,14 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal(success.json.refresh_token, undefined);
       assert.equal(success.json.id_token, undefined);
 
+      const connections = db.collection('oauthConnections');
+      const readGrants = { generationId, userId: actorId, clientId, scope: 'planner:read' };
+      const previous = await connections.find(readGrants).map(({ id }) => id).toArray();
+      const inactiveBrowserToken = await token(await approve(await interaction(), false));
+      assert.equal(inactiveBrowserToken.status, 200);
+      const firstConnection = await connections.findOne({ ...readGrants, id: { $nin: previous } });
+      assert.ok(firstConnection);
+
       const canceledPath = await interaction();
       const canceled = await consent(canceledPath, { csrf: csrfFrom(await call(canceledPath, { jar })), decision: 'cancel' }, jar);
       assert.equal(canceled.status, 303);
@@ -223,15 +241,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal(fresh.json.status, 'challenge-required');
       const consumed = await post('/api/v1/session/verify-mfa', { challengeId: fresh.json.challengeId, recoveryCode: factor.recoveryCodes[0] }, jar);
       assert.equal(consumed.json.status, 'authenticated');
-      async function allowWrite(path) {
-        const accepted = await consent(path, { csrf: csrfFrom(await call(path, { jar })), decision: 'allow', write: 'yes' }, jar);
-        assert.equal(accepted.status, 303, accepted.text);
-        const callback = await follow(accepted, jar);
-        const code = new URL(callback.headers.location).searchParams.get('code');
-        assert.ok(code);
-        return code;
-      }
-      const secondCode = await allowWrite(next);
+      const secondCode = await approve(next);
       const full = await token(secondCode);
       assert.equal(full.status, 200);
       assert.deepEqual(full.json.scope.split(' ').sort(), ['planner:read', 'planner:write']);
@@ -239,13 +249,13 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal((await call('/mcp', { headers: bearer })).status, 501);
       assert.equal((await call('/mcp?access_token=' + full.json.access_token)).status, 401);
 
-      const thirdCode = await allowWrite(await interaction());
+      const thirdCode = await approve(await interaction());
       const badResource = await token(thirdCode, { resource: origin + '/not-mcp' });
       assert.equal(badResource.status, 400);
       assert.equal(badResource.json.error, 'invalid_target');
       const codeRows = db.collection('oauthArtifacts');
       const beforeExpiry = new Set((await codeRows.find({ kind: 'AuthorizationCode' }).toArray()).map(({ _id }) => _id));
-      const expiredCode = await allowWrite(await interaction());
+      const expiredCode = await approve(await interaction());
       const [toExpire, unexpected] = (await codeRows.find({ kind: 'AuthorizationCode' }).toArray())
         .filter(({ _id }) => !beforeExpiry.has(_id));
       assert.ok(toExpire);
@@ -270,19 +280,19 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.ok(csrfFrom(await call(pendingRestart, { jar })));
       assert.equal((await call('/mcp', { headers: bearer })).status, 501);
 
-      const codeBeforeLogout = await allowWrite(pendingRestart);
+      const codeBeforeLogout = await approve(pendingRestart);
       const currentBrowser = await call('/api/v1/session', { jar });
       assert.equal(currentBrowser.status, 200);
       const logout = await call('/api/v1/session', { method: 'DELETE', jar,
         headers: { Origin: origin, 'X-CSRF-Token': currentBrowser.json.csrfToken } });
       assert.equal(logout.status, 204);
       assert.equal((await call('/api/v1/session', { jar })).status, 401);
-      assert.equal((await token(codeBeforeLogout)).json.error, 'invalid_grant');
+      const loggedOutSwap = await token(codeBeforeLogout);
+      assert.equal(loggedOutSwap.status, 400);
+      assert.equal(loggedOutSwap.json.error, 'invalid_grant');
       assert.equal((await call('/mcp', { headers: bearer })).status, 501);
 
-      const readBearer = { Authorization: 'Bearer ' + success.json.access_token };
-      const connections = db.collection('oauthConnections');
-      const firstConnection = await connections.findOne({ generationId, userId: actorId, clientId, scope: 'planner:read' });
+      const readBearer = { Authorization: 'Bearer ' + inactiveBrowserToken.json.access_token };
       const sessionsCollection = db.collection('sessions');
       const firstSession = await sessionsCollection.findOne({ id: firstConnection.browserSessionId, generationId });
       assert.equal(firstSession.revokedAt, null);
