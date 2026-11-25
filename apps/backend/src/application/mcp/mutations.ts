@@ -10,7 +10,7 @@ import { WorkspaceReadOnly } from '../migration/cutover.js';
 import { WorkspaceAccessError, type WorkspaceAuthorization } from '../workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../workspace/relationship-commands.js';
 import { mcpMediaReceipt, mcpMutationNamed, mcpRelationshipReceipt, parseMcpMutation } from './mutation-catalog.js';
-import { RelationshipError } from '../workspace/relationship-policy.js';
+import { CardPlacementConflict, RelationshipError } from '../workspace/relationship-policy.js';
 
 const maximumResultBytes = 64 * 1024;
 
@@ -92,5 +92,5 @@ export function mcpMutationError(error: unknown): CallToolResult {
     code = 'REVISION_CONFLICT';
     message = 'The resource revision changed.';
   }
-  return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message }) }] };
+  return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message, ...(error instanceof CardPlacementConflict && { fields: { current: error.current } }) }) }] };
 }

@@ -1,5 +1,5 @@
 import { INTERNAL_ERROR, INVALID_PARAMS, ProtocolError, ResourceNotFoundError,
-  type CallToolResult, type Resource } from '@modelcontextprotocol/server';
+  type CallToolResult, type Resource, type Tool } from '@modelcontextprotocol/server';
 import { workspaceOperations } from '@planner/contracts';
 import { publicIdSchema } from '@planner/contracts/storage';
 import { MongoServerError } from 'mongodb';
@@ -9,13 +9,19 @@ import { InvalidPageCursor, pageCursors, type CursorScope } from '../pagination/
 import { WorkspaceAccessError } from '../workspace/authorization.js';
 import { WorkspaceReadLimit } from '../workspace/records.js';
 import type { McpSurface } from './http.js';
+import { mcpMutationCatalog, mcpMutationNamed, mcpMutationWireSchema } from './mutation-catalog.js';
+import { mcpMutationError } from './mutations.js';
 import { browserFiles, InvalidMcpRead, mcpBoardTriageFilters, mcpReadTools, workspaceSnapshot, type McpReadPrincipal } from './read-tools.js';
 
 const toolsByName = new Map(mcpReadTools.map((tool) => [tool.declaration.name, tool]));
 const toolPageSize = 10;
 const resourcePageSize = 25;
 const resultBytes = 64 * 1024;
-const catalogPosition = z.number().int().positive().lt(mcpReadTools.length);
+const writeDeclarations = mcpMutationCatalog.map((entry): Tool => ({
+  name: entry.name, description: 'Planner workspace command: ' + entry.name.replaceAll('_', ' ') + '.',
+  inputSchema: mcpMutationWireSchema(entry),
+  annotations: { readOnlyHint: false, idempotentHint: true },
+}));
 const resourcePosition = z.strictObject({ kind: z.enum(['boards', 'cards']), id: publicIdSchema });
 
 const resources = [
@@ -86,7 +92,10 @@ function resourceUri(kind: z.infer<typeof resourcePosition>['kind'], id: string)
   return 'planner://' + kind + '/' + id;
 }
 
-export function createReadMcpSurface(origin: string, cursors: BoardEventCursors): McpSurface {
+export function createReadMcpSurface(origin: string, cursors: BoardEventCursors, includeWrites = false): McpSurface {
+  const declarations = [...mcpReadTools.map(({ declaration }) => declaration), ...(includeWrites ? writeDeclarations : [])];
+  const catalogPosition = z.number().int().positive().lt(declarations.length);
+  const catalogScope = includeWrites ? 'mcp.tools.list.withWrites' : 'mcp.tools.list';
   return {
     capabilities: () => ({
       tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false },
@@ -107,15 +116,23 @@ export function createReadMcpSurface(origin: string, cursors: BoardEventCursors)
       }
 
       server.setRequestHandler('tools/list', ({ params }) => rpc(async (_, principal) => {
-        const scope = scopeOf(principal, era, 'mcp.tools.list');
+        const scope = scopeOf(principal, era, catalogScope);
         const start = cursorPosition(scope, catalogPosition, params?.cursor) ?? 0;
         const end = start + toolPageSize;
-        return { tools: mcpReadTools.slice(start, end).map(({ declaration }) => declaration),
-          ...(end < mcpReadTools.length && { nextCursor: pageCursors.encode(scope, end) }) };
+        return { tools: declarations.slice(start, end),
+          ...(end < declarations.length && { nextCursor: pageCursors.encode(scope, end) }) };
       }));
 
       // The board card list resolves board visibility before parsing search arguments, like REST.
       server.setRequestHandler('tools/call', async ({ params }) => {
+        if (includeWrites && mcpMutationNamed(params.name)) {
+          try {
+            if (!actor.write) throw new WorkspaceAccessError('session');
+            return await actor.write(params.name, params.arguments ?? {});
+          } catch (error) {
+            return mcpMutationError(error);
+          }
+        }
         const tool = toolsByName.get(params.name);
         if (!tool) throw new ProtocolError(INVALID_PARAMS, 'The requested tool is unavailable.');
         try {

@@ -6,6 +6,7 @@ import { PLANNER_VERSION } from '@planner/contracts';
 import type { McpReadSnapshot } from './read-tools.js';
 import { oauthMetadata, protectedResourceMetadataPath, readScope, writeScope } from '../oauth/provider.js';
 
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import { mcpMutationNamed } from './mutation-catalog.js';
 
 export const mcpPath = '/mcp';
@@ -20,6 +21,7 @@ export interface McpActor {
   grantId: string;
   scopes: string[];
   read?: McpReadSnapshot;
+  write?: (name: string, input: unknown) => Promise<CallToolResult>;
 }
 
 export interface McpSurface {

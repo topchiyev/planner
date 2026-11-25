@@ -5,12 +5,16 @@ import { chmod, mkdir, readFile } from 'node:fs/promises';
 import { createServer, request } from 'node:https';
 import { join } from 'node:path';
 import test from 'node:test';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { Secret, TOTP } from 'otpauth';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
 import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
 import { createOAuthClientRegistry } from '../../apps/backend/dist/application/oauth/clients.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
+import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
+import { createReadMcpSurface } from '../../apps/backend/dist/application/mcp/read-surface.js';
+import { mcpMutationCatalog } from '../../apps/backend/dist/application/mcp/mutation-catalog.js';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { buildApp } from '../../apps/backend/dist/build-app.js';
@@ -152,13 +156,47 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
         return docs.get(url.href);
       },
     };
-    const app = (clients = [client]) => buildApp({ native: { origin, proxyToken, readAccess: async () => access, auth: { ...sessions, confirm: async () => false,
-      mfa: { manage, verify: (input) => sessions.verifyMfa(input) } },
-      oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients,
-        createOAuthClientRegistry(clients, transport), (grant) => { revoked.push(grant); }) } });
+    let beforeMcpCommand;
+    const app = (clients = [client]) => {
+      const oauth = createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients,
+        createOAuthClientRegistry(clients, transport), (grant) => { revoked.push(grant); });
+      const { withCommandDatabase } = oauth;
+      oauth.withCommandDatabase = (operation) => {
+        beforeMcpCommand?.();
+        return withCommandDatabase(operation);
+      };
+      return buildApp({ native: { origin, proxyToken, readAccess: async () => access, auth: { ...sessions, confirm: async () => false,
+        mfa: { manage, verify: (input) => sessions.verifyMfa(input) } }, oauth,
+        mcp: createReadMcpSurface(origin, createBoardEventCursors(key), true),
+        mcpWrites: { store: {}, decode: async () => assert.fail('Unexpected media decode') },
+      } });
+    };
     let server = await serve(app(), fixture);
     const call = (path, options) => server.call(path, options);
     const post = (path, body, jar, type = json, headers = { Origin: origin }) => call(path, { method: 'POST', body, type, jar, headers });
+    async function withMcpSdk(version, accessToken, operation) {
+      const sdk = new Client({ name: 'Planner OAuth fixture', version: '1' }, {
+        supportedProtocolVersions: [version],
+        versionNegotiation: { mode: version === '2026-07-28' ? { pin: version } : 'legacy' },
+      });
+      const transport = new StreamableHTTPClientTransport(new URL('/mcp', origin), {
+        authProvider: { token: async () => accessToken },
+        async fetch(input, init) {
+          const outgoing = new Request(input, init);
+          const url = new URL(outgoing.url);
+          assert.equal(url.origin, origin);
+          const response = await call(url.pathname + url.search, {
+            method: outgoing.method, headers: Object.fromEntries(outgoing.headers),
+            ...(outgoing.body && { type: json, body: await outgoing.json() }),
+          });
+          return new Response(response.text || null, { status: response.status, headers: response.headers });
+        },
+      });
+      try {
+        await sdk.connect(transport, { timeout: 5000 });
+        return await operation(sdk);
+      } finally { await sdk.close(); }
+    }
     const probeMcp = (headers = {}, path = '/mcp') => post(path, {
       jsonrpc: '2.0', id: 1, method: 'initialize', params: {
         protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'OAuth fixture', version: '1' },
@@ -294,6 +332,56 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal((await probeMcp(bearer)).status, 200);
       assert.equal((await probeMcp({}, '/mcp?access_token=' + full.json.access_token)).status, 401);
 
+      let previousNames;
+      for (const version of ['2025-11-25', '2026-07-28']) {
+        await withMcpSdk(version, full.json.access_token, async (sdk) => {
+          const { tools } = await sdk.listTools();
+          const names = tools.map(({ name }) => name);
+          assert.equal(new Set(names).size, 85);
+          assert.deepEqual(names.slice(-64), mcpMutationCatalog.map(({ name }) => name));
+          if (previousNames) assert.deepEqual(names, previousNames);
+          previousNames = names;
+          const task = tools.find(({ name }) => name === 'task_create');
+          assert.equal(task.inputSchema.type, 'object');
+          assert.equal(task.inputSchema.anyOf.length, 2);
+          assert.ok(task.inputSchema.anyOf.every(({ required }) => required.includes('idempotencyKey')));
+        });
+      }
+      await withMcpSdk('2026-07-28', full.json.access_token, async (sdk) => {
+        const run = (name, args, idempotencyKey = randomUUID()) => sdk.callTool({ name,
+          arguments: { ...args, idempotencyKey } });
+        const project = (await run('project_create', { name: 'MCP fixture project', type: 'shared' })).structuredContent.data;
+        const boardArgs = { id: project.id, expectedRevision: 1, name: 'MCP fixture board' };
+        const key = randomUUID();
+        const [created, replay] = await Promise.all([run('board_create', boardArgs, key), run('board_create', boardArgs, key)]);
+        assert.deepEqual(created, replay);
+        const board = created.structuredContent.data.board;
+        const clash = await run('board_create', { ...boardArgs, name: 'Changed payload' }, key);
+        assert.equal(JSON.parse(clash.content[0].text).code, 'IDEMPOTENCY_CONFLICT');
+        const list = (await run('list_create', { id: board.id, expectedRevision: board.revision,
+          name: 'MCP fixture list', kind: 'active' })).structuredContent.data.list;
+        const card = (await run('card_create', { id: list.id, expectedRevision: list.revision,
+          name: 'MCP fixture card' })).structuredContent.data.card;
+        assert.equal(card.name, 'MCP fixture card');
+        const group = await run('field_create_group', { id: board.id, expectedRevision: board.revision + 1,
+          scopeType: 'board', name: 'MCP fixture field group' });
+        assert.ok(group.structuredContent, group.content[0].text);
+        const audit = await db.collection('auditEntries').findOne({ generationId, action: 'boards.create' });
+        assert.deepEqual([audit.actorId, audit.origin, audit.clientId], [actorId, 'mcp', 'registered:' + clientId]);
+
+        const queuedKey = randomUUID();
+        const changeRole = (role) => db.collection('users').updateOne({ generationId, id: actorId }, { $set: { role } });
+        let queuedChange;
+        beforeMcpCommand = () => {
+          beforeMcpCommand = undefined;
+          queuedChange = gate.runCommand(() => changeRole('boardUser'));
+        };
+        const forbidden = await run('project_create', { name: 'Former role', type: 'shared' }, queuedKey);
+        await queuedChange;
+        assert.equal(JSON.parse(forbidden.content[0].text).code, 'FORBIDDEN');
+        assert.equal(await db.collection('commands').countDocuments({ generationId, idempotencyKey: queuedKey }), 0);
+        await gate.runCommand(() => changeRole('admin'));
+      });
       const persistent = { scope: 'planner:read planner:write offline_access' };
       const rejectedOffline = await token(await approve(await interaction(persistent), false));
       assert.equal(rejectedOffline.status, 200);
