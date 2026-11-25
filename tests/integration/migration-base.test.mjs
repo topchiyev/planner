@@ -633,6 +633,20 @@ test('legacy mention rewriting replaces only recognized text tokens while retain
   assert.deepEqual(lookups, [known, '999']);
   const raw = JSON.stringify({ fixture: '@[json](' + known + ')' });
   assert.equal(await rewriteImportedMentions(raw, store), raw);
+
+  const literalContexts = [
+    '- > ~~~\n  > ' + recognized + '\n  > ~~~',
+    '~~~\nx\n    ~~~\n' + recognized + '\n~~~',
+    '![' + recognized + '](https://fixture.invalid/image.png)',
+    'mailto:fixture/' + recognized,
+    '```\n' + recognized + '\n```\n@[Existing](00000000-0000-4000-8000-000000000000)',
+  ];
+  for (const literal of literalContexts) assert.equal(await rewriteImportedMentions(literal, store), literal);
+
+  const paragraphContexts = ['This is a paragraph\r\n    ' + recognized, '`foo\n\nbar ' + recognized + ' `'];
+  for (const paragraph of paragraphContexts) {
+    assert.equal(await rewriteImportedMentions(paragraph, store), paragraph.replace(known, current));
+  }
 });
 
 test('staged discussions validate every kind, retain private snapshots and admit only scoped historical deliveries', async (t) => {
