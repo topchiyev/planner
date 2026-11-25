@@ -113,11 +113,11 @@ function appListening(port: number, configured: boolean) {
   return true;
 }
 
-async function startApplication(port: number) {
+async function startApplication(port: number, { enableServices = true } = {}) {
   systemctl('start', app);
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (appListening(port, true)) {
-      systemctl('enable', database, app);
+      if (enableServices) systemctl('enable', database, app);
       return;
     }
     if (systemctl('show', '--property=ActiveState', '--value', app) === 'failed') break;
@@ -574,7 +574,7 @@ async function migrationPreflight(input: MigrationInput) {
       if (wasRunning) systemctl('stop', app);
       try {
         return await withStoppedWriter((writer) => publishMigrationPreflight(writer, db, config.installationId, input, receipt));
-      } finally { if (wasRunning) await startApplication(config.appPort); }
+      } finally { if (wasRunning) await startApplication(config.appPort, { enableServices: false }); }
     } finally { await client.close(); }
   });
 }
@@ -613,7 +613,7 @@ async function migrationStage(runId: string, statusOnly: boolean) {
         } finally {
           process.off('SIGINT', cancel);
           process.off('SIGTERM', cancel);
-          if (wasRunning) await startApplication(config.appPort);
+          if (wasRunning) await startApplication(config.appPort, { enableServices: false });
         }
       } finally { await directory.close(); }
     } finally { await client.close(); }
@@ -673,7 +673,7 @@ async function migrationVerification(runId: string, verify: boolean) {
         } finally {
           process.off('SIGINT', cancel);
           process.off('SIGTERM', cancel);
-          if (wasRunning) await startApplication(config.appPort);
+          if (wasRunning) await startApplication(config.appPort, { enableServices: false });
         }
       } finally { await directory.close(); }
     } finally { await client.close(); }

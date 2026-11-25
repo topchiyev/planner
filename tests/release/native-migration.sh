@@ -220,6 +220,12 @@ JS
     fi
     printf '[source-%s]\nisolated=true\nhost=%s\nport=%s\ndbname=%s\nuser=fixture_reader\n' \
         "$suffix" "$socket" "$port" "$db" >>/etc/planner/migration-pg.services
+    if [ "$release" = 2.3.0 ]; then
+        systemctl disable planner.service
+        systemctl is-active --quiet planner.service
+        [ "$(systemctl is-enabled planner.service)" = disabled ]
+        systemctl is-enabled --quiet planner-mongodb.service
+    fi
     PGHOST=/unused PGSERVICE=ignored PGDATABASE=postgres PGUSER=ignored PGOPTIONS='-c transaction_read_only=off' \
         preflight_directory "$prepared" "source-$suffix" >"$work/accepted-$suffix.json"
     check_receipt "$work/accepted-$suffix.json" "$release"
@@ -230,6 +236,13 @@ JS
     [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
     test_readiness
     check_stage "$work/accepted-$suffix.json" "$suffix"
+    if [ "$release" = 2.3.0 ]; then
+        systemctl is-active --quiet planner.service
+        [ "$(systemctl is-enabled planner.service)" = disabled ]
+        systemctl is-enabled --quiet planner-mongodb.service
+        systemctl enable planner.service
+        printf 'Disabled-but-running application retained its service enablement.\n'
+    fi
     printf 'Packaged Community %s preflight and inactive staging verified.\n' "$release"
 done
 
@@ -365,7 +378,13 @@ refuses source-changed plannerctl migration resume --run "$run_id" --format json
 plannerctl migration status --run "$run_id" --format json >"$work/staging-after-drift.json"
 cmp "$work/staged-objects.json" "$work/staging-after-drift.json"
 cp "$work/object-manifest-exact.json" "$work/object/manifest.json"
+systemctl disable planner.service
+systemctl is-active --quiet planner.service
 plannerctl migration verify --run "$run_id" --format json >"$work/verified-objects.json"
+systemctl is-active --quiet planner.service
+[ "$(systemctl is-enabled planner.service)" = disabled ]
+systemctl is-enabled --quiet planner-mongodb.service
+systemctl enable planner.service
 python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["outcome"]=="verified" and v["eligibleUnderDefaultPolicy"]' "$work/verified-objects.json"
 ! runuser -u planner -- test -r "$prepared/manifest.json"
 while read -r blob; do
