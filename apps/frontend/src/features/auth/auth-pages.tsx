@@ -1,5 +1,5 @@
 import {
-  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginWithMfaOutputSchema, workspaceReturnPath, workspaceSignInPath,
+  accountRecoveryInputSchema, accountRecoveryOutputSchema, firstAdminInputSchema, firstAdminOutputSchema, loginWithMfaOutputSchema, isOAuthInteractionPath, workspaceReturnPath, workspaceSignInPath,
 } from '@planner/contracts';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
@@ -189,6 +189,7 @@ export function SignInPage() {
     try {
       const response = await postJson(`${sessionPath}/login`, {
         identifier: data.get('identifier'), password: data.get('password'),
+        ...(isOAuthInteractionPath(destination) && { requireMfaChallenge: true }),
       });
       if (response.status === 401) {
         setError('Incorrect identifier or password.');

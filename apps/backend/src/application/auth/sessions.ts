@@ -25,6 +25,7 @@ interface SessionRecord {
   tokenDigest: string;
   credentialsVersion: number;
   factorId?: string;
+  factorVerifiedAt?: Date;
   createdAt: Date;
   lastActivityAt: Date;
   expiresAt: Date;
@@ -49,7 +50,21 @@ export async function loadCurrentBrowserSession(database: Db, installationId: st
   const generationId = await activeAccountGeneration(database, installationId);
   if (!generationId) return null;
   const digest = tokenDigest(token);
-  const record = await database.collection<SessionRecord>('sessions').findOne({ installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' } });
+  const record = await database.collection<SessionRecord>('sessions').findOne({
+    installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' },
+  });
+  return validateBrowserSession(database, installationId, generationId, record, time);
+}
+
+export async function loadCurrentBrowserSessionById(database: Db, installationId: string, generationId: string, id: string, time: Date) {
+  if (!publicIdSchema.safeParse(id).success || await activeAccountGeneration(database, installationId) !== generationId) return null;
+  const record = await database.collection<SessionRecord>('sessions').findOne({
+    _id: workspaceKey(generationId, id), id, installationId, generationId, revokedAt: { $type: 'null' },
+  });
+  return validateBrowserSession(database, installationId, generationId, record, time);
+}
+
+async function validateBrowserSession(database: Db, installationId: string, generationId: string, record: SessionRecord | null, time: Date) {
   if (!record || !publicIdSchema.safeParse(record.id).success || record._id !== workspaceKey(generationId, record.id)
       || !publicIdSchema.safeParse(record.userId).success || !isStoredDate(record.createdAt)
       || !isStoredDate(record.lastActivityAt) || !isStoredDate(record.expiresAt)
@@ -69,9 +84,11 @@ export async function loadCurrentBrowserSession(database: Db, installationId: st
     if (!factor || record.factorId !== factor.id) return null;
   }
   const match = {
-    _id: record._id, installationId, generationId, tokenDigest: digest, revokedAt: { $type: 'null' as const },
+    _id: record._id, installationId, generationId, tokenDigest: record.tokenDigest, revokedAt: { $type: 'null' as const },
   };
-  return { account, stored, generationId, time, deadline, match };
+  const factorVerifiedAt = record.factorId && isStoredDate(record.factorVerifiedAt)
+    && record.factorVerifiedAt.getTime() === record.createdAt.getTime() ? record.factorVerifiedAt : undefined;
+  return { account, stored, generationId, time, deadline, match, sessionId: record.id, factorId: record.factorId, factorVerifiedAt };
 }
 
 export function createBrowserSessions(
@@ -88,7 +105,8 @@ export function createBrowserSessions(
     ({ status: 'authenticated', account: current.account.actor, csrfToken: csrfToken(token) });
 
   async function createSession(
-    generationId: string, account: NonNullable<ReturnType<typeof getLocalAccount>>, time: Date, factorId?: string,
+    generationId: string, account: NonNullable<ReturnType<typeof getLocalAccount>>, time: Date,
+    factorId?: string, factorVerifiedAt?: Date,
   ) {
     const token = newToken();
     const id = randomUUID();
@@ -96,6 +114,7 @@ export function createBrowserSessions(
       _id: workspaceKey(generationId, id), id, generationId, installationId, userId: account.actor.id,
       tokenDigest: tokenDigest(token), credentialsVersion: account.auth.credentialsVersion, createdAt: time,
       ...(factorId && { factorId }),
+      ...(factorVerifiedAt && { factorVerifiedAt }),
       lastActivityAt: time, expiresAt: new Date(time.getTime() + absoluteSessionMs), revokedAt: null,
     }, durable);
     const session: BrowserSession = { status: 'authenticated', account: account.actor, csrfToken: csrfToken(token) };
@@ -135,7 +154,7 @@ export function createBrowserSessions(
           if (account.auth.mfa === 'enrollment-required' && hasPendingFactorEnrollment(record)) return { status: 'enrollment-required' };
           return hasPasswordOnlyAuth(record) ? createSession(generationId, account, time) : { status: 'invalid' };
         }
-        const step = await beginPasswordMfa(database, installationId, record, time, trustedToken);
+        const step = await beginPasswordMfa(database, installationId, record, time, input.requireMfaChallenge ? undefined : trustedToken);
         if (step.status !== 'passed') return step;
         return createSession(generationId, account, time, step.factorId);
       });
@@ -149,7 +168,7 @@ export function createBrowserSessions(
         const time = now();
         const verified = await verifyPasswordMfa(database, installationId, generationId, mfaKey, input, time, allowActorAttempt);
         if (!verified) return null;
-        const { session, token } = await createSession(generationId, verified.account, time, verified.factorId);
+        const { session, token } = await createSession(generationId, verified.account, time, verified.factorId, time);
         return { session, token, ...(verified.trustedToken && { trustedToken: verified.trustedToken }) };
       });
     },

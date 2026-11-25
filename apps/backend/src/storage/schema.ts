@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   generationIdSchema, installationIdSchema, normalizedEmailSchema, parseSourceIdentity, publicIdSchema, revisionSchema,
 } from '@planner/contracts/storage';
+import type { OAuthEnvelope } from '../application/oauth/keys.js';
 import type { MigrationActivationReceipt } from '../application/migration/activation.js';
 import { MongoServerError, type Db, type Filter } from 'mongodb';
 import type { MigrationAdminBinding } from '../application/auth/migration-admin-grant.js';
@@ -25,6 +26,7 @@ export interface InstallationDocument {
   activeGenerationId: string | null;
   schemaVersion: number;
   mfaKeyDigest?: string;
+  oauthSigner?: OAuthEnvelope;
   migrationActivation?: MigrationActivationReceipt;
   restoration?: unknown;
   schemaMigration?: MigrationProgress;
@@ -108,10 +110,11 @@ async function checkCollection(database: Db, name: WorkspaceCollection, create: 
 }
 
 function compareIndex(expected: OwnedIndex, actual: Record<string, unknown>, idIndex = false) {
-  const { name, key, unique, partialFilterExpression, v, ns, ...other } = actual;
+  const { name, key, unique, partialFilterExpression, expireAfterSeconds, v, ns, ...other } = actual;
   return name === expected.name && v === 2 && (ns === undefined || typeof ns === 'string')
     && !!key && typeof key === 'object' && isDeepStrictEqual(Object.entries(key), expected.keys)
     && (idIndex ? unique === undefined || unique === true : unique === expected.unique)
+    && expireAfterSeconds === expected.expireAfterSeconds
     && isDeepStrictEqual(partialFilterExpression, expected.partialFilterExpression)
     && Object.keys(other).length === 0;
 }
@@ -125,8 +128,21 @@ async function missingIndexes(database: Db, name: WorkspaceCollection, complete:
     if (!definition || !compareIndex(definition, index, index.name === '_id_')) throw catalogFailure(name);
     expected.delete(index.name);
   }
-  if (expected.has('_id_') || (complete && expected.size)) throw catalogFailure(name);
+  if (expected.has('_id_') || (complete && [...expected.values()].some((index) => !index.installOnUse))) throw catalogFailure(name);
   return [...expected.values()];
+}
+
+async function installIndexes(database: Db, name: WorkspaceCollection) {
+  const collection = database.collection(name, { writeConcern });
+  for (const { name: indexName, keys, installOnUse: _optional, ...options } of await missingIndexes(database, name, false)) {
+    await collection.createIndex(keys, { name: indexName, ...options });
+  }
+}
+
+// Installations already at the current storage version gain these indexes before their first OAuth write.
+export async function provisionOAuthCatalog(database: Db) {
+  await checkCollection(database, 'oauthArtifacts', false);
+  await installIndexes(database, 'oauthArtifacts');
 }
 
 async function verifyCatalog(database: Db) {
@@ -262,10 +278,7 @@ export async function migrateStorageSchema(database: Db, installationId: string,
   if (phase === 'indexes') {
     for (const name of workspaceCollections) {
       await checkCollection(database, name, false);
-      const collection = database.collection(name, { writeConcern });
-      for (const { name: indexName, keys, ...options } of await missingIndexes(database, name, false)) {
-        await collection.createIndex(keys, { name: indexName, ...options });
-      }
+      await installIndexes(database, name);
     }
   }
   await verifyCatalog(database);
