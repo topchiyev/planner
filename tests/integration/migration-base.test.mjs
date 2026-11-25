@@ -651,7 +651,13 @@ test('legacy mention rewriting replaces only recognized text tokens while retain
   ];
   for (const literal of literalContexts) assert.equal(await rewriteImportedMentions(literal, store), literal);
 
-  const paragraphContexts = ['This is a paragraph\r\n    ' + recognized, '`foo\n\nbar ' + recognized + ' `'];
+  const paragraphContexts = [
+    'This is a paragraph\r\n    ' + recognized,
+    '`foo\n\nbar ' + recognized + ' `',
+    '[guide](https://fixture.invalid/)—' + recognized,
+    '`https://fixture.invalid/`' + recognized,
+    '[contact](mailto:contact@example.invalid)' + recognized,
+  ];
   for (const paragraph of paragraphContexts) {
     assert.equal(await rewriteImportedMentions(paragraph, store), paragraph.replace(known, current));
   }
