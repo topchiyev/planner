@@ -136,7 +136,8 @@ export function registerNativeOAuthRoutes(app: FastifyInstance, oauth: NativeOAu
     if (token) {
       try {
         const access = await oauth.request(() => storage.accessToken(token));
-        if (access?.audience === metadata.resource && access.scope?.split(' ').includes(readScope)) {
+        if (access?.audience === metadata.resource && access.scope?.split(' ').includes(readScope)
+            && oauth.clients.some(({ client_id }) => client_id === access.clientId)) {
           return reply.code(501).send({ error: 'unsupported_operation' });
         }
       } catch (error) { return oauthError(reply, error); }

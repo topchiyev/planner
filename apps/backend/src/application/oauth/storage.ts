@@ -6,6 +6,7 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import { workspaceKey } from '../../storage/identity.js';
 import { provisionOAuthCatalog, readInstallation, requireCurrentSchema } from '../../storage/schema.js';
 import { accounts, getLocalAccount } from '../auth/accounts.js';
+import { getFactor, hasPasswordOnlyAuth } from '../auth/mfa-account.js';
 import { activeAccountGeneration, loadCurrentBrowserSession, loadCurrentBrowserSessionById } from '../auth/sessions.js';
 import { CleanCommandRejection, type CommandGate } from '../command-gate/gate.js';
 import { durable } from '../command-journal/records.js';
@@ -102,11 +103,23 @@ export function createOAuthStorage(
 
   async function currentGrant({ db, generationId }: Scope, providerGrantId: string, time: Date) {
     const saved = await connections(db).findOne({ generationId, providerGrantId, revokedAt: { $type: 'null' }, expiresAt: { $gt: time } });
-    if (!saved || saved._id !== workspaceKey(generationId, saved.id)) return null;
-    const session = await loadCurrentBrowserSessionById(db, installationId, generationId, saved.browserSessionId, time);
-    if (!session || session.account.actor.id !== saved.userId || session.account.auth.credentialsVersion !== saved.credentialsVersion
-        || (session.factorId ?? null) !== saved.factorId) return null;
-    return saved;
+    if (!saved || !publicIdSchema.safeParse(saved.id).success || saved._id !== workspaceKey(generationId, saved.id)
+        || !publicIdSchema.safeParse(saved.userId).success) return null;
+    const stored = await accounts(db).findOne({ _id: workspaceKey(generationId, saved.userId), generationId, id: saved.userId });
+    const account = getLocalAccount(stored);
+    if (!stored || !account || account.auth.credentialsVersion !== saved.credentialsVersion) return null;
+    const factorMatches = saved.factorId === null ? hasPasswordOnlyAuth(stored)
+      : publicIdSchema.safeParse(saved.factorId).success && getFactor(stored)?.id === saved.factorId;
+    return factorMatches ? saved : null;
+  }
+
+  async function currentArtifactGrant(scope: Scope, kind: string, providerGrantId: string, time: Date) {
+    const grant = await currentGrant(scope, providerGrantId, time);
+    if (!grant || kind !== 'AuthorizationCode') return grant;
+    // A code still belongs to the exact session that consented. Issued access belongs to the connection.
+    const { db, generationId } = scope;
+    const session = await loadCurrentBrowserSessionById(db, installationId, generationId, grant.browserSessionId, time);
+    return session && session.account.actor.id === grant.userId ? grant : null;
   }
 
   function adapter(kind: string): Adapter {
@@ -116,7 +129,7 @@ export function createOAuthStorage(
         const time = now();
         const row = await artifacts(db).findOne({ generationId, kind, expiresAt: { $gt: time }, ...query(generationId) });
         if (!row) return undefined;
-        if (row.providerGrantId && !await currentGrant({ db, generationId }, row.providerGrantId, time)) return undefined;
+        if (row.providerGrantId && !await currentArtifactGrant({ db, generationId }, kind, row.providerGrantId, time)) return undefined;
         return decode(row);
       });
     }
@@ -129,7 +142,7 @@ export function createOAuthStorage(
           const { _id, ...identity } = artifactIdentity(generationId, kind, rawId);
           const rawGrant = kind === 'Grant' ? rawId : payload.grantId;
           const providerGrantId = rawGrant ? grantKey(generationId, rawGrant) : undefined;
-          if (providerGrantId && !await currentGrant({ db, generationId }, providerGrantId, time)) throw new OAuthUnavailable();
+          if (providerGrantId && !await currentArtifactGrant({ db, generationId }, kind, providerGrantId, time)) throw new OAuthUnavailable();
           const { consumed: _consumed, ...unconsumed } = payload;
           const fields = {
             ...identity, ...(payload.accountId && { userId: payload.accountId }),
@@ -152,7 +165,7 @@ export function createOAuthStorage(
           const time = now();
           const identity = artifactIdentity(generationId, kind, rawId);
           const row = await artifacts(db).findOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } });
-          if (!row || (row.providerGrantId && !await currentGrant({ db, generationId }, row.providerGrantId, time))) return false;
+          if (!row || (row.providerGrantId && !await currentArtifactGrant({ db, generationId }, kind, row.providerGrantId, time))) return false;
           const saved = await artifacts(db).updateOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } },
             { $set: { consumedAt: time } }, durable);
           return saved.modifiedCount === 1;

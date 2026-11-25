@@ -122,9 +122,9 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
     const factor = await manage.confirm({ enrollmentId: enrolled.enrollmentId, sessionToken: first.token }, code());
     time = new Date(time.getTime() + 30_000);
     let access = { kind: 'ready' };
-    const app = () => buildApp({ native: { origin, proxyToken, readAccess: async () => access, auth: { ...sessions, confirm: async () => false,
+    const app = (clients = [client]) => buildApp({ native: { origin, proxyToken, readAccess: async () => access, auth: { ...sessions, confirm: async () => false,
       mfa: { manage, verify: (input) => sessions.verifyMfa(input) } },
-      oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), [client]) } });
+      oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients) } });
     let server = await serve(app(), fixture);
     const call = (path, options) => server.call(path, options);
     const post = (path, body, jar, type = json, headers = { Origin: origin }) => call(path, { method: 'POST', body, type, jar, headers });
@@ -180,6 +180,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal(begin.json.status, 'challenge-required');
       const proved = await post('/api/v1/session/verify-mfa', { challengeId: begin.json.challengeId, totpCode: code(), rememberDevice: true }, jar);
       assert.equal(proved.json.status, 'authenticated');
+      const initialBrowser = jar.headers();
       const allow = csrfFrom(await call(path, { jar }));
       assert.ok(allow);
       assert.equal((await consent(path, { csrf: allow, decision: 'allow' }, jar, { Origin: 'https://wrong.test' })).status, 403);
@@ -268,6 +269,67 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.deepEqual((await call('/oauth/jwks')).json, publicKeys);
       assert.ok(csrfFrom(await call(pendingRestart, { jar })));
       assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+
+      const codeBeforeLogout = await allowWrite(pendingRestart);
+      const currentBrowser = await call('/api/v1/session', { jar });
+      assert.equal(currentBrowser.status, 200);
+      const logout = await call('/api/v1/session', { method: 'DELETE', jar,
+        headers: { Origin: origin, 'X-CSRF-Token': currentBrowser.json.csrfToken } });
+      assert.equal(logout.status, 204);
+      assert.equal((await call('/api/v1/session', { jar })).status, 401);
+      assert.equal((await token(codeBeforeLogout)).json.error, 'invalid_grant');
+      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+
+      const readBearer = { Authorization: 'Bearer ' + success.json.access_token };
+      const connections = db.collection('oauthConnections');
+      const firstConnection = await connections.findOne({ generationId, userId: actorId, clientId, scope: 'planner:read' });
+      const sessionsCollection = db.collection('sessions');
+      const firstSession = await sessionsCollection.findOne({ id: firstConnection.browserSessionId, generationId });
+      assert.equal(firstSession.revokedAt, null);
+      const older = (date) => new Date(date.getTime() - 3 * 60_000);
+      await sessionsCollection.updateOne({ _id: firstSession._id }, { $set: {
+        createdAt: older(firstSession.createdAt), lastActivityAt: older(firstSession.lastActivityAt),
+        expiresAt: older(firstSession.expiresAt), factorVerifiedAt: older(firstSession.factorVerifiedAt),
+      } });
+      const users = db.collection('users');
+      const actor = { _id: workspaceKey(generationId, actorId) };
+      await users.updateOne(actor, { $set: { 'preferences.autoLogout': '2m' } });
+      assert.equal((await call('/api/v1/session', { headers: initialBrowser })).status, 401);
+      assert.equal((await call('/mcp', { headers: readBearer })).status, 501);
+
+      await server.close();
+      server = await serve(app([]), fixture);
+      assert.equal((await call('/mcp', { headers: bearer })).status, 401);
+      await server.close();
+      server = await serve(app(), fixture);
+      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+
+      // Verify each durable condition independently of the revocation sweeps.
+      const saved = await users.findOne(actor);
+      for (const [field, changed, original] of [
+        ['localAuth.credentialsVersion', saved.localAuth.credentialsVersion + 1, saved.localAuth.credentialsVersion],
+        ['localAuth.factor.id', randomUUID(), saved.localAuth.factor.id],
+        ['disabledAt', new Date(), null],
+      ]) {
+        await users.updateOne(actor, { $set: { [field]: changed } });
+        assert.equal((await call('/mcp', { headers: bearer })).status, 401);
+        await users.updateOne(actor, { $set: { [field]: original } });
+        assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      }
+
+      await connections.updateOne({ _id: firstConnection._id }, { $set: { revokedAt: new Date() } });
+      assert.equal((await call('/mcp', { headers: readBearer })).status, 401);
+      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      const reauth = await post('/api/v1/session/login', { identifier, password, requireMfaChallenge: true }, jar);
+      const verified = await post('/api/v1/session/verify-mfa', { challengeId: reauth.json.challengeId,
+        recoveryCode: factor.recoveryCodes[1] }, jar);
+      assert.equal(verified.status, 200);
+      const disabled = await call('/api/v1/me/mfa', { method: 'DELETE', type: json, jar,
+        headers: { Origin: origin, 'X-CSRF-Token': verified.json.csrfToken }, body: { password, recoveryCode: factor.recoveryCodes[2] } });
+      assert.equal(disabled.status, 204);
+      assert.equal((await call('/mcp', { headers: bearer })).status, 401);
+      assert.equal(await connections.countDocuments({ generationId, userId: actorId, revokedAt: null }), 0);
+
       access = { kind: 'enrollment', step: 'account-recovery' };
       assert.equal((await call('/mcp')).status, 503);
       assert.equal((await call(requestCode())).status, 503);
