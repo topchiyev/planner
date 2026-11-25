@@ -6,7 +6,7 @@ export type MigrationFault = 'capture-format' | 'source-release' | 'source-editi
   | 'archive-layout' | 'archive-limit' | 'asset-manifest' | 'asset-key' | 'asset-integrity'
   | 'source-service' | 'source-role' | 'source-catalog' | 'source-ledger' | 'source-read'
   | 'source-changed' | 'target-setup' | 'target-capacity' | 'target-write'
-  | 'verification-incomplete' | 'verification-blocked' | 'approval-required' | 'approval-invalid';
+  | 'activation-conflict' | 'verification-incomplete' | 'verification-blocked' | 'approval-required' | 'approval-invalid';
 
 export class MigrationError extends Error {
   constructor(readonly fault: MigrationFault, message: string) { super(message); }

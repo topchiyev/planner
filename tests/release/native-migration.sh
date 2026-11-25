@@ -143,6 +143,70 @@ try {
 JS
 }
 
+kill_staging_with_application_stopped() {
+    local run_id=$1 blocker held operator
+    sql "$db" -c 'BEGIN; LOCK TABLE public.user_account IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(30); ROLLBACK' >"$work/stage-lock.log" 2>&1 &
+    blocker=$!
+    for _ in {1..100}; do
+        held=$(sql "$db" -c "SELECT pid FROM pg_locks WHERE relation='public.user_account'::regclass AND mode='AccessExclusiveLock' AND granted")
+        if [ -n "$held" ]; then break; fi
+        sleep .02
+    done
+    [[ "$held" =~ ^[0-9]+$ ]]
+    setsid plannerctl migration stage --run "$run_id" --format json >"$work/killed-stage.json" 2>&1 &
+    operator=$!
+    for _ in {1..250}; do
+        if [ -s /var/lib/planner/migration/application-resume.json ] && ! systemctl is-active --quiet planner.service; then
+            kill -KILL -- "-$operator"
+            break
+        fi
+        kill -0 "$operator"
+        sleep .02
+    done
+    if wait "$operator"; then
+        echo 'Staging completed before its application-recovery interruption.' >&2
+        exit 1
+    fi
+    sql "$db" -c "SELECT pg_terminate_backend($held)" >/dev/null
+    wait "$blocker" || true
+    [ -s /var/lib/planner/migration/application-resume.json ]
+    ! systemctl is-active --quiet planner.service
+    plannerctl migration status --run "$run_id" --format json >"$work/after-kill-status.json"
+    ! systemctl is-active --quiet planner.service
+    [ -s /var/lib/planner/migration/application-resume.json ]
+}
+
+check_stage() {
+    local receipt=$1 post=$2 run_id
+    run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$receipt")
+    plannerctl migration status --run "$run_id" --format json >"$work/staging-before-$post.json"
+    python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"]=="preflighted" and v["checkpoint"] is None and not v["stageComplete"]' "$work/staging-before-$post.json"
+    if [ "$post" = 230 ]; then
+        kill_staging_with_application_stopped "$run_id"
+        plannerctl migration resume --run "$run_id" --format json >"$work/staged-$post.json"
+        [ ! -e /var/lib/planner/migration/application-resume.json ]
+        systemctl is-active --quiet planner.service
+        [ "$(systemctl is-enabled planner.service)" = disabled ]
+        printf 'Killed stage resumed and restored the disabled-but-running application.\n'
+    else
+        plannerctl migration stage --run "$run_id" --format json >"$work/staged-$post.json"
+    fi
+    plannerctl migration resume --run "$run_id" --format json >"$work/resumed-$post.json"
+    plannerctl migration status --run "$run_id" --format json >"$work/staging-after-$post.json"
+    cmp "$work/staged-$post.json" "$work/resumed-$post.json"
+    cmp "$work/staged-$post.json" "$work/staging-after-$post.json"
+    python3 - "$work/staged-$post.json" "$receipt" <<'PY2'
+import json, sys
+with open(sys.argv[1]) as f: stage = json.load(f)
+with open(sys.argv[2]) as f: receipt = json.load(f)
+assert stage['stageComplete'] and stage['state'] == 'staging'
+assert stage['checkpoint'] == {'pass': 'media', 'table': 'user_account', 'lastSourceId': '105'}
+assert all(stage[field] == receipt[field] for field in ('runId', 'manifestSha256', 'fingerprintSha256'))
+assert 'token' not in stage['checkpoint'] and 'checkpointKey' not in stage
+PY2
+    test_readiness
+}
+
 for release in 2.3.0 2.3.1; do
     suffix=${release//./}
     db="planka_frozen_$suffix"
@@ -198,6 +262,12 @@ JS
     fi
     printf '[source-%s]\nisolated=true\nhost=%s\nport=%s\ndbname=%s\nuser=fixture_reader\n' \
         "$suffix" "$socket" "$port" "$db" >>/etc/planner/migration-pg.services
+    if [ "$release" = 2.3.0 ]; then
+        systemctl disable planner.service
+        systemctl is-active --quiet planner.service
+        [ "$(systemctl is-enabled planner.service)" = disabled ]
+        systemctl is-enabled --quiet planner-mongodb.service
+    fi
     PGHOST=/unused PGSERVICE=ignored PGDATABASE=postgres PGUSER=ignored PGOPTIONS='-c transaction_read_only=off' \
         preflight_directory "$prepared" "source-$suffix" >"$work/accepted-$suffix.json"
     check_receipt "$work/accepted-$suffix.json" "$release"
@@ -207,7 +277,21 @@ JS
     fi
     [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
     test_readiness
-    printf 'Packaged Community %s preflight verified.\n' "$release"
+    check_stage "$work/accepted-$suffix.json" "$suffix"
+    if [ "$release" = 2.3.0 ]; then
+        systemctl is-active --quiet planner.service
+        [ "$(systemctl is-enabled planner.service)" = disabled ]
+        systemctl is-enabled --quiet planner-mongodb.service
+        systemctl stop planner.service
+        run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$work/accepted-$suffix.json")
+        plannerctl migration resume --run "$run_id" --format json >"$work/deliberately-stopped.json"
+        ! systemctl is-active --quiet planner.service
+        [ ! -e /var/lib/planner/migration/application-resume.json ]
+        systemctl start planner.service
+        systemctl enable planner.service
+        printf 'Disabled-but-running application retained its service enablement.\n'
+    fi
+    printf 'Packaged Community %s preflight and inactive staging verified.\n' "$release"
 done
 
 source_service=source-231
@@ -332,6 +416,30 @@ preflight_objects >"$work/object.json"
 check_receipt "$work/object.json" 2.3.1
 printf 'mismatch\n' >"$work/version-mode"
 refuses asset-integrity preflight_objects
+printf 'exact\n' >"$work/version-mode"
+export NODE_EXTRA_CA_CERTS="$work/certificate.pem"
+check_stage "$work/object.json" objects
+run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$work/object.json")
+cp "$work/object/manifest.json" "$work/object-manifest-exact.json"
+printf '\n' >>"$work/object/manifest.json"
+refuses source-changed plannerctl migration resume --run "$run_id" --format json
+plannerctl migration status --run "$run_id" --format json >"$work/staging-after-drift.json"
+cmp "$work/staged-objects.json" "$work/staging-after-drift.json"
+cp "$work/object-manifest-exact.json" "$work/object/manifest.json"
+systemctl disable planner.service
+systemctl is-active --quiet planner.service
+plannerctl migration verify --run "$run_id" --format json >"$work/verified-objects.json"
+systemctl is-active --quiet planner.service
+[ "$(systemctl is-enabled planner.service)" = disabled ]
+systemctl is-enabled --quiet planner-mongodb.service
+systemctl enable planner.service
+python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["outcome"]=="verified" and v["eligibleUnderDefaultPolicy"]' "$work/verified-objects.json"
+! runuser -u planner -- test -r "$prepared/manifest.json"
+while read -r blob; do
+    [ "$(stat -c '%U:%G:%a' "$blob")" = planner:planner:400 ]
+done < <(find /var/lib/planner/blobs -maxdepth 1 -type f)
+[ -n "$(find /var/lib/planner/blobs -maxdepth 1 -type f -print -quit)" ]
 test_readiness
 [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
 printf 'NATIVE MIGRATION PREFLIGHT ACCEPTANCE PASSED\n'
+printf 'NATIVE MIGRATION STAGING ACCEPTANCE PASSED\n'

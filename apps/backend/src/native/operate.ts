@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import { get, request as localRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -32,9 +32,11 @@ import {
 import { adminRuntimeDirectory } from './admin-socket.js';
 import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
-import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, migrationVerificationPage, openNativeMigrationDirectory,
-  persistMigrationVerification, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
-  readProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
+import { nativeMigrationMediaPublisher } from './migration-media.js';
+import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, clearMigrationServiceResume,
+  dismissNativeMigrationServiceResume, hasMigrationServiceResume, migrationVerificationPage, openNativeMigrationDirectory,
+  persistMigrationVerification, publicMigrationStatus, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
+  readProtectedMigrationRun, recordMigrationServiceResume, stageProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
@@ -112,11 +114,11 @@ function appListening(port: number, configured: boolean) {
   return true;
 }
 
-async function startApplication(port: number) {
+async function startApplication(port: number, { enableServices = true } = {}) {
   systemctl('start', app);
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (appListening(port, true)) {
-      systemctl('enable', database, app);
+      if (enableServices) systemctl('enable', database, app);
       return;
     }
     if (systemctl('show', '--property=ActiveState', '--value', app) === 'failed') break;
@@ -310,6 +312,8 @@ async function setup(options: NativeSetupOptions) {
 async function control(action: 'start' | 'stop' | 'restart') {
   return withInstallationLock(async (owner) => {
     if (action === 'stop') {
+      const config = readInstallationConfig(owner.appGroup);
+      if (config?.mode === 'import') await dismissNativeMigrationServiceResume(config);
       systemctl('stop', app);
       await withStoppedWriter(async () => stopDatabase());
       return status(owner);
@@ -326,6 +330,7 @@ async function control(action: 'start' | 'stop' | 'restart') {
         await verifyStorageSchema(db, config.installationId);
         await assertNativeMfaKey(db, config.installationId, readNativeMfaKey(config.installationId, owner.appGroup));
       } finally { await client.close(); }
+      if (config.mode === 'import') await dismissNativeMigrationServiceResume(config);
       return status(owner);
     }
     if (action === 'restart' || listening) systemctl('stop', app);
@@ -342,6 +347,7 @@ async function control(action: 'start' | 'stop' | 'restart') {
       } finally { await client.close(); }
     });
     await startApplication(config.appPort);
+    if (config.mode === 'import') await dismissNativeMigrationServiceResume(config);
     return status(owner);
   });
 }
@@ -555,6 +561,21 @@ async function prepareCapture(input: unknown) {
   } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel); }
 }
 
+function migrationApplication(config: NativeInstallationConfig, directory: FileHandle) {
+  return {
+    async stop() {
+      if (!appListening(config.appPort, true)) return;
+      await recordMigrationServiceResume(directory, config);
+      systemctl('stop', app);
+    },
+    async restore() {
+      if (!await hasMigrationServiceResume(directory, config)) return;
+      if (!appListening(config.appPort, true)) await startApplication(config.appPort, { enableServices: false });
+      await clearMigrationServiceResume(directory, config);
+    },
+  };
+}
+
 async function migrationPreflight(input: MigrationInput) {
   return withInstallationLock(async (owner) => {
     const config = readInstallationConfig(owner.appGroup);
@@ -564,18 +585,60 @@ async function migrationPreflight(input: MigrationInput) {
       throw new MigrationError('target-setup', 'Complete import-mode setup on an inactive installation before migration preflight.');
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
-      const db = client.db(databaseName);
-      await assertMigrationTarget(db, config.installationId);
-      const receipt = await inspectMigration(input, migrationOwner, await migrationConfig('postgres'),
-        input.assetService !== undefined ? await migrationConfig('objects') : undefined);
-      await checkMigrationCapacity(receipt.estimates);
-      const wasRunning = appListening(config.appPort, true);
-      if (wasRunning) systemctl('stop', app);
+      const directory = await openNativeMigrationDirectory(true);
+      const application = migrationApplication(config, directory);
       try {
+        const db = client.db(databaseName);
+        await assertMigrationTarget(db, config.installationId);
+        const receipt = await inspectMigration(input, migrationOwner, await migrationConfig('postgres'),
+          input.assetService !== undefined ? await migrationConfig('objects') : undefined);
+        await checkMigrationCapacity(receipt.estimates);
+        await application.stop();
         return await withStoppedWriter((writer) => publishMigrationPreflight(writer, db, config.installationId, input, receipt));
-      } finally { if (wasRunning) await startApplication(config.appPort); }
+      } finally { try { await application.restore(); } finally { await directory.close(); } }
     } finally { await client.close(); }
   });
+}
+
+const migrationStageRequest = z.strictObject({ runId: publicIdSchema });
+
+async function migrationStage(runId: string, statusOnly: boolean) {
+  const run = async (owner: ReturnType<typeof verifyOwnership>) => {
+    const config = readInstallationConfig(owner.appGroup);
+    const restore = readRestoreIntent(owner.receipt);
+    verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
+    if (!config || config.mode !== 'import' || restore) throw new MigrationError('target-setup', 'Select a protected import installation.');
+    const client = await connectOwnedDatabase(config, owner.appGroup);
+    try {
+      const directory = await openNativeMigrationDirectory();
+      const application = migrationApplication(config, directory);
+      try {
+        const db = client.db(databaseName);
+        const saved = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
+        if (statusOnly) return publicMigrationStatus(saved.run);
+        await assertMigrationTarget(db, config.installationId);
+        const source = await migrationConfig('postgres');
+        const objects = saved.input.assetService === undefined ? undefined : await migrationConfig('objects');
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        process.once('SIGINT', cancel);
+        process.once('SIGTERM', cancel);
+        try {
+          await application.stop();
+          return await withStoppedWriter((writer) => stageProtectedMigrationRun(db, writer, saved, migrationOwner, source, objects, {
+            prepare: nativeMigrationMediaPublisher({ uid: owner.appUid, gid: owner.appGroup }, writer), signal: controller.signal,
+          }));
+        } catch (error) {
+          if (controller.signal.aborted) throw new MigrationError('target-write', 'Migration staging was interrupted. Resume the same run.');
+          throw error;
+        } finally {
+          process.off('SIGINT', cancel);
+          process.off('SIGTERM', cancel);
+        }
+      } finally { try { if (!statusOnly) await application.restore(); } finally { await directory.close(); } }
+    } finally { await client.close(); }
+  };
+  return statusOnly ? run(verifyOwnership()) : withInstallationLock(run);
 }
 
 const migrationVerificationRequest = z.strictObject({ runId: publicIdSchema,
@@ -590,17 +653,17 @@ async function migrationVerification(runId: string, verify: boolean) {
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
       const directory = await openNativeMigrationDirectory();
+      const application = migrationApplication(config, directory);
       try {
         const db = client.db(databaseName);
         const { run, input, cursors } = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
         if (!verify || run.state === 'verified' || run.state === 'blocked') return readMigrationVerification(directory, migrationOwner, run);
-        const wasRunning = appListening(config.appPort, true);
-        if (wasRunning) systemctl('stop', app);
         const controller = new AbortController();
         const cancel = () => controller.abort();
         process.once('SIGINT', cancel);
         process.once('SIGTERM', cancel);
         try {
+          await application.stop();
           return await withStoppedWriter(async (writer) => {
             const media = await openPrivateBlobVerifier(backupBlobs, { uid: owner.appUid, gid: owner.appGroup });
             try {
@@ -610,10 +673,12 @@ async function migrationVerification(runId: string, verify: boolean) {
               const sourceConfig = await migrationConfig('postgres');
               const objectConfig = input.assetService !== undefined ? await migrationConfig('objects') : undefined;
               const { value: { report, verifying } } = await withNativeVerificationScratch(runId, (scratch) =>
-                withMigrationSnapshot(input, migrationOwner, sourceConfig, objectConfig, { expectedFingerprint: run.fingerprint.sha256 },
+                withMigrationSnapshot(input, migrationOwner, sourceConfig, objectConfig, {
+                  expectedManifestSha256: run.manifestSha256, expectedFingerprint: run.fingerprint.sha256,
+                },
                   async (snapshot) => {
                     controller.signal.throwIfAborted();
-                    const verifying = await beginMigrationVerification(writer, db, run, snapshot);
+                    const verifying = await beginMigrationVerification(writer, db, run, snapshot, cursors);
                     const report = await collectMigrationVerification(db, writer, identity, snapshot, cursors,
                       { verifyBlob: media.verifyBlob, scratch, decode }, controller.signal);
                     return { report, verifying };
@@ -628,9 +693,8 @@ async function migrationVerification(runId: string, verify: boolean) {
         } finally {
           process.off('SIGINT', cancel);
           process.off('SIGTERM', cancel);
-          if (wasRunning) await startApplication(config.appPort);
         }
-      } finally { await directory.close(); }
+      } finally { try { if (verify) await application.restore(); } finally { await directory.close(); } }
     } finally { await client.close(); }
   });
 }
@@ -656,6 +720,13 @@ try {
       const result = await migrationPreflight(parseMigrationInput(JSON.parse(args[0])));
       console.log(args[1] === 'json' ? JSON.stringify(result) : `Run ${result.runId} preflighted for manifest ${result.manifestSha256}. Missing originals ${result.assets.missingOriginals}, missing derivatives ${result.assets.missingDerivatives}.`);
     }
+  } else if ((action === 'migration-stage' || action === 'migration-resume' || action === 'migration-status')
+    && args.length === 2 && (args[1] === 'json' || args[1] === 'text')) {
+    const { runId } = migrationStageRequest.parse(JSON.parse(args[0]));
+    const result = await migrationStage(runId, action === 'migration-status');
+    const progress = result.checkpoint ? ` Checkpoint ${result.checkpoint.pass}/${result.checkpoint.table}.` : '';
+    console.log(args[1] === 'json' ? JSON.stringify(result)
+      : `Run ${result.runId} is ${result.stageComplete && result.state === 'staging' ? 'staged' : result.state}.${progress}`);
   } else if ((action === 'migration-verify' || action === 'migration-report') && args.length === 2
       && (args[1] === 'json' || (action === 'migration-verify' && args[1] === 'text'))) {
     const request = migrationVerificationRequest.parse(JSON.parse(args[0]));

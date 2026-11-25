@@ -73,3 +73,24 @@ export function assertActivationRetry(saved: ActivationExpectation, requested: A
   const next = activationExpectationSchema.parse(requested);
   if (JSON.stringify(prior) !== JSON.stringify(next)) throw invalidApproval();
 }
+
+export function bindMissingOriginals(entries: readonly MissingOriginal[]) {
+  const missing = canonicalMissingOriginals(entries);
+  return { missingOriginals: missing.length, missingSha256: sha256(Buffer.from(JSON.stringify(missing))) };
+}
+
+export function assertBoundActivationApproval(bound: ReturnType<typeof bindMissingOriginals>, requested: ActivationExpectation, approval?: unknown) {
+  const parsed = approval === undefined ? undefined : approvalSchema.safeParse(approval);
+  if (parsed && !parsed.success) throw invalidApproval();
+  const missing = parsed?.data.missing ?? [];
+  const actual = bindMissingOriginals(missing);
+  if (actual.missingOriginals !== bound.missingOriginals || actual.missingSha256 !== bound.missingSha256) {
+    if (approval === undefined && bound.missingOriginals > 0) {
+      throw new MigrationError('approval-required', 'Verified missing originals require an exact local approval before activation.');
+    }
+    throw invalidApproval();
+  }
+  const { runId, generationId, manifestSha256, fingerprintSha256, reportSha256 } = requested;
+  assertActivationRetry(activationExpectation({ runId, generationId, manifestSha256, fingerprintSha256, reportSha256 },
+    missing, manifestSha256, approval), requested);
+}

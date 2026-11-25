@@ -5,7 +5,8 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import { parsePreflightOptions } from '@planner/contracts/native';
 
 type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart' | 'verify-storage' | 'account-inspect' | 'account-confirm'
-  | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight' | 'migration-verify' | 'migration-report';
+  | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight' | 'migration-verify' | 'migration-report'
+  | 'migration-stage' | 'migration-resume' | 'migration-status';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
 
 const serviceName = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/u;
@@ -56,6 +57,11 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
       }
       if (args.length) throw new Error('Unexpected migration command options.');
       helperArgs = [command, JSON.stringify(input), json ? 'json' : 'text'];
+    } else if (command === 'migration-stage' || command === 'migration-resume' || command === 'migration-status') {
+      const runId = publicIdSchema.parse(flagValue(args, '--run'));
+      const format = args.includes('--format') ? flagValue(args, '--format') : 'text';
+      if (args.length || (format !== 'text' && format !== 'json')) throw new Error('Expected --run ID and an optional --format text or json.');
+      helperArgs = [command, JSON.stringify({ runId }), format];
     } else if (command === 'migration-verify' || command === 'migration-report') {
       const runId = flagValue(args, '--run');
       publicIdSchema.parse(runId);

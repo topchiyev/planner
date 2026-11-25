@@ -22,6 +22,12 @@ class WriterLease {
     if (!this.held) throw new WriterOwnershipError('Planner writer ownership has ended.');
   }
 
+  inheritedDescriptor() {
+    const descriptor = this.#descriptor;
+    if (descriptor === undefined) throw new WriterOwnershipError('Planner writer ownership has ended.');
+    return descriptor;
+  }
+
   transfer() {
     const descriptor = this.#descriptor;
     if (descriptor === undefined) throw new WriterOwnershipError('Planner writer ownership has ended.');
