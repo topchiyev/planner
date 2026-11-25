@@ -216,13 +216,7 @@ export async function publishMigrationPreflight(
   lease.assertHeld();
   await assertMigrationTarget(db, installationId);
   const capacity = await checkMigrationCapacity(receipt.estimates);
-  const parent = await anchoredDirectory('/var/lib/planner', root, 0o711);
-  try {
-    try { await mkdir(join(fdPath(parent), 'migration'), { mode: 0o700 }); }
-    catch (error) { if (!errno(error, 'EEXIST')) throw error; }
-    await parent.sync();
-  } finally { await parent.close(); }
-  const directory = await anchoredDirectory(stateDirectory, root, 0o700);
+  const directory = await openNativeMigrationDirectory(true);
   try { return await persistMigrationPreflight(lease, db, installationId, directory, root, input, receipt, capacity); }
   finally { await directory.close(); }
 }
@@ -241,27 +235,48 @@ function isCompleteVerificationStart(run: ImportRun) {
     && run.verificationStartedAt >= run.createdAt && run.verificationStartedAt <= run.updatedAt;
 }
 
-export const openNativeMigrationDirectory = () => anchoredDirectory(stateDirectory, root, 0o700);
-
-export async function withNativeVerificationScratch<T>(runId: string, operation: (store: PrivateMediaStore) => Promise<T>) {
-  const directory = join(stateDirectory, '.verify-' + publicIdSchema.parse(runId));
-  try { await mkdir(directory, { mode: 0o700 }); }
-  catch (error) {
-    if (!errno(error, 'EEXIST')) throw error;
-    const interrupted = await anchoredDirectory(directory, root, 0o700);
-    await interrupted.close();
-    await rm(directory, { recursive: true });
-    await mkdir(directory, { mode: 0o700 });
+export async function openNativeMigrationDirectory(create = false) {
+  if (create) {
+    const parent = await anchoredDirectory('/var/lib/planner', root, 0o711);
+    try {
+      try { await mkdir(join(fdPath(parent), 'migration'), { mode: 0o700 }); }
+      catch (error) { if (!errno(error, 'EEXIST')) throw error; }
+      await parent.sync();
+    } finally { await parent.close(); }
   }
-  try {
-    const staging = join(directory, 'staging');
-    const blobs = join(directory, 'blobs');
-    await mkdir(staging, { mode: 0o700 });
-    await mkdir(blobs, { mode: 0o700 });
-    const store = await createPrivateMediaStore(staging, blobs);
-    try { return await operation(store); }
-    finally { await store.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  return anchoredDirectory(stateDirectory, root, 0o700);
+}
+
+const serviceResumeRecord = 'application-resume.json';
+type ServiceBinding = { installationId: string; appPort: number };
+const serviceResumeEvidence = ({ installationId, appPort }: ServiceBinding) => ({ formatVersion: 1, installationId, appPort });
+
+export async function hasMigrationServiceResume(directory: FileHandle, binding: ServiceBinding) {
+  const saved = await readRecord(directory, serviceResumeRecord, root);
+  if (!saved) return false;
+  try { if (isDeepStrictEqual(JSON.parse(saved.toString()), serviceResumeEvidence(binding))) return true; }
+  catch { /* Refuse to act on an inconsistent protected record. */ }
+  throw new MigrationError('target-write', 'The protected migration service resume intent is unavailable or inconsistent.');
+}
+
+export async function recordMigrationServiceResume(directory: FileHandle, binding: ServiceBinding) {
+  if (await hasMigrationServiceResume(directory, binding)) return;
+  await writeRecord(directory, serviceResumeRecord, Buffer.from(JSON.stringify(serviceResumeEvidence(binding)) + '\n'));
+  await directory.sync();
+}
+
+export async function clearMigrationServiceResume(directory: FileHandle, binding: ServiceBinding) {
+  if (!await hasMigrationServiceResume(directory, binding)) return;
+  await unlink(childPath(directory, serviceResumeRecord));
+  await directory.sync();
+}
+
+export async function dismissNativeMigrationServiceResume(binding: ServiceBinding) {
+  let directory: FileHandle;
+  try { directory = await openNativeMigrationDirectory(); }
+  catch (error) { if (errno(error, 'ENOENT')) return; throw error; }
+  try { await clearMigrationServiceResume(directory, binding); }
+  finally { await directory.close(); }
 }
 
 export async function readProtectedMigrationRun(db: Db, installationId: string, directory: FileHandle, owner: Owner, runId: string) {

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import { get, request as localRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -33,9 +33,10 @@ import { adminRuntimeDirectory } from './admin-socket.js';
 import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
 import { nativeMigrationMediaPublisher } from './migration-media.js';
-import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, migrationVerificationPage, openNativeMigrationDirectory,
+import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, clearMigrationServiceResume,
+  dismissNativeMigrationServiceResume, hasMigrationServiceResume, migrationVerificationPage, openNativeMigrationDirectory,
   persistMigrationVerification, publicMigrationStatus, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
-  readProtectedMigrationRun, stageProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
+  readProtectedMigrationRun, recordMigrationServiceResume, stageProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
@@ -311,6 +312,8 @@ async function setup(options: NativeSetupOptions) {
 async function control(action: 'start' | 'stop' | 'restart') {
   return withInstallationLock(async (owner) => {
     if (action === 'stop') {
+      const config = readInstallationConfig(owner.appGroup);
+      if (config?.mode === 'import') await dismissNativeMigrationServiceResume(config);
       systemctl('stop', app);
       await withStoppedWriter(async () => stopDatabase());
       return status(owner);
@@ -327,6 +330,7 @@ async function control(action: 'start' | 'stop' | 'restart') {
         await verifyStorageSchema(db, config.installationId);
         await assertNativeMfaKey(db, config.installationId, readNativeMfaKey(config.installationId, owner.appGroup));
       } finally { await client.close(); }
+      if (config.mode === 'import') await dismissNativeMigrationServiceResume(config);
       return status(owner);
     }
     if (action === 'restart' || listening) systemctl('stop', app);
@@ -343,6 +347,7 @@ async function control(action: 'start' | 'stop' | 'restart') {
       } finally { await client.close(); }
     });
     await startApplication(config.appPort);
+    if (config.mode === 'import') await dismissNativeMigrationServiceResume(config);
     return status(owner);
   });
 }
@@ -556,6 +561,21 @@ async function prepareCapture(input: unknown) {
   } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel); }
 }
 
+function migrationApplication(config: NativeInstallationConfig, directory: FileHandle) {
+  return {
+    async stop() {
+      if (!appListening(config.appPort, true)) return;
+      await recordMigrationServiceResume(directory, config);
+      systemctl('stop', app);
+    },
+    async restore() {
+      if (!await hasMigrationServiceResume(directory, config)) return;
+      if (!appListening(config.appPort, true)) await startApplication(config.appPort, { enableServices: false });
+      await clearMigrationServiceResume(directory, config);
+    },
+  };
+}
+
 async function migrationPreflight(input: MigrationInput) {
   return withInstallationLock(async (owner) => {
     const config = readInstallationConfig(owner.appGroup);
@@ -565,16 +585,17 @@ async function migrationPreflight(input: MigrationInput) {
       throw new MigrationError('target-setup', 'Complete import-mode setup on an inactive installation before migration preflight.');
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
-      const db = client.db(databaseName);
-      await assertMigrationTarget(db, config.installationId);
-      const receipt = await inspectMigration(input, migrationOwner, await migrationConfig('postgres'),
-        input.assetService !== undefined ? await migrationConfig('objects') : undefined);
-      await checkMigrationCapacity(receipt.estimates);
-      const wasRunning = appListening(config.appPort, true);
-      if (wasRunning) systemctl('stop', app);
+      const directory = await openNativeMigrationDirectory(true);
+      const application = migrationApplication(config, directory);
       try {
+        const db = client.db(databaseName);
+        await assertMigrationTarget(db, config.installationId);
+        const receipt = await inspectMigration(input, migrationOwner, await migrationConfig('postgres'),
+          input.assetService !== undefined ? await migrationConfig('objects') : undefined);
+        await checkMigrationCapacity(receipt.estimates);
+        await application.stop();
         return await withStoppedWriter((writer) => publishMigrationPreflight(writer, db, config.installationId, input, receipt));
-      } finally { if (wasRunning) await startApplication(config.appPort, { enableServices: false }); }
+      } finally { try { await application.restore(); } finally { await directory.close(); } }
     } finally { await client.close(); }
   });
 }
@@ -590,6 +611,7 @@ async function migrationStage(runId: string, statusOnly: boolean) {
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
       const directory = await openNativeMigrationDirectory();
+      const application = migrationApplication(config, directory);
       try {
         const db = client.db(databaseName);
         const saved = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
@@ -597,13 +619,12 @@ async function migrationStage(runId: string, statusOnly: boolean) {
         await assertMigrationTarget(db, config.installationId);
         const source = await migrationConfig('postgres');
         const objects = saved.input.assetService === undefined ? undefined : await migrationConfig('objects');
-        const wasRunning = appListening(config.appPort, true);
-        if (wasRunning) systemctl('stop', app);
         const controller = new AbortController();
         const cancel = () => controller.abort();
         process.once('SIGINT', cancel);
         process.once('SIGTERM', cancel);
         try {
+          await application.stop();
           return await withStoppedWriter((writer) => stageProtectedMigrationRun(db, writer, saved, migrationOwner, source, objects, {
             prepare: nativeMigrationMediaPublisher({ uid: owner.appUid, gid: owner.appGroup }, writer), signal: controller.signal,
           }));
@@ -613,9 +634,8 @@ async function migrationStage(runId: string, statusOnly: boolean) {
         } finally {
           process.off('SIGINT', cancel);
           process.off('SIGTERM', cancel);
-          if (wasRunning) await startApplication(config.appPort, { enableServices: false });
         }
-      } finally { await directory.close(); }
+      } finally { try { if (!statusOnly) await application.restore(); } finally { await directory.close(); } }
     } finally { await client.close(); }
   };
   return statusOnly ? run(verifyOwnership()) : withInstallationLock(run);
@@ -633,17 +653,17 @@ async function migrationVerification(runId: string, verify: boolean) {
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
       const directory = await openNativeMigrationDirectory();
+      const application = migrationApplication(config, directory);
       try {
         const db = client.db(databaseName);
         const { run, input, cursors } = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
         if (!verify || run.state === 'verified' || run.state === 'blocked') return readMigrationVerification(directory, migrationOwner, run);
-        const wasRunning = appListening(config.appPort, true);
-        if (wasRunning) systemctl('stop', app);
         const controller = new AbortController();
         const cancel = () => controller.abort();
         process.once('SIGINT', cancel);
         process.once('SIGTERM', cancel);
         try {
+          await application.stop();
           return await withStoppedWriter(async (writer) => {
             const media = await openPrivateBlobVerifier(backupBlobs, { uid: owner.appUid, gid: owner.appGroup });
             try {
@@ -673,9 +693,8 @@ async function migrationVerification(runId: string, verify: boolean) {
         } finally {
           process.off('SIGINT', cancel);
           process.off('SIGTERM', cancel);
-          if (wasRunning) await startApplication(config.appPort, { enableServices: false });
         }
-      } finally { await directory.close(); }
+      } finally { try { if (verify) await application.restore(); } finally { await directory.close(); } }
     } finally { await client.close(); }
   });
 }

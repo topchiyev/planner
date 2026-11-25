@@ -143,12 +143,54 @@ try {
 JS
 }
 
+kill_staging_with_application_stopped() {
+    local run_id=$1 blocker held operator
+    sql "$db" -c 'BEGIN; LOCK TABLE public.user_account IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(30); ROLLBACK' >"$work/stage-lock.log" 2>&1 &
+    blocker=$!
+    for _ in {1..100}; do
+        held=$(sql "$db" -c "SELECT pid FROM pg_locks WHERE relation='public.user_account'::regclass AND mode='AccessExclusiveLock' AND granted")
+        if [ -n "$held" ]; then break; fi
+        sleep .02
+    done
+    [[ "$held" =~ ^[0-9]+$ ]]
+    setsid plannerctl migration stage --run "$run_id" --format json >"$work/killed-stage.json" 2>&1 &
+    operator=$!
+    for _ in {1..250}; do
+        if [ -s /var/lib/planner/migration/application-resume.json ] && ! systemctl is-active --quiet planner.service; then
+            kill -KILL -- "-$operator"
+            break
+        fi
+        kill -0 "$operator"
+        sleep .02
+    done
+    if wait "$operator"; then
+        echo 'Staging completed before its application-recovery interruption.' >&2
+        exit 1
+    fi
+    sql "$db" -c "SELECT pg_terminate_backend($held)" >/dev/null
+    wait "$blocker" || true
+    [ -s /var/lib/planner/migration/application-resume.json ]
+    ! systemctl is-active --quiet planner.service
+    plannerctl migration status --run "$run_id" --format json >"$work/after-kill-status.json"
+    ! systemctl is-active --quiet planner.service
+    [ -s /var/lib/planner/migration/application-resume.json ]
+}
+
 check_stage() {
     local receipt=$1 post=$2 run_id
     run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$receipt")
     plannerctl migration status --run "$run_id" --format json >"$work/staging-before-$post.json"
     python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"]=="preflighted" and v["checkpoint"] is None and not v["stageComplete"]' "$work/staging-before-$post.json"
-    plannerctl migration stage --run "$run_id" --format json >"$work/staged-$post.json"
+    if [ "$post" = 230 ]; then
+        kill_staging_with_application_stopped "$run_id"
+        plannerctl migration resume --run "$run_id" --format json >"$work/staged-$post.json"
+        [ ! -e /var/lib/planner/migration/application-resume.json ]
+        systemctl is-active --quiet planner.service
+        [ "$(systemctl is-enabled planner.service)" = disabled ]
+        printf 'Killed stage resumed and restored the disabled-but-running application.\n'
+    else
+        plannerctl migration stage --run "$run_id" --format json >"$work/staged-$post.json"
+    fi
     plannerctl migration resume --run "$run_id" --format json >"$work/resumed-$post.json"
     plannerctl migration status --run "$run_id" --format json >"$work/staging-after-$post.json"
     cmp "$work/staged-$post.json" "$work/resumed-$post.json"
@@ -240,6 +282,12 @@ JS
         systemctl is-active --quiet planner.service
         [ "$(systemctl is-enabled planner.service)" = disabled ]
         systemctl is-enabled --quiet planner-mongodb.service
+        systemctl stop planner.service
+        run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$work/accepted-$suffix.json")
+        plannerctl migration resume --run "$run_id" --format json >"$work/deliberately-stopped.json"
+        ! systemctl is-active --quiet planner.service
+        [ ! -e /var/lib/planner/migration/application-resume.json ]
+        systemctl start planner.service
         systemctl enable planner.service
         printf 'Disabled-but-running application retained its service enablement.\n'
     fi
