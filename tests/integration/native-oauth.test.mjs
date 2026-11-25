@@ -353,6 +353,10 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       await withMcpSdk('2026-07-28', full.json.access_token, async (sdk) => {
         const run = (name, args, idempotencyKey = randomUUID()) => sdk.callTool({ name,
           arguments: { ...args, idempotencyKey } });
+        for (const name of ['project_delete', 'board_delete', 'list_clear_trash', 'card_purge', 'attachment_add_file',
+          'account_approve_access']) {
+          await assert.rejects(run(name, {}), /tool is unavailable/u);
+        }
         const project = (await run('project_create', { name: 'MCP fixture project', type: 'shared' })).structuredContent.data;
         const boardArgs = { id: project.id, expectedRevision: 1, name: 'MCP fixture board' };
         boardArguments = { ...boardArgs, idempotencyKey: boardKey };
