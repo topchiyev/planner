@@ -31,7 +31,7 @@ const writeTools = new Set(Object.keys(relationshipCommands).filter((operation) 
   return collection.slice(0, -1) + '_' + action.replace(/[A-Z]/gu, (letter) => '_' + letter.toLowerCase());
 }));
 
-function requestsWorkspaceMutation(message: JSONRPCRequest) {
+function requestsWorkspaceMutation(message: Pick<JSONRPCRequest, 'method' | 'params'>) {
   return message.method === 'tools/call' && typeof message.params?.name === 'string' && writeTools.has(message.params.name);
 }
 
@@ -58,14 +58,44 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
   const metadataUrl = origin + protectedResourceMetadataPath;
   const stopping = new AbortController();
   let closing: Promise<void> | undefined;
-  const actors = new WeakMap<AuthInfo, McpActor>();
-  const sdk = createMcpHandler(({ era, authInfo }) => {
+  type Admission = { token?: string; rpc: Pick<JSONRPCRequest, 'method' | 'params'>; refusal?: Response };
+  const pending = new WeakMap<Request, Admission | 'discovery'>();
+  const refuse = (admission: Admission, response: Response): never => {
+    admission.refusal = response;
+    throw new Error('Planner refused MCP admission.');
+  };
+
+  // The SDK validates modern routing headers before calling its factory. It only permits the
+  // factory to return a server, so the fetch wrapper supplies the HTTP response for policy refusals.
+  const sdk = createMcpHandler(async ({ era, authInfo, requestInfo }) => {
+    if (!requestInfo) throw new Error('Missing MCP request context.');
+    const admission = pending.get(requestInfo);
+    if (!admission) throw new Error('Missing MCP admission.');
+    let actor: McpActor | null = null;
+    if (admission !== 'discovery') {
+      if (!authInfo) throw new Error('Missing MCP authentication context.');
+      const { token, rpc } = admission;
+      try { if (token) actor = await authorize(token); }
+      catch { return refuse(admission, mcpError(503, 'Planner MCP is unavailable.')); }
+      if (!actor) return refuse(admission, Response.json({ error: 'invalid_token' },
+        { status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': challenge } }));
+      if (!actor.scopes.includes(writeScope) && requestsWorkspaceMutation(rpc)) {
+        return refuse(admission, Response.json({ error: 'insufficient_scope' }, { status: 403, headers: { 'Cache-Control': 'no-store',
+          'WWW-Authenticate': `Bearer error="insufficient_scope", scope="${readScope} ${writeScope}", resource_metadata="${metadataUrl}"` } }));
+      }
+      if (rpc.method === 'subscriptions/listen'
+          && !await surface?.admitListen?.(actor, rpc.params?.notifications)) {
+        return refuse(admission, mcpError(403, 'Subscription is unavailable.'));
+      }
+      if (closing) return refuse(admission, mcpError(503, 'Planner MCP is unavailable.'));
+      authInfo.clientId = actor.clientId;
+      authInfo.scopes = actor.scopes;
+    }
     const server = new McpServer({ name: 'Planner', version: PLANNER_VERSION }, {
       supportedProtocolVersions: [era === 'modern' ? modernMcpVersion : legacyMcpVersion],
       maxToolInputElements: 512,
       capabilities: surface?.capabilities?.(era),
     });
-    const actor = authInfo && actors.get(authInfo);
     if (actor) surface?.register(server, actor, era);
     return server;
   }, { legacy: 'stateless', responseMode: 'auto', maxRequestBodySize: mcpBodyLimit, maxSubscriptions: 64,
@@ -103,30 +133,22 @@ export function createPlannerMcpHandler(origin: string, authorize: (token: strin
       }
     } else {
       if (route.classification.era !== 'modern' || route.classification.revision !== modernMcpVersion) return dispatch();
-      if (route.messageKind === 'request' && (!version || !method)) return dispatch();
-      if (route.messageKind === 'request' && route.message.method === 'server/discover') return dispatch();
+      if (route.message.method === 'server/discover') {
+        if (route.messageKind !== 'request') return mcpError(400, 'Discovery requires a request ID.', -32600);
+        pending.set(forwarded, 'discovery');
+        return dispatch();
+      }
     }
 
-    let actor: McpActor | null = null;
-    try { if (token) actor = await authorize(token); }
-    catch { return mcpError(503, 'Planner MCP is unavailable.'); }
-    if (!actor) return Response.json({ error: 'invalid_token' },
-      { status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': challenge } });
-    if (closing) return mcpError(503, 'Planner MCP is unavailable.');
-
-    const rpc = (route.kind === 'modern' ? route.message : message) as JSONRPCRequest;
-    if (!actor.scopes.includes(writeScope) && requestsWorkspaceMutation(rpc)) {
-      return Response.json({ error: 'insufficient_scope' }, { status: 403, headers: { 'Cache-Control': 'no-store',
-        'WWW-Authenticate': `Bearer error="insufficient_scope", scope="${readScope} ${writeScope}", resource_metadata="${metadataUrl}"` } });
-    }
-    if (rpc.method === 'subscriptions/listen'
-      && !await surface?.admitListen?.(actor, rpc.params?.notifications)) return mcpError(403, 'Subscription is unavailable.');
-
-    const authInfo: AuthInfo = { token: '', clientId: actor.clientId, scopes: actor.scopes,
+    const rpc = (route.kind === 'modern' ? route.message : message) as Admission['rpc'];
+    const admission: Admission = { token, rpc };
+    pending.set(forwarded, admission);
+    const authInfo: AuthInfo = { token: '', clientId: '', scopes: [],
       resource: new URL(resource), resourceMetadataUrl: metadataUrl };
-    actors.set(authInfo, actor);
-    if (closing) return mcpError(503, 'Planner MCP is unavailable.');
-    return dispatch(authInfo);
+    try {
+      const response = await dispatch(authInfo);
+      return admission.refusal ?? response;
+    } finally { pending.delete(forwarded); }
   }
 
   return { fetch, close: () => closing ??= sdk.close().finally(() => stopping.abort()) };

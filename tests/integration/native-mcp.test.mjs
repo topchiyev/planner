@@ -117,6 +117,7 @@ test('trusted HTTPS MCP negotiates 2025 stateless and 2026 per-request traffic, 
           if (progressToken) await context.mcpReq.notify({ method: 'notifications/progress', params: { progressToken, progress: 1 } });
           return { content: [{ type: 'text', text: actor.userId + ':' + era }] };
         });
+        server.registerTool('card_update', {}, () => ({ content: [{ type: 'text', text: 'synthetic write scope' }] }));
         server.registerResource('fixture', 'planner://fixture/board', {}, () => ({
           contents: [{ uri: 'planner://fixture/board', text: actor.userId }],
         }));
@@ -154,6 +155,7 @@ test('trusted HTTPS MCP negotiates 2025 stateless and 2026 per-request traffic, 
       options(modernBody('server/discover', {}, { [capabilities]: [] })),
       options(modernBody('server/discover', {}, { [protocol]: '2027-01-01' }), undefined, { 'MCP-Protocol-Version': '2027-01-01' }),
       { payload: { ...body('server/discover'), id: undefined } },
+      options({ ...discover, id: undefined }),
       { payload: [discover] },
       { payload: '{"jsonrpc":' },
     ]) assert.equal((await complete(malformed)).status, 400, JSON.stringify(malformed));
@@ -183,15 +185,16 @@ test('trusted HTTPS MCP negotiates 2025 stateless and 2026 per-request traffic, 
     assert.equal(initialized.text, '');
     assert.equal(initialized.headers['mcp-session-id'], undefined);
     assert.equal((await complete({ payload: body('tools/list'), token: tokenA })).status, 400);
+    assert.equal((await complete({ payload: body('tools/list'), token: tokenA, headers: { 'MCP-Protocol-Version': '2025-06-18' } })).status, 400);
     const listed = await open({ payload: body('tools/list'), token: tokenA, headers: { 'MCP-Protocol-Version': legacy } });
     assert.equal(listed.statusCode, 200);
     const tools = [];
     for await (const frame of frames(listed)) tools.push(frame);
-    assert.deepEqual(tools.at(-1).result.tools.map(({ name }) => name), ['fixture_actor']);
+    assert.deepEqual(tools.at(-1).result.tools.map(({ name }) => name).sort(), ['card_update', 'fixture_actor']);
     assert.equal((await complete({ payload: { ...initialize, params: { ...initialize.params, _meta: { [protocol]: modern } } }, token: tokenA })).status, 400);
 
     const named = modernBody('tools/call', { name: 'fixture_actor' });
-    assert.equal((await complete(options(named))).status, 401);
+    assert.equal((await complete(options(named, undefined, { 'Mcp-Name': 'fixture_actor' }))).status, 401);
     assert.equal((await complete(options(named, tokenA, { 'Mcp-Name': 'wrong_tool' }))).status, 400);
     assert.equal((await complete(options(named, tokenA))).status, 400);
     for (const [method, field, name] of [['prompts/get', 'name', 'fixture_prompt'], ['resources/read', 'uri', 'planner://fixture/board']]) {
@@ -199,9 +202,18 @@ test('trusted HTTPS MCP negotiates 2025 stateless and 2026 per-request traffic, 
       assert.equal((await complete(options(rpc, tokenA, { 'Mcp-Name': 'mismatch' }))).status, 400);
       assert.equal((await complete(options(rpc, tokenA, { 'Mcp-Name': name }))).status, 200);
     }
-    const write = await complete(options(modernBody('tools/call', { name: 'card_update' }), tokenA, { 'Mcp-Name': 'card_update' }));
+    const writeRequest = modernBody('tools/call', { name: 'card_update' });
+    const checkedBefore = accessChecks;
+    for (const headers of [{}, { 'Mcp-Name': 'fixture_actor' }]) {
+      assert.equal((await complete(options(writeRequest, tokenA, headers))).status, 400);
+    }
+    assert.equal(accessChecks, checkedBefore);
+    const write = await complete(options(writeRequest, tokenA, { 'Mcp-Name': 'card_update' }));
     assert.equal(write.status, 403);
     assert.match(write.headers['www-authenticate'], /insufficient_scope/u);
+    const permitted = await complete(options(writeRequest, tokenWrite, { 'Mcp-Name': 'card_update' }));
+    assert.equal(permitted.status, 200);
+    assert.equal(permitted.json.result.content[0].text, 'synthetic write scope');
     const replies = await Promise.all([tokenA, tokenB].map((token) => complete(options(named, token, { 'Mcp-Name': 'fixture_actor' }))));
     assert.deepEqual(replies.map((reply) => [reply.status, reply.json.id, reply.json.result.content[0].text]),
       [[200, 1, 'alpha:modern'], [200, 1, 'beta:modern']]);
@@ -218,6 +230,9 @@ test('trusted HTTPS MCP negotiates 2025 stateless and 2026 per-request traffic, 
 
     const listen = modernBody('subscriptions/listen', { notifications: { toolsListChanged: true } });
     assert.equal((await complete(options(listen))).status, 401);
+    const listenBefore = accessChecks;
+    assert.equal((await complete({ payload: listen, token: tokenA, headers: { 'MCP-Protocol-Version': modern } })).status, 400);
+    assert.equal(accessChecks, listenBefore);
     const refused = modernBody('subscriptions/listen', { notifications: { resourceSubscriptions: ['planner://fixture/board'] } });
     assert.equal((await complete(options(refused, tokenA))).status, 403);
     assert.equal(bus.listenerCount, 0);
