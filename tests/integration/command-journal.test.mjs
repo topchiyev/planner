@@ -13,8 +13,8 @@ import { acquireWriterDirectory } from '../../apps/backend/dist/application/comm
 import { createWorkspaceAccess } from '../../apps/backend/dist/application/command-gate/workspace-access.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { canonicalJournalData, commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
-import { enableMigrationWrites, rollbackMigration, WorkspaceReadOnly } from '../../apps/backend/dist/application/migration/cutover.js';
-import { importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
+import { enableMigrationWrites, inspectMigrationCutover, rollbackMigration, WorkspaceReadOnly } from '../../apps/backend/dist/application/migration/cutover.js';
+import { completedMigrationTable, importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
 import { maximumBatchBytes, packBatches } from '../../apps/backend/dist/application/command-journal/records.js';
 import { keepCommandRecovery } from '../../apps/backend/dist/native/command-recovery.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
@@ -493,6 +493,21 @@ for (const [checkpoint, mayRollback] of [['batchStored', true], ['firstWriteFenc
           assert.deepEqual(await rollbackMigration(db, lease, installationId, generationId), rolledBack);
           assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, null);
           await assert.rejects(enableMigrationWrites(db, lease, installationId, runId), { fault: 'activation-conflict' });
+          const next = { ...importRunKey({ runId: randomUUID(), generationId: randomUUID(), installationId }),
+            state: 'verified', fingerprint: { sha256: 'a'.repeat(64) }, manifestSha256: 'b'.repeat(64),
+            verification: { reportSha256: 'c'.repeat(64) }, stageCompletion: 'd'.repeat(64),
+            checkpoint: { pass: 'media', table: completedMigrationTable, token: `checkpoint.${'a'.repeat(43)}` } };
+          await db.collection('importRuns').insertOne(next);
+          const setups = db.collection('installation');
+          await setups.updateOne({ _id: 'installation' }, { $set: { 'setup.enrollmentGenerationId': next.generationId,
+            'setup.migrationAdminRecovery': { runId: next.id, generationId: next.generationId, manifestSha256: next.manifestSha256,
+              fingerprintSha256: next.fingerprint.sha256, reportSha256: next.verification.reportSha256,
+              stageCompletion: next.stageCompletion, checkpointToken: next.checkpoint.token, userId: actorId,
+              sourceUserId: '101', grantId: randomUUID(), accountRevision: 1, credentialsVersion: 1, requiresMfa: false },
+          } });
+          assert.deepEqual(await inspectMigrationCutover(db, await setups.findOne()), rolledBack);
+          assert.deepEqual(await rollbackMigration(db, lease, installationId, generationId), rolledBack);
+          assert.equal((await setups.findOne()).setup.enrollmentGenerationId, next.generationId);
         } else await assert.rejects(rollbackMigration(db, lease, installationId, generationId), { fault: 'rollback-fenced' });
       } finally { lease.release(); }
       const resumed = open(db, ownerDirectory);

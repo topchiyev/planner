@@ -3,6 +3,7 @@ import { generationIdSchema, publicIdSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { readInstallation, requireCurrentSchema, type InstallationDocument } from '../../storage/schema.js';
+import { coldMigrationAdminBinding, sameVerifiedMigration } from '../auth/migration-admin-grant.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { CommandRecoveryError } from '../command-journal/operation.js';
@@ -52,7 +53,14 @@ export async function inspectMigrationCutover(db: Db, installation: Installation
     || run.fingerprint?.sha256 !== verification.fingerprintSha256 || run.verification?.reportSha256 !== verification.reportSha256) return inconsistent();
   if (receipt.state === 'rolledBack') {
     if ((run.rollback !== undefined && !isDeepStrictEqual(run.rollback, receipt)) || !isStoredDate(receipt.rolledBackAt) || receipt.rolledBackAt < receipt.activatedAt
-      || installation.activeGenerationId !== prior.generationId || !isDeepStrictEqual(installation.setup, restoredSetup(receipt))) return inconsistent();
+      || installation.activeGenerationId !== prior.generationId) return inconsistent();
+    if (!isDeepStrictEqual(installation.setup, restoredSetup(receipt))) {
+      // A later verified cold run may advance setup after the old rollback was archived.
+      const next = run.rollback && coldMigrationAdminBinding(installation);
+      if (!next || next.runId === verification.runId || next.generationId === verification.generationId) return inconsistent();
+      const nextRun = await db.collection<ImportRun>('importRuns').findOne(importRunKey({ ...next, installationId: installation.installationId }));
+      if (!nextRun || !sameVerifiedMigration(nextRun, next) || nextRun.rollback !== undefined) return inconsistent();
+    }
     return receipt;
   }
   if (run.rollback !== undefined || installation.activeGenerationId !== verification.generationId || installation.setup?.mode !== 'import'
