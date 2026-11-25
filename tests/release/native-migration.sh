@@ -143,6 +143,28 @@ try {
 JS
 }
 
+check_stage() {
+    local receipt=$1 post=$2 run_id
+    run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$receipt")
+    plannerctl migration status --run "$run_id" --format json >"$work/staging-before-$post.json"
+    python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"]=="preflighted" and v["checkpoint"] is None and not v["stageComplete"]' "$work/staging-before-$post.json"
+    plannerctl migration stage --run "$run_id" --format json >"$work/staged-$post.json"
+    plannerctl migration resume --run "$run_id" --format json >"$work/resumed-$post.json"
+    plannerctl migration status --run "$run_id" --format json >"$work/staging-after-$post.json"
+    cmp "$work/staged-$post.json" "$work/resumed-$post.json"
+    cmp "$work/staged-$post.json" "$work/staging-after-$post.json"
+    python3 - "$work/staged-$post.json" "$receipt" <<'PY2'
+import json, sys
+with open(sys.argv[1]) as f: stage = json.load(f)
+with open(sys.argv[2]) as f: receipt = json.load(f)
+assert stage['stageComplete'] and stage['state'] == 'staging'
+assert stage['checkpoint'] == {'pass': 'media', 'table': 'user_account', 'lastSourceId': '105'}
+assert all(stage[field] == receipt[field] for field in ('runId', 'manifestSha256', 'fingerprintSha256'))
+assert 'token' not in stage['checkpoint'] and 'checkpointKey' not in stage
+PY2
+    test_readiness
+}
+
 for release in 2.3.0 2.3.1; do
     suffix=${release//./}
     db="planka_frozen_$suffix"
@@ -207,7 +229,8 @@ JS
     fi
     [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
     test_readiness
-    printf 'Packaged Community %s preflight verified.\n' "$release"
+    check_stage "$work/accepted-$suffix.json" "$suffix"
+    printf 'Packaged Community %s preflight and inactive staging verified.\n' "$release"
 done
 
 source_service=source-231
@@ -332,6 +355,24 @@ preflight_objects >"$work/object.json"
 check_receipt "$work/object.json" 2.3.1
 printf 'mismatch\n' >"$work/version-mode"
 refuses asset-integrity preflight_objects
+printf 'exact\n' >"$work/version-mode"
+export NODE_EXTRA_CA_CERTS="$work/certificate.pem"
+check_stage "$work/object.json" objects
+run_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$work/object.json")
+cp "$work/object/manifest.json" "$work/object-manifest-exact.json"
+printf '\n' >>"$work/object/manifest.json"
+refuses source-changed plannerctl migration resume --run "$run_id" --format json
+plannerctl migration status --run "$run_id" --format json >"$work/staging-after-drift.json"
+cmp "$work/staged-objects.json" "$work/staging-after-drift.json"
+cp "$work/object-manifest-exact.json" "$work/object/manifest.json"
+plannerctl migration verify --run "$run_id" --format json >"$work/verified-objects.json"
+python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["outcome"]=="verified" and v["eligibleUnderDefaultPolicy"]' "$work/verified-objects.json"
+! runuser -u planner -- test -r "$prepared/manifest.json"
+while read -r blob; do
+    [ "$(stat -c '%U:%G:%a' "$blob")" = planner:planner:400 ]
+done < <(find /var/lib/planner/blobs -maxdepth 1 -type f)
+[ -n "$(find /var/lib/planner/blobs -maxdepth 1 -type f -print -quit)" ]
 test_readiness
 [ "$(sql "$db" -c 'SELECT count(*) FROM public.card')" = 6 ]
 printf 'NATIVE MIGRATION PREFLIGHT ACCEPTANCE PASSED\n'
+printf 'NATIVE MIGRATION STAGING ACCEPTANCE PASSED\n'

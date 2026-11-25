@@ -116,6 +116,20 @@ For an object capture, replace `--assets-root` with `--asset-service NAME`. Defi
 
 The command checks the restored catalog and migration ledger, hashes the allowlisted logical rows in a single PostgreSQL read-only snapshot, and hashes the verified file or versioned object inventory. It checks the combined capacity of any shared target volumes. It records an inactive import run and a root-only receipt in `/var/lib/planner/migration` under the native writer lease. The application briefly releases its lease for publication and resumes its previous service state. The installation still has no active imported generation. Record the run ID, manifest hash and logical fingerprint separately from the private capture and credentials. A change to the logical source snapshot requires a new run. Retrying identical preflight inputs after an interruption returns the original run and public receipt, with any staged progress preserved.
 
+## Staging and resuming a PLANKA run
+
+Use the run ID returned by preflight. Keep the original root-owned capture and read-only PostgreSQL service available. For versioned objects, keep the same HTTPS service and versions available.
+
+```sh
+sudo plannerctl migration stage --run "$run_id" --format json
+sudo plannerctl migration status --run "$run_id" --format json
+sudo plannerctl migration resume --run "$run_id" --format json
+```
+
+Stage and resume check the exact capture manifest bytes, the restored database fingerprint and the asset inventory. An input change requires a new run. Status reports the last durable checkpoint and whether all staging passes finished. It reads the stored run while the source services are offline, including while another process stages the run. The ordinary workspace stays closed. An interruption can leave verified files or scoped rows ahead of the checkpoint. Repeating the same run checks and reuses those effects before advancing.
+
+The native operator stops a running application while it holds the writer lease and restores its previous state on normal completion, handled interruption, or refusal. After a sudden operator exit, use `resume` and restore the application service if it was previously running. The media worker holds its inherited writer lease through physical cleanup, reads asset bytes through a private pipe, and uses the Planner service identity for decoding and storage. Root-owned source paths, database credentials and checkpoint keys stay with the operator.
+
 ## Verifying a staged PLANKA run
 
 Keep the frozen source service and asset snapshot available until verification finishes. After the run has staged its graph and media, verify the inactive generation and read the aggregate report.

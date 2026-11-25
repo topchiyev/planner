@@ -10,7 +10,7 @@ import { anchoredDirectory, childPath, fdPath, fileChunks, type Owner } from '..
 import type { WriterLease } from '../application/command-gate/writer-lease.js';
 import { durable } from '../application/command-journal/records.js';
 import { importRunKey, migrationCursors, type ImportRun } from '../application/migration/checkpoint.js';
-import { activationExpectation, canonicalMissingOriginals, parseMigrationApproval } from '../application/migration/approval.js';
+import { activationExpectation, bindMissingOriginals, canonicalMissingOriginals, parseMigrationApproval } from '../application/migration/approval.js';
 import { MigrationError, sha256 } from '../application/migration/manifest.js';
 import { assertVerifiedSourceSnapshot, parseMigrationInput, type inspectMigration, type MigrationInput,
   type VerifiedSourceSnapshot } from '../application/migration/preflight.js';
@@ -329,6 +329,10 @@ function verifyReport(run: ImportRun, report: MigrationVerification) {
     || !isDeepStrictEqual(missingFromDetails, missing)) throw verificationFailure();
 }
 
+function verificationBinding(report: MigrationVerification): NonNullable<ImportRun['verification']> {
+  return { reportSha256: report.reportSha256, detailSha256: report.summary.detailSha256, ...bindMissingOriginals(report.missing) };
+}
+
 export async function readMigrationVerification(directory: FileHandle, owner: Owner, run: ImportRun) {
   try {
     if (run.state !== 'verified' && run.state !== 'blocked') throw verificationFailure();
@@ -336,8 +340,7 @@ export async function readMigrationVerification(directory: FileHandle, owner: Ow
     if (!bytes) throw verificationFailure();
     const report = JSON.parse(bytes.toString()) as MigrationVerification;
     verifyReport(run, report);
-    if (run.state !== report.summary.outcome || !run.verification || run.verification.reportSha256 !== report.reportSha256
-      || run.verification.detailSha256 !== report.summary.detailSha256) throw verificationFailure();
+    if (run.state !== report.summary.outcome || !isDeepStrictEqual(run.verification, verificationBinding(report))) throw verificationFailure();
     return report;
   } catch { throw verificationFailure(); }
 }
@@ -413,7 +416,7 @@ export async function persistMigrationVerification(lease: WriterLease, db: Db, d
   const result = await runs.updateOne({ ...key, state: 'verifying', 'fingerprint.sha256': run.fingerprint.sha256,
     manifestSha256: run.manifestSha256, 'checkpoint.token': checkpoint.token, stageCompletion: run.stageCompletion, verificationStartedAt: run.verificationStartedAt,
     verification: { $exists: false } }, {
-    $set: { state: report.summary.outcome, verification: { reportSha256: report.reportSha256, detailSha256: report.summary.detailSha256 }, updatedAt: new Date() },
+    $set: { state: report.summary.outcome, verification: verificationBinding(report), updatedAt: new Date() },
   }, durable);
   if (result.matchedCount !== 1) throw verificationFailure();
   return report;

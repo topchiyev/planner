@@ -11,7 +11,7 @@ import type { Owner } from '../backup/archive.js';
 import { inspectBackup } from '../backup/restore.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { durable } from '../command-journal/records.js';
-import { activationExpectationSchema, assertActivationRetry, type ActivationExpectation } from './approval.js';
+import { activationExpectationSchema, assertActivationRetry, assertBoundActivationApproval, type ActivationExpectation } from './approval.js';
 import { importRunKey, type ImportRun, type migrationCursors } from './checkpoint.js';
 import { MigrationError } from './manifest.js';
 
@@ -28,7 +28,7 @@ export type MigrationActivationBinding = { verification: ActivationExpectation; 
   administrator: Administrator; mfaKeyDigest: string; stageCompletion: string; schemaVersion: number };
 export type MigrationActivationReceipt = { state: 'activeReadOnly'; binding: MigrationActivationBinding; activatedAt: Date };
 export type MigrationActivationRequest = { verification: ActivationExpectation; prior: PriorRoute; priorBackup?: PriorBackup;
-  administrator: Administrator; mfaKeyDigest: string };
+  administrator: Administrator; mfaKeyDigest: string; approval?: unknown };
 
 function activationFailure() {
   return new MigrationError('activation-conflict', 'The protected activation expectations do not match this verified import and installation.');
@@ -75,6 +75,7 @@ export async function activateVerifiedMigration(db: Db, lease: WriterLease, inst
     || run.fingerprint.sha256 !== expectation.fingerprintSha256 || run.verification?.reportSha256 !== expectation.reportSha256
     || (expectation.missingOriginals > 0) !== (expectation.approvalSha256 !== null)) throw activationFailure();
   try { cursors.assertComplete(run); } catch { throw activationFailure(); }
+  assertBoundActivationApproval(run.verification, expectation, request.approval);
   const installation = await readInstallation(db, installationId);
   requireCurrentSchema(installation);
   const binding: MigrationActivationBinding = {
@@ -111,7 +112,7 @@ export async function activateVerifiedMigration(db: Db, lease: WriterLease, inst
   else {
     lease.assertHeld();
     const saved = await runs.updateOne({ ...key, state: 'verified', manifestSha256: expectation.manifestSha256,
-      'fingerprint.sha256': expectation.fingerprintSha256, 'verification.reportSha256': expectation.reportSha256,
+      'fingerprint.sha256': expectation.fingerprintSha256, verification: run.verification,
       stageCompletion: binding.stageCompletion, activation: { $exists: false } }, { $set: { activation: binding } }, durable);
     if (saved.matchedCount !== 1) throw activationFailure();
   }

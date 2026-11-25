@@ -30,7 +30,7 @@ export type ImportRun = {
   stageCompletion?: string;
   activation?: MigrationActivationBinding;
   verificationStartedAt?: Date;
-  verification?: { reportSha256: string; detailSha256: string };
+  verification?: { reportSha256: string; detailSha256: string; missingOriginals: number; missingSha256: string };
 };
 
 function invalid() {
