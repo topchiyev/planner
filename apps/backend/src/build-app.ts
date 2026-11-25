@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { healthOperations, PLANNER_VERSION } from '@planner/contracts';
 import Fastify from 'fastify';
 import type { McpSurface } from './application/mcp/http.js';
-import { registerNativeMcpRoutes } from './native/mcp-routes.js';
+import { registerNativeMcpRoutes, type NativeMcpWrites } from './native/mcp-routes.js';
 import type { BoardEventStreams } from './application/board-events/streams.js';
 import { registerFrontendShell } from './frontend-shell.js';
 import { registerAccountRoutes } from './native/account-routes.js';
@@ -23,6 +23,7 @@ type NativeAuthBoundary = NativeHttpBoundary & {
   boardEvents?: BoardEventStreams;
   oauth?: NativeOAuthRuntime;
   mcp?: McpSurface;
+  mcpWrites?: NativeMcpWrites;
 };
 
 export type AppDependencies = {
@@ -43,7 +44,7 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
     registerNativeBrowserAuth(app, native.auth);
     if (native.oauth) {
       registerNativeOAuthRoutes(app, native.oauth);
-      closeMcp = registerNativeMcpRoutes(app, native.oauth, native.mcp);
+      closeMcp = registerNativeMcpRoutes(app, native.oauth, native.mcp, native.mcpWrites);
     }
     if (native.auth) registerOAuthConnectionRoutes(app, native.oauth);
     if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);

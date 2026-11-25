@@ -2,9 +2,12 @@ import {
   classifyInboundRequest, CLIENT_CAPABILITIES_META_KEY, createMcpHandler, isJsonContentType, McpServer,
   PROTOCOL_VERSION_META_KEY, type AuthInfo, type JSONRPCRequest, type McpRequestContext, type ServerCapabilities, type ServerEventBus,
 } from '@modelcontextprotocol/server';
-import { PLANNER_VERSION, relationshipCommands } from '@planner/contracts';
+import { PLANNER_VERSION } from '@planner/contracts';
 import type { McpReadSnapshot } from './read-tools.js';
 import { oauthMetadata, protectedResourceMetadataPath, readScope, writeScope } from '../oauth/provider.js';
+
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import { mcpMutationNamed } from './mutation-catalog.js';
 
 export const mcpPath = '/mcp';
 export const mcpBodyLimit = 64 * 1024;
@@ -18,6 +21,7 @@ export interface McpActor {
   grantId: string;
   scopes: string[];
   read?: McpReadSnapshot;
+  write?: (name: string, input: unknown) => Promise<CallToolResult>;
 }
 
 export interface McpSurface {
@@ -27,14 +31,8 @@ export interface McpSurface {
   bus?: ServerEventBus;
 }
 
-const operatorCommands = new Set(['projects.delete', 'boards.delete', 'cards.purge', 'lists.clearTrash']);
-const writeTools = new Set(Object.keys(relationshipCommands).filter((operation) => !operatorCommands.has(operation)).map((operation) => {
-  const [collection, action] = operation.split('.');
-  return collection.slice(0, -1) + '_' + action.replace(/[A-Z]/gu, (letter) => '_' + letter.toLowerCase());
-}));
-
 function requestsWorkspaceMutation(message: Pick<JSONRPCRequest, 'method' | 'params'>) {
-  return message.method === 'tools/call' && typeof message.params?.name === 'string' && writeTools.has(message.params.name);
+  return message.method === 'tools/call' && typeof message.params?.name === 'string' && mcpMutationNamed(message.params.name) !== undefined;
 }
 
 export function mcpError(status: number, message: string, code = -32000) {

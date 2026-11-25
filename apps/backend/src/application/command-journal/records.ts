@@ -21,6 +21,17 @@ const effectCollections = new Set<WorkspaceCollection>(workspaceCollections.filt
 
 export type Effect = PlannedEffect & { effectId: string };
 export interface BatchSummary { digest: string; count: number }
+export interface McpCommandAttribution {
+  origin: 'mcp';
+  clientId: string;
+}
+
+export function isMcpCommandAttribution(value: unknown): value is McpCommandAttribution {
+  return typeof value === 'object' && value !== null && Object.keys(value).length === 2
+    && 'origin' in value && value.origin === 'mcp' && 'clientId' in value && typeof value.clientId === 'string'
+    && /^(?:codex|claude-code|claude-connector|registered:[A-Za-z0-9._~-]{1,128})$/u.test(value.clientId);
+}
+
 export interface CommandRecord {
   _id: string;
   id: string;
@@ -29,6 +40,7 @@ export interface CommandRecord {
   operationId: string;
   idempotencyKey: string;
   requestHash: string;
+  attribution?: McpCommandAttribution;
   createdAt: Date;
   recoverySequence?: Long;
   status: 'building' | 'prepared' | 'committed';
@@ -69,7 +81,8 @@ export function checkCommand(command: CommandRecord) {
       || !publicIdSchema.safeParse(idempotencyKey).success || !isCommandName(operationId)
       || id !== commandUuid(generationId, ['command', actorId, operationId, idempotencyKey])
       || command._id !== workspaceKey(generationId, id) || typeof command.requestHash !== 'string'
-      || !digestPattern.test(command.requestHash) || !isStoredDate(command.createdAt)) {
+      || !digestPattern.test(command.requestHash) || !isStoredDate(command.createdAt)
+      || (command.attribution !== undefined && !isMcpCommandAttribution(command.attribution))) {
     throw new CommandRecoveryError('A command journal identity is invalid.');
   }
   if (status === 'building') {

@@ -334,6 +334,12 @@ export function createOAuthStorage(
         return binding;
       });
     },
+    async currentAccessTokenForCommand(db: Db, generationId: string, token: string) {
+      // The command journal already owns the writer lease for this database.
+      if (await writableGeneration(db) !== generationId) return null;
+      const access = await currentAccessToken({ db, generationId }, token);
+      return access && now().getTime() < access.expiresAtMs ? access : null;
+    },
     withAccessTokenRead<T>(token: string, operation: (database: Db, access: NonNullable<Awaited<ReturnType<typeof currentAccessToken>>>) => Promise<T>) {
       return run(false, async (scope) => {
         const access = await currentAccessToken(scope, token);

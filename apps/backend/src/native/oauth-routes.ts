@@ -66,6 +66,8 @@ export function createNativeOAuthRuntime(
   }
   return {
     origin, registry, storage, secrets,
+    withCommandDatabase: <T>(operation: (db: Db, gate: CommandGate, installationId: string) => Promise<T>) =>
+      withDatabase((db) => operation(db, gate, installationId)),
     listConnections: (token: string, after?: string) => withDatabase((db) => storage.listConnections(db, token, after)),
     async revokeConnection(token: string, id: string) {
       const result = await withDatabase((db) => storage.revokeConnection(db, token, id));
