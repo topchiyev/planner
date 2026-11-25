@@ -70,6 +70,7 @@ export async function accountFixture({ db, directory }) {
   const sessions = () => createBrowserSessions(db, installationId, gate, hasher, now);
 
   async function startBrowser(origin, { oauth = false } = {}) {
+    if (oauth) time = new Date();
     const key = createSecretKey(randomBytes(32));
     const proxyDir = join(directory, 'proxy');
     await mkdir(proxyDir);
