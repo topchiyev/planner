@@ -1,3 +1,4 @@
+import { WorkspaceReadOnly } from '../application/migration/cutover.js';
 import {
   boardDeleteReceipt, fieldDefinitionDeleteReceipt, fieldGroupDeleteReceipt, fieldCommands, checklistDeleteReceipt, removedComment, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
   type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
@@ -93,6 +94,7 @@ function requestError(error: unknown, request: FastifyRequest, reply: FastifyRep
   if (error instanceof WorkspaceAccessError || error instanceof RelationshipError) {
     return fail(request, reply, error.statusCode, error.code, error.message);
   }
+  if (error instanceof WorkspaceReadOnly) return fail(request, reply, error.statusCode, error.code, error.message);
   if (error instanceof CommandConflict) return fail(request, reply, 409, 'IDEMPOTENCY_CONFLICT', error.message);
   if (error instanceof InvalidPageCursor) return fail(request, reply, 422, 'INVALID_CURSOR', error.message);
   if (error instanceof CommandInputError) return badInput(request, reply);

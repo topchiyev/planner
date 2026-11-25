@@ -1,3 +1,4 @@
+import { WorkspaceReadOnly } from '../application/migration/cutover.js';
 import { Readable } from 'node:stream';
 import { mediaAvatarQuerySchema, mediaBackgroundIdsSchema, mediaIdSchema, mediaLinkInputSchema, mediaMutationSchema, mediaOperations,
   mediaRenameSchema, mediaThumbnailIdsSchema, mediaVariantSchema, relationshipParentRevisionHeader } from '@planner/contracts';
@@ -41,6 +42,7 @@ function respondError(request: FastifyRequest, reply: FastifyReply, error: unkno
     const [status, code, message] = mediaErrors[error.kind];
     return errorReply(request, reply, status, code, message);
   }
+  if (error instanceof WorkspaceReadOnly) return errorReply(request, reply, error.statusCode, error.code, error.message);
   if (error instanceof CommandConflict) return errorReply(request, reply, 409, 'IDEMPOTENCY_CONFLICT', 'The key was already used for a different request.');
   if (error instanceof CommandInputError) return errorReply(request, reply, ...mediaErrors.input);
   return errorReply(request, reply, 503, 'UNAVAILABLE', 'Planner is unavailable.');

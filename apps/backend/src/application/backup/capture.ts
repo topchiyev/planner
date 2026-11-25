@@ -2,6 +2,7 @@ import type { Db } from 'mongodb';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import { verifyStorageSchema } from '../../storage/schema.js';
 import type { PrivateMediaStore } from '../../storage/blobs/private-store.js';
+import { assertMigrationJournalSafe } from '../migration/cutover.js';
 import { CleanCommandRejection, type CommandGate } from '../command-gate/gate.js';
 import { BackupError, backupCollections, fileChunks, publishBackup, sha256, type Owner } from './archive.js';
 import { bsonRecord, mediaInventory, rawRows, recordIdentity } from './records.js';
@@ -20,6 +21,7 @@ export async function createBackup(
             || installation.setup.mode !== config.mode || key.length !== 32 || installation.mfaKeyDigest !== sha256(key)) {
             throw new BackupError('Only a verified, ready Planner installation can be backed up.');
           }
+          await assertMigrationJournalSafe(db, installation, installation.activeGenerationId);
           const lists = await db.listCollections({}, { nameOnly: true }).toArray();
           if (lists.length !== backupCollections.length || lists.some(({ name }) => !backupCollections.includes(name))) {
             throw new BackupError('The Planner database contains an unrecognized collection.');

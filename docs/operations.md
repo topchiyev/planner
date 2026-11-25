@@ -162,6 +162,34 @@ sudo plannerctl migration bootstrap-admin --run "$run_id" --approve-fallback \
   --fallback-name "$admin_name" --fallback-email "$admin_email"
 ```
 
+## Cutting over a verified PLANKA run
+
+Have the source operator freeze writes before taking the final database and asset capture. Keep that source deployment, its verified backup and the isolated read-only restore available through the rollback window. Reconcile the final capture and complete the designated administrator recovery before publishing it. The native import workflow starts from a cold Planner installation with no active generation. Its rollback point returns that installation to closed import setup and leaves the frozen source and its backup under operator control.
+
+Record the trusted SHA-256 from the final capture independently of the verification command. Verify this exact capture and publish the verified generation with workspace writes paused.
+
+```sh
+sudo plannerctl migration verify --run "$run_id" --expect-manifest "$manifest_sha256" --format json
+sudo plannerctl migration activate --run "$run_id" --expect-manifest "$manifest_sha256" --format json
+sudo plannerctl migration status --run "$run_id" --format json
+```
+
+Append `--approve-missing-assets /root/planka-capture/missing-approved.json` to activation only if the independent report calls for approval and the operator has accepted every listed missing original. Exact activation retries use the same manifest digest and, when applicable, the same canonical approval. Status exposes the selected run, active generation, report digest, cutover state and whether a first write fenced rollback.
+
+While status reports `activeReadOnly`, sign in as the recovered administrator and representative workspace members. Check access to permitted boards and private media, and confirm a user outside the scope cannot read them. Workspace edits and changes to inbox preferences, inbox read state, consent or files are rejected. Login, necessary MFA, logout, authorized reads and passive event streams remain available. Record a protected Planner backup using `plannerctl backup create --json` and retain its exact backup ID and manifest hash before enabling writes.
+
+```sh
+sudo plannerctl migration enable-writes --run "$run_id" --format json
+```
+
+Before the first write fence, an operator can restore the prior route and confirm the workspace has returned to its prior readiness state.
+
+```sh
+sudo plannerctl migration rollback --expect-generation "$imported_generation_id" --format json
+```
+
+The first accepted workspace command records its durable fence before it can apply changes. A rollback refusal after that point can mean a command was interrupted before any effect became visible. Keep the current Planner database and media intact, export a protected Planner recovery backup, and inventory and reconcile the edits against the retained source backup before any routing decision. Never overwrite either workspace automatically. For a recovery restore, keep the same archive and its independently recorded manifest digest. The restored archive retains the exact cutover write state.
+
 ## Workspace storage schema
 
 Setup and the guarded service start verify the installation identity in the dedicated MongoDB instance. A supported schema upgrade runs with the application stopped. Planner copies and verifies any legacy first-administrator grant under its generation-scoped key, creates and checks its collection indexes, and then publishes the new schema version. An interrupted upgrade resumes from the stored phase on the next operator start. The version check preserves the active generation and the setup state.

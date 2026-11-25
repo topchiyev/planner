@@ -8,6 +8,7 @@ import type { WriterLease } from '../command-gate/writer-lease.js';
 import { accounts } from '../auth/accounts.js';
 import { usableAdmin } from '../auth/account-policy.js';
 import { durable } from '../command-journal/records.js';
+import { assertMigrationJournalSafe } from '../migration/cutover.js';
 import type { BlobIdentity } from '../../storage/blobs/private-store.js';
 import { BackupError, backupCollections, digestPattern, fileChunks, openBackup, sha256,
   type CollectionPart, type Owner, type Part } from './archive.js';
@@ -238,6 +239,8 @@ export async function activateRestore(db: Db, writer: WriterLease, media: Restor
     }
     await verifyStaged(db, media, marker, expectedProof);
   }
+  await assertMigrationJournalSafe(db, { ...installation, activeGenerationId: marker.generationId,
+    restoration: { ...marker, phase: 'active' } }, marker.generationId);
   if (marker.phase === 'staged') {
     const result = await db.collection<StoredDocument>('installation').updateOne({ _id: 'installation', installationId,
       activeGenerationId: { $type: 'null' }, mfaKeyDigest: installation.mfaKeyDigest, 'restoration.fingerprint': fingerprint,

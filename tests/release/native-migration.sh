@@ -6,7 +6,7 @@ umask 077
 
 media=${1:?Pass the read-only qualification media mount point}
 administrator_recovery=${2:-}
-[ -z "$administrator_recovery" ] || [ "$administrator_recovery" = --administrator-recovery ]
+[ -z "$administrator_recovery" ] || [ "$administrator_recovery" = --administrator-recovery ] || [ "$administrator_recovery" = --cutover ]
 [ "$(id -u)" = 0 ]
 [ "$(findmnt -no FSTYPE --target "$media")" = iso9660 ]
 findmnt -no OPTIONS --target "$media" | grep -Eq '(^|,)ro(,|$)'
@@ -447,4 +447,12 @@ printf 'NATIVE MIGRATION PREFLIGHT ACCEPTANCE PASSED\n'
 printf 'NATIVE MIGRATION STAGING ACCEPTANCE PASSED\n'
 if [ "$administrator_recovery" = --administrator-recovery ]; then
     bash "$media/native-migration-admin.sh" "$media" "$run_id"
+fi
+
+if [ "$administrator_recovery" = --cutover ]; then
+    bash "$media/native-migration-admin.sh" "$media" "$run_id" rollback
+    second_run=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$work/accepted-231.json")
+    plannerctl migration verify --run "$second_run" --format json > "$work/verified-local-cutover.json"
+    bash "$media/native-migration-admin.sh" "$media" "$second_run" writable
+    printf 'NATIVE MIGRATION CUTOVER ACCEPTANCE PASSED\n'
 fi

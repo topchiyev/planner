@@ -4,23 +4,25 @@ import { open, type FileHandle } from 'node:fs/promises';
 import { get, request as localRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { accountApprovalResultSchema, accountApprovalSchema, PLANNER_VERSION } from '@planner/contracts';
+import { accountApprovalResultSchema, accountApprovalSchema, migrationDigestSchema, PLANNER_VERSION } from '@planner/contracts';
 import {
   nativeSetupOptions, type NativeInstallationConfig, type NativeSetupOptions,
 } from '@planner/contracts/native';
-import { publicIdSchema } from '@planner/contracts/storage';
+import { generationIdSchema, publicIdSchema } from '@planner/contracts/storage';
 import type { MongoClient } from 'mongodb';
 import { z } from 'zod';
 import { BackupError, digestPattern } from '../application/backup/archive.js';
 import { activateRestore, inspectBackup, readActivatedRestore, stageRestore } from '../application/backup/restore.js';
 import { openPrivateBlobVerifier, openRestoreMedia } from '../application/backup/restore-media.js';
 import { createMediaDecoder } from '../application/media/decoder.js';
+import { activateVerifiedMigration, type MigrationActivationReceipt } from '../application/migration/activation.js';
+import { enableMigrationWrites, inspectMigrationCutover, rollbackMigration } from '../application/migration/cutover.js';
 import { MigrationError } from '../application/migration/manifest.js';
 import { inspectMigration, migrationPath, parseMigrationInput, withMigrationSnapshot, type MigrationInput } from '../application/migration/preflight.js';
 import { prepareMigration } from '../application/migration/prepare.js';
 import { collectMigrationVerification } from '../application/migration/verification.js';
 import { firstAdminBinding } from '../application/auth/first-admin.js';
-import { issueMigrationAdminRecovery, migrationAdminRequest } from '../application/auth/migration-admin.js';
+import { issueMigrationAdminRecovery, readMigrationAdminActivationProof, migrationAdminRequest } from '../application/auth/migration-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
   currentStorageSchema, migrateStorageSchema, readInstallation, requireCurrentSchema, StorageSchemaError, verifyStorageSchema,
@@ -36,7 +38,7 @@ import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRest
 import { nativeMigrationMediaPublisher } from './migration-media.js';
 import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, clearMigrationServiceResume,
   dismissNativeMigrationServiceResume, hasMigrationServiceResume, migrationVerificationPage, openNativeMigrationDirectory,
-  persistMigrationVerification, publicMigrationStatus, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
+  persistMigrationVerification, prepareMigrationCutover, publicMigrationStatus, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
   readProtectedMigrationRun, recordMigrationServiceResume, stageProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
@@ -616,7 +618,14 @@ async function migrationStage(runId: string, statusOnly: boolean) {
       try {
         const db = client.db(databaseName);
         const saved = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
-        if (statusOnly) return publicMigrationStatus(saved.run);
+        if (statusOnly) {
+          const installed = await readInstallation(db, config.installationId);
+          requireCurrentSchema(installed);
+          const cutover = await inspectMigrationCutover(db, installed);
+          const status = publicMigrationStatus(saved.run);
+          const receipt = cutover?.binding.verification.runId === runId ? cutover : saved.run.rollback;
+          return receipt ? { ...status, ...publicCutover(receipt), activeGenerationId: installed.activeGenerationId } : status;
+        }
         await assertMigrationTarget(db, config.installationId);
         const source = await migrationConfig('postgres');
         const objects = saved.input.assetService === undefined ? undefined : await migrationConfig('objects');
@@ -642,10 +651,10 @@ async function migrationStage(runId: string, statusOnly: boolean) {
   return statusOnly ? run(verifyOwnership()) : withInstallationLock(run);
 }
 
-const migrationVerificationRequest = z.strictObject({ runId: publicIdSchema,
+const migrationVerificationRequest = z.strictObject({ runId: publicIdSchema, manifestSha256: migrationDigestSchema.optional(),
   page: z.strictObject({ offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(1000) }).optional() });
 
-async function migrationVerification(runId: string, verify: boolean) {
+async function migrationVerification(runId: string, verify: boolean, manifestSha256?: string) {
   return withInstallationLock(async (owner) => {
     const config = readInstallationConfig(owner.appGroup);
     const restore = readRestoreIntent(owner.receipt);
@@ -658,6 +667,8 @@ async function migrationVerification(runId: string, verify: boolean) {
       try {
         const db = client.db(databaseName);
         const { run, input, cursors } = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
+        if (manifestSha256 !== undefined && manifestSha256 !== run.manifestSha256)
+          throw new MigrationError('source-changed', 'The expected manifest does not match the protected migration run.');
         if (!verify || run.state === 'verified' || run.state === 'blocked') return readMigrationVerification(directory, migrationOwner, run);
         const controller = new AbortController();
         const cancel = () => controller.abort();
@@ -723,6 +734,71 @@ async function bootstrapMigrationAdmin(input: ReturnType<typeof migrationAdminRe
   });
 }
 
+const activateRequest = z.strictObject({ runId: publicIdSchema, manifestSha256: migrationDigestSchema,
+  approvalPath: z.custom<string>(migrationPath).optional() });
+const rollbackRequest = z.strictObject({ generationId: generationIdSchema });
+type CutoverRequest = { action: 'activate'; input: z.infer<typeof activateRequest> }
+  | { action: 'enable'; input: z.infer<typeof migrationStageRequest> } | { action: 'rollback'; input: z.infer<typeof rollbackRequest> };
+
+function publicCutover(receipt: MigrationActivationReceipt) {
+  const { runId, generationId, manifestSha256, fingerprintSha256, reportSha256 } = receipt.binding.verification;
+  return { runId, generationId, manifestSha256, fingerprintSha256, reportSha256, state: receipt.state,
+    firstWriteFenced: receipt.state === 'writable' && receipt.fence !== undefined,
+    activeGenerationId: receipt.state === 'rolledBack' ? receipt.binding.prior.generationId : generationId };
+}
+
+async function changeMigrationRoute(request: CutoverRequest) {
+  return withInstallationLock(async (owner) => {
+    const config = readInstallationConfig(owner.appGroup);
+    const restore = readRestoreIntent(owner.receipt);
+    verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
+    if (!config || config.mode !== 'import' || restore) throw new MigrationError('target-setup', 'Select a protected import installation.');
+    const client = await connectOwnedDatabase(config, owner.appGroup);
+    try {
+      const directory = await openNativeMigrationDirectory();
+      const application = migrationApplication(config, directory);
+      try {
+        await application.stop();
+        return await withStoppedWriter(async (writer) => {
+          const db = client.db(databaseName);
+          const { installationId } = config;
+          const installed = await verifyStorageSchema(db, installationId);
+          const mfaKey = readNativeMfaKey(installationId, owner.appGroup);
+          await assertNativeMfaKey(db, installationId, mfaKey);
+          const cutover = await inspectMigrationCutover(db, installed);
+          if (request.action === 'rollback' && (!cutover || cutover.binding.verification.generationId !== request.input.generationId))
+            throw new MigrationError('activation-conflict', 'Select the current or already rolled back imported generation.');
+          const runId = request.action === 'rollback' ? cutover!.binding.verification.runId : request.input.runId;
+          const { run, input, cursors } = await readProtectedMigrationRun(db, installationId, directory, migrationOwner, runId);
+          cursors.assertComplete(run);
+          if (request.action === 'rollback') return rollbackMigration(db, writer, installationId, request.input.generationId);
+          if (request.action === 'enable') return enableMigrationWrites(db, writer, installationId, runId);
+          const { verification, approval } = await prepareMigrationCutover(directory, migrationOwner, run,
+            request.input.manifestSha256, request.input.approvalPath);
+          const prior = run.activation?.prior ?? { generationId: installed.activeGenerationId, setup: installed.setup };
+          if (prior.generationId !== null || !prior.setup)
+            throw new MigrationError('activation-conflict', 'Native activation requires the original cold setup rollback point.');
+          let administrator = run.activation?.administrator;
+          if (!administrator) {
+            const proof = await readMigrationAdminActivationProof(db, run);
+            if (!proof) throw new MigrationError('activation-conflict', 'Complete the designated administrator recovery before activation.');
+            const { userId, recoveryId, accountRevision, credentialsVersion, factorId } = proof;
+            administrator = { userId, recoveryId, revision: accountRevision, credentialsVersion, factorId };
+          }
+          const activate = () => activateVerifiedMigration(db, writer, installationId, cursors,
+            { verification, approval, administrator, prior: { ...prior, setup: prior.setup! }, mfaKeyDigest: mfaKey.digest });
+          if (cutover?.binding.verification.runId === runId) return activate();
+          const postgres = await migrationConfig('postgres');
+          const objects = input.assetService !== undefined ? await migrationConfig('objects') : undefined;
+          return (await withMigrationSnapshot(input, migrationOwner, postgres, objects, {
+            expectedManifestSha256: run.manifestSha256, expectedFingerprint: run.fingerprint.sha256,
+          }, activate)).value;
+        });
+      } finally { try { await application.restore(); } finally { await directory.close(); } }
+    } finally { await client.close(); }
+  });
+}
+
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === 'package-remove' && args.length === 0) {
@@ -756,11 +832,19 @@ try {
     const request = migrationVerificationRequest.parse(JSON.parse(args[0]));
     const verify = action === 'migration-verify';
     if (verify && request.page) throw new MigrationError('verification-incomplete', 'Only a verification report accepts detail pagination.');
-    const result = await migrationVerification(request.runId, verify);
+    const result = await migrationVerification(request.runId, verify, request.manifestSha256);
     const output = request.page ? migrationVerificationPage(result, request.page.offset, request.page.limit) : publicMigrationVerification(result);
     if (args[1] === 'json') console.log(JSON.stringify(output));
     else console.log(`Run ${result.summary.runId} ${result.summary.outcome}. Report ${result.reportSha256}. Missing originals ${result.summary.assets.missingOriginals}.`);
     if (verify && result.summary.outcome === 'blocked') process.exitCode = 1;
+  } else if ((action === 'migration-activate' || action === 'migration-enable-writes' || action === 'migration-rollback')
+    && args.length === 2 && (args[1] === 'text' || args[1] === 'json')) {
+    const input: unknown = JSON.parse(args[0]);
+    const request: CutoverRequest = action === 'migration-activate' ? { action: 'activate', input: activateRequest.parse(input) }
+      : action === 'migration-enable-writes' ? { action: 'enable', input: migrationStageRequest.parse(input) }
+      : { action: 'rollback', input: rollbackRequest.parse(input) };
+    const result = publicCutover(await changeMigrationRoute(request));
+    console.log(args[1] === 'json' ? JSON.stringify(result) : `Run ${result.runId} is ${result.state}.`);
   } else if (action === 'migration-bootstrap-admin' && args.length === 2 && (args[1] === 'text' || args[1] === 'json')) {
     const result = await bootstrapMigrationAdmin(migrationAdminRequest.parse(JSON.parse(args[0])));
     if (args[1] === 'json') console.log(JSON.stringify(result));

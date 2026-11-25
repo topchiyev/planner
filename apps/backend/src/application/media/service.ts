@@ -11,6 +11,7 @@ import { MediaSizeError, MediaStorageError, type BlobIdentity, type MediaPart, t
 import type { CommandGate } from '../command-gate/gate.js';
 import { CommandJournal } from '../command-journal/journal.js';
 import type { JournalFields, JournalOperation, JournalValue, PlannedEffect } from '../command-journal/operation.js';
+import { assertWorkspaceWritable } from '../migration/cutover.js';
 import {
   requireCapability, resolveBrowserWorkspace, WorkspaceAccessError, type CardAccessContext,
   type ProjectAccessContext, type WorkspaceAuthorization,
@@ -111,6 +112,7 @@ export function createMediaService(
     return gate.readSnapshot(async (): Promise<Admission> => {
       const scope = await scopeFor(token);
       const parent = await writable(scope, intent);
+      await assertWorkspaceWritable(database, installationId, scope.generationId);
       return Object.freeze({ intent, generationId: scope.generationId, actorId: scope.actor.id, parentId: parentId(parent),
         ...(parent.type === 'card' && { boardId: parent.value.board.board.id }) });
     });

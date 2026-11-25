@@ -2,12 +2,13 @@ import { isAbsolute, normalize } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { accountEmailSchema, accountNameSchema } from '@planner/contracts';
-import { publicIdSchema, signedInt64TextSchema } from '@planner/contracts/storage';
+import { generationIdSchema, publicIdSchema, signedInt64TextSchema } from '@planner/contracts/storage';
 import { parsePreflightOptions } from '@planner/contracts/native';
 
 type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart' | 'verify-storage' | 'account-inspect' | 'account-confirm'
   | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight' | 'migration-verify' | 'migration-report'
-  | 'migration-stage' | 'migration-resume' | 'migration-status' | 'migration-bootstrap-admin';
+  | 'migration-stage' | 'migration-resume' | 'migration-status' | 'migration-bootstrap-admin'
+  | 'migration-activate' | 'migration-enable-writes' | 'migration-rollback';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
 
 const serviceName = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/u;
@@ -63,10 +64,27 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
       const format = args.includes('--format') ? flagValue(args, '--format') : 'text';
       if (args.length || (format !== 'text' && format !== 'json')) throw new Error('Expected --run ID and an optional --format text or json.');
       helperArgs = [command, JSON.stringify({ runId }), format];
+    } else if (command === 'migration-activate' || command === 'migration-enable-writes' || command === 'migration-rollback') {
+      const target = command === 'migration-rollback'
+        ? { generationId: generationIdSchema.parse(flagValue(args, '--expect-generation')) }
+        : { runId: publicIdSchema.parse(flagValue(args, '--run')) };
+      let input = target;
+      if (command === 'migration-activate') {
+        const manifestSha256 = flagValue(args, '--expect-manifest');
+        const approvalPath = args.includes('--approve-missing-assets') ? flagValue(args, '--approve-missing-assets') : undefined;
+        if (!manifestHash.test(manifestSha256) || (approvalPath && !privatePath(approvalPath)))
+          throw new Error('Specify the trusted manifest SHA-256 and an absolute protected approval path when required.');
+        input = { ...target, ...{ manifestSha256, approvalPath } };
+      }
+      const format = args.includes('--format') ? flagValue(args, '--format') : 'text';
+      if (args.length || (format !== 'text' && format !== 'json')) throw new Error('Unexpected migration cutover options.');
+      helperArgs = [command, JSON.stringify(input), format];
     } else if (command === 'migration-verify' || command === 'migration-report') {
       const runId = flagValue(args, '--run');
       publicIdSchema.parse(runId);
       const report = command === 'migration-report';
+      const manifestSha256 = !report && args.includes('--expect-manifest') ? flagValue(args, '--expect-manifest') : undefined;
+      if (manifestSha256 && !manifestHash.test(manifestSha256)) throw new Error('Specify a trusted manifest SHA-256.');
       const format = report || args.includes('--format') ? flagValue(args, '--format') : 'text';
       if (format !== 'json' && (report || format !== 'text')) throw new Error('Specify --format json.');
       const paged = report && (args.includes('--offset') || args.includes('--limit'));
@@ -77,7 +95,7 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
       };
       const page = paged ? { offset: pageValue('--offset', 0), limit: pageValue('--limit', 100) } : undefined;
       if (args.length || (page && (page.limit < 1 || page.limit > 1000))) throw new Error('Invalid migration verification options.');
-      helperArgs = [command, JSON.stringify({ runId, page }), format];
+      helperArgs = [command, JSON.stringify({ runId, page, manifestSha256 }), format];
     } else if (command === 'migration-bootstrap-admin') {
       const runId = publicIdSchema.parse(flagValue(args, '--run'));
       const rotate = args.includes('--rotate');

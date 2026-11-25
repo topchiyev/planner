@@ -16,11 +16,12 @@ if (command === '--version') {
 } else if (command === 'backup' && (args[0] === 'create' || args[0] === 'restore' || args[0] === 'activate')) {
   process.exitCode = runNativeCommand(`backup-${args[0]}`, args.slice(1));
 } else if (command === 'migration' && (args[0] === 'prepare' || args[0] === 'preflight' || args[0] === 'stage' || args[0] === 'resume'
-    || args[0] === 'status' || args[0] === 'verify' || args[0] === 'report' || args[0] === 'bootstrap-admin')) {
+    || args[0] === 'status' || args[0] === 'verify' || args[0] === 'report' || args[0] === 'bootstrap-admin'
+    || args[0] === 'activate' || args[0] === 'enable-writes' || args[0] === 'rollback')) {
   process.exitCode = runNativeCommand(`migration-${args[0]}`, args.slice(1));
 } else if (command === 'storage' && args[0] === 'verify') {
   process.exitCode = runNativeCommand('verify-storage', args.slice(1));
 } else {
-  console.error('Usage: plannerctl preflight|setup|status|start|stop|restart|storage verify|backup create|backup restore|backup activate|accounts inspect|accounts confirm|migration prepare|migration preflight|migration stage|migration resume|migration status|migration verify|migration report|migration bootstrap-admin|--version');
+  console.error('Usage: plannerctl preflight|setup|status|start|stop|restart|storage verify|backup create|backup restore|backup activate|accounts inspect|accounts confirm|migration prepare|migration preflight|migration stage|migration resume|migration status|migration verify|migration report|migration bootstrap-admin|migration activate|migration enable-writes|migration rollback|--version');
   process.exitCode = 2;
 }

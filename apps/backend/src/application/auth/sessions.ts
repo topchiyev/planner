@@ -7,6 +7,7 @@ import type { CommandGate } from '../command-gate/gate.js';
 import { assertChanged, durable } from '../command-journal/records.js';
 import { isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { readInstallation, requireCurrentSchema } from '../../storage/schema.js';
+import { inspectMigrationCutover } from '../migration/cutover.js';
 import { accounts, getLocalAccount } from './accounts.js';
 import { csrfToken, newToken, normalizeIdentifier, tokenDigest } from './credentials.js';
 import { getFactor, hasPasswordOnlyAuth, hasPendingFactorEnrollment } from './mfa-account.js';
@@ -39,6 +40,7 @@ type LoginResult =
 export async function activeAccountGeneration(database: Db, installationId: string) {
   const installation = await readInstallation(database, installationId);
   requireCurrentSchema(installation);
+  if (installation.migrationActivation !== undefined) await inspectMigrationCutover(database, installation);
   return installation.setup?.pendingAction === 'complete' ? installation.activeGenerationId : null;
 }
 

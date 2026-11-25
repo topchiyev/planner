@@ -4,6 +4,7 @@ import type { Db } from 'mongodb';
 import { readStagedMfaEnrollment } from '../application/auth/mfa-account.js';
 import { firstAdminBinding, hasFirstAdminGrant } from '../application/auth/first-admin.js';
 import { canRecoverMigrationAdmin } from '../application/auth/migration-admin.js';
+import { assertMigrationJournalSafe, inspectMigrationCutover } from '../application/migration/cutover.js';
 import { StorageSchemaError, verifyStorageSchema } from '../storage/schema.js';
 import { checkDirectory } from './mongo-host.js';
 import { databaseName } from './mongo-identity.js';
@@ -58,12 +59,23 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
       if (installation.setup?.mode !== config.mode) return { kind: 'unavailable', reason: 'setup' };
       const restored = (installation as typeof installation & { restoration?: { phase?: unknown; generationId?: unknown; fingerprint?: unknown } }).restoration;
       if (restored !== undefined) {
-        return restored?.phase === 'active' && generationIdSchema.safeParse(restored.generationId).success
+        if (!(restored?.phase === 'active' && generationIdSchema.safeParse(restored.generationId).success
           && restored.generationId === installation.activeGenerationId && typeof restored.fingerprint === 'string'
-          && /^[a-f0-9]{64}$/u.test(restored.fingerprint) && installation.setup.pendingAction === 'complete'
-          ? { kind: 'ready' } : { kind: 'unavailable', reason: 'setup' };
+          && /^[a-f0-9]{64}$/u.test(restored.fingerprint) && installation.setup.pendingAction === 'complete')) {
+          return { kind: 'unavailable', reason: 'setup' };
+        }
+        await assertMigrationJournalSafe(database, installation, installation.activeGenerationId!);
+        return { kind: 'ready' };
       }
-      if (config.mode === 'import') return inspectColdMigrationAccess(database, config.installationId, new Date());
+      if (config.mode === 'import') {
+        const cutover = await inspectMigrationCutover(database, installation);
+        if (installation.activeGenerationId !== null) {
+          if (!cutover) return { kind: 'unavailable', reason: 'migration' };
+          await assertMigrationJournalSafe(database, installation, installation.activeGenerationId);
+          return { kind: 'ready' };
+        }
+        return inspectColdMigrationAccess(database, config.installationId, new Date());
+      }
       const binding = firstAdminBinding(installation);
       if (binding?.published) return { kind: 'ready' };
       if (installation.activeGenerationId !== null) return { kind: 'unavailable', reason: 'schema-or-recovery' };

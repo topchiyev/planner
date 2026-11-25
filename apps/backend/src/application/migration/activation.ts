@@ -9,11 +9,13 @@ import { usableAdmin } from '../auth/account-policy.js';
 import { getFactor, mfaAccounts } from '../auth/mfa-account.js';
 import { readMigrationAdminActivationProof } from '../auth/migration-admin.js';
 import type { Owner } from '../backup/archive.js';
+import { archiveRows, bsonRecord, rawRows } from '../backup/records.js';
 import { inspectBackup } from '../backup/restore.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { durable } from '../command-journal/records.js';
 import { activationExpectationSchema, assertActivationRetry, assertBoundActivationApproval, type ActivationExpectation } from './approval.js';
 import { importRunKey, type ImportRun, type migrationCursors } from './checkpoint.js';
+import { inspectMigrationCutover, retainMigrationRollback } from './cutover.js';
 import { MigrationError } from './manifest.js';
 
 const administratorSchema = z.strictObject({ userId: publicIdSchema, revision: revisionSchema,
@@ -27,7 +29,10 @@ type RollbackPoint = { kind: 'cold'; manifestSha256: string; fingerprintSha256: 
   | { kind: 'backup'; backupId: string; manifestSha256: string; generationId: string };
 export type MigrationActivationBinding = { verification: ActivationExpectation; prior: PriorRoute; rollback: RollbackPoint;
   administrator: Administrator; mfaKeyDigest: string; stageCompletion: string; schemaVersion: number };
-export type MigrationActivationReceipt = { state: 'activeReadOnly'; binding: MigrationActivationBinding; activatedAt: Date };
+type PublishedActivation = { binding: MigrationActivationBinding; activatedAt: Date };
+export type MigrationActivationReceipt = PublishedActivation & ({ state: 'activeReadOnly' }
+  | { state: 'writable'; writesEnabledAt: Date; fence?: { commandId: string; at: Date } }
+  | { state: 'rolledBack'; priorState: 'activeReadOnly' | 'writable'; writesEnabledAt?: Date; rolledBackAt: Date });
 export type MigrationActivationRequest = { verification: ActivationExpectation; prior: PriorRoute; priorBackup?: PriorBackup;
   administrator: Administrator; mfaKeyDigest: string; approval?: unknown };
 
@@ -35,7 +40,7 @@ function activationFailure() {
   return new MigrationError('activation-conflict', 'The protected activation expectations do not match this verified import and installation.');
 }
 
-async function rollbackPoint(installationId: string, generationId: string | null, backup: PriorBackup | undefined,
+async function rollbackPoint(db: Db, installation: InstallationDocument, generationId: string | null, backup: PriorBackup | undefined,
   expectation: ActivationExpectation): Promise<RollbackPoint> {
   if (generationId === null) {
     if (backup) throw activationFailure();
@@ -48,8 +53,22 @@ async function rollbackPoint(installationId: string, generationId: string | null
     const verified = await inspectBackup(backup.path, backup.owner, receipt.data.manifestSha256);
     try {
       const { manifest } = verified.archive;
-      if (manifest.backupId !== receipt.data.backupId || manifest.installationId !== installationId
-        || manifest.activeGenerationId !== generationId) throw activationFailure();
+      if (manifest.backupId !== receipt.data.backupId || manifest.installationId !== installation.installationId
+        || manifest.activeGenerationId !== generationId || verified.source.mfaKeyDigest !== installation.mfaKeyDigest) throw activationFailure();
+      // A backup may predate staging, but its prior active generation must still match exactly.
+      for (const part of manifest.collections) {
+        if (part.name === 'installation') continue;
+        const archive = await verified.archive.collection(part);
+        const live = rawRows(db, part.name, generationId);
+        try {
+          for await (const { record, bytes } of archiveRows(archive, part)) {
+            if (record.generationId !== generationId) continue;
+            const current = await live.next();
+            if (!current || bsonRecord(current).generationId !== generationId || !current.equals(bytes)) throw activationFailure();
+          }
+          if (await live.next()) throw activationFailure();
+        } finally { await Promise.all([archive.close(), live.close()]); }
+      }
       return { kind: 'backup', ...receipt.data, generationId };
     } finally { await verified.close(); }
   } catch { throw activationFailure(); }
@@ -60,7 +79,7 @@ function matchBinding(saved: MigrationActivationBinding, requested: MigrationAct
   if (!isDeepStrictEqual(saved, requested)) throw activationFailure();
 }
 
-/** Publish the verified route and its immutable receipt in one installation CAS. The native CLI and write fence are separate callers. */
+/** Publish the verified route and its immutable receipt in one installation CAS. */
 export async function activateVerifiedMigration(db: Db, lease: WriterLease, installationId: string,
   cursors: ReturnType<typeof migrationCursors>, request: MigrationActivationRequest, afterPointer?: () => Promise<void>) {
   lease.assertHeld();
@@ -72,27 +91,38 @@ export async function activateVerifiedMigration(db: Db, lease: WriterLease, inst
   const key = importRunKey({ runId, generationId, installationId });
   const runs = db.collection<ImportRun>('importRuns');
   const run = await runs.findOne(key);
-  if (!run || run.state !== 'verified' || !run.stageCompletion || run.manifestSha256 !== expectation.manifestSha256
+  if (!run || run.rollback !== undefined || run.state !== 'verified' || !run.stageCompletion || run.manifestSha256 !== expectation.manifestSha256
     || run.fingerprint.sha256 !== expectation.fingerprintSha256 || run.verification?.reportSha256 !== expectation.reportSha256
     || (expectation.missingOriginals > 0) !== (expectation.approvalSha256 !== null)) throw activationFailure();
   try { cursors.assertComplete(run); } catch { throw activationFailure(); }
   assertBoundActivationApproval(run.verification, expectation, request.approval);
   const installation = await readInstallation(db, installationId);
   requireCurrentSchema(installation);
+  const previous = await inspectMigrationCutover(db, installation);
+  const retained = previous && previous.state !== 'rolledBack' ? previous.binding.rollback : null;
+  let rollback: RollbackPoint;
+  if (retained?.kind === 'backup' && request.prior.generationId !== null) {
+    const backup = backupReceiptSchema.safeParse(request.priorBackup?.receipt);
+    if (!backup.success) throw activationFailure();
+    rollback = { kind: 'backup', ...backup.data, generationId: request.prior.generationId };
+  } else {
+    rollback = await rollbackPoint(db, installation, request.prior.generationId, request.priorBackup, expectation);
+  }
   const binding: MigrationActivationBinding = {
-    verification: expectation, administrator: administrator.data, prior: request.prior,
-    rollback: await rollbackPoint(installationId, request.prior.generationId, request.priorBackup, expectation),
+    verification: expectation, administrator: administrator.data, prior: request.prior, rollback,
     stageCompletion: run.stageCompletion, schemaVersion: installation.schemaVersion, mfaKeyDigest: request.mfaKeyDigest,
   };
-  if (installation.migrationActivation) {
-    const saved = installation.migrationActivation;
+  if (previous && previous.state !== 'rolledBack') {
+    const saved = previous;
     matchBinding(saved.binding, binding);
-    if (saved.state !== 'activeReadOnly' || installation.activeGenerationId !== generationId
+    if (installation.activeGenerationId !== generationId
       || installation.setup?.mode !== 'import' || installation.setup.pendingAction !== 'complete'
       || installation.mfaKeyDigest !== binding.mfaKeyDigest || !run.activation) throw activationFailure();
     matchBinding(run.activation, binding);
     return saved;
   }
+  if (previous?.binding.verification.runId === runId) throw activationFailure();
+  if (previous?.state === 'rolledBack') await retainMigrationRollback(db, installationId, previous);
   const setup = installation.setup;
   if (!setup || !isDeepStrictEqual(request.prior.setup, setup) || setup.mode !== 'import'
     || installation.activeGenerationId !== request.prior.generationId || installation.activeGenerationId === generationId
@@ -122,8 +152,8 @@ export async function activateVerifiedMigration(db: Db, lease: WriterLease, inst
   const published = await db.collection<InstallationDocument>('installation').updateOne({ _id: 'installation', installationId,
     activeGenerationId: { $type: binding.prior.generationId === null ? 'null' : 'string', $eq: binding.prior.generationId },
     setup, mfaKeyDigest: binding.mfaKeyDigest, schemaVersion: binding.schemaVersion, schemaMigration: { $exists: false },
-    migrationActivation: { $exists: false }, restoration: { $exists: false } }, {
-    $set: { activeGenerationId: generationId, 'setup.pendingAction': 'complete', migrationActivation: receipt },
+    migrationActivation: previous ?? { $exists: false }, restoration: { $exists: false } }, {
+    $set: { activeGenerationId: generationId, 'setup.pendingAction': 'complete', 'setup.enrollmentGenerationId': null, migrationActivation: receipt },
     $unset: { 'setup.stagedMfaEnrollment': '', 'setup.migrationAdminRecovery': '' },
   }, durable);
   if (published.matchedCount !== 1) throw activationFailure();

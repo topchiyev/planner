@@ -6,6 +6,7 @@ umask 077
 
 media=${1:?Pass the read-only qualification media mount point}
 run_id=${2:?Pass the verified synthetic run ID}
+cutover=${3:-}
 node=/opt/planner/current/runtime/node/bin/node
 work=$(mktemp -d /var/tmp/planner-migration-admin.XXXXXX)
 cert=/etc/ssl/planner/fullchain.pem
@@ -68,8 +69,13 @@ certificate_key=$(openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin 
 chgrp nogroup "$work" "$work/grant"
 chmod 0710 "$work"
 chmod 0640 "$work/grant"
+cutover_args=()
+if [ -n "$cutover" ]; then
+    install -o nobody -g nogroup -m 0600 /dev/null "$work/recovery-code"
+    cutover_args=("$work/recovery-code")
+fi
 runuser -u nobody -- env LD_LIBRARY_PATH="$media/browser-libs" "$node" "$media/native-mfa-browser.mjs" \
-    "$media/chromium/chrome-headless-shell" "$certificate_key" "$work/grant" --migration-recovery
+    "$media/chromium/chrome-headless-shell" "$certificate_key" "$work/grant" --migration-recovery "${cutover_args[@]}"
 systemctl stop planner.service
 "$node" --input-type=module - "$run_id" <<'JS'
 import assert from 'node:assert/strict';
@@ -95,3 +101,7 @@ try {
 } finally { await client.close(); lease.release(); }
 JS
 printf 'NATIVE MIGRATION ADMINISTRATOR RECOVERY ACCEPTANCE PASSED\n'
+
+if [ -n "$cutover" ]; then
+    "$node" "$media/native-migration-cutover.mjs" "$run_id" "$cert" "$work/recovery-code" "$cutover"
+fi

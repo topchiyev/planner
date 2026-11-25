@@ -1,3 +1,4 @@
+import { WorkspaceReadOnly } from '../application/migration/cutover.js';
 import {
   accountAccessChangeSchema, accountDirectoryQuerySchema, accountApprovalSchema, accountPreferencesSchema,
   accountProfileSchema, accountProvisionSchema, accountRevisionSchema, adminAccountSchema, passwordChangeSchema,
@@ -43,6 +44,7 @@ export function registerAccountRoutes(app: FastifyInstance, accounts: NativeAcco
       }
       if (error instanceof HashCapacityError) return fail(reply, request, 429, 'RATE_LIMITED', 'Too many attempts. Try again later.');
       if (error instanceof InvalidPageCursor) return fail(reply, request, 400, 'INVALID_CURSOR', error.message);
+      if (error instanceof WorkspaceReadOnly) return fail(reply, request, error.statusCode, error.code, error.message);
       if (error instanceof CommandConflict) return fail(reply, request, error.statusCode, error.code, error.message);
       if (error instanceof InvalidAccountRequest || (error.statusCode && error.statusCode >= 400 && error.statusCode < 500)) {
         return fail(reply, request, 400, 'INVALID_REQUEST', 'Check the information you entered.');

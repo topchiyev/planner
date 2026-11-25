@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 
-const [executablePath, certificateKey, stageTicketPath, stagedMode] = process.argv.slice(2);
+const [executablePath, certificateKey, stageTicketPath, stagedMode, fixtureCodePath] = process.argv.slice(2);
 const { chromium } = await import(new URL('./playwright-core/index.mjs', import.meta.url));
 const { Secret, TOTP } = await import('file:///opt/planner/current/node_modules/otpauth/dist/otpauth.node.mjs');
 const origin = 'https://planner.example.test';
@@ -66,7 +66,8 @@ try {
     const totp = new TOTP({ secret: Secret.fromBase32(text), digits: 6, period: 30, algorithm: 'SHA1' });
     await page.getByLabel('Authenticator code').fill(totp.generate());
     await button('Verify authenticator').click();
-    await codeList();
+    const stagedCodes = await codeList();
+    if (recovering && fixtureCodePath) await writeFile(fixtureCodePath, stagedCodes[0] + '\n');
     assert.equal(await cookie(sessionName), undefined);
     await button('I saved my recovery codes').click();
     await heading(recovering ? 'Administrator recovery complete' : 'Authenticator set up');

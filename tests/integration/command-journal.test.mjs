@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { chmod, mkdir } from 'node:fs/promises';
@@ -12,6 +13,8 @@ import { acquireWriterDirectory } from '../../apps/backend/dist/application/comm
 import { createWorkspaceAccess } from '../../apps/backend/dist/application/command-gate/workspace-access.js';
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { canonicalJournalData, commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
+import { enableMigrationWrites, rollbackMigration, WorkspaceReadOnly } from '../../apps/backend/dist/application/migration/cutover.js';
+import { importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
 import { maximumBatchBytes, packBatches } from '../../apps/backend/dist/application/command-journal/records.js';
 import { keepCommandRecovery } from '../../apps/backend/dist/native/command-recovery.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
@@ -54,7 +57,7 @@ function open(db, ownerDirectory, options) {
   return { gate, journal };
 }
 
-async function killAt(fixture, ownerDirectory, checkpoint, index) {
+async function killAt(fixture, ownerDirectory, checkpoint, index, duringCheckpoint) {
   const child = fork(fileURLToPath(new URL('../support/journal-process.mjs', import.meta.url)), [],
     { execArgv: [], stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const exited = once(child, 'exit');
@@ -74,6 +77,7 @@ async function killAt(fixture, ownerDirectory, checkpoint, index) {
       once(limit, 'abort').then(() => ({ timedOut: true }))]);
     assert.equal(outcome.reached, checkpoint, stderr || JSON.stringify(outcome));
     if (index !== undefined) assert.equal(outcome.at, index);
+    await duringCheckpoint?.();
   } finally { child.kill('SIGKILL'); await exited; }
   assert.deepEqual(await exited, [null, 'SIGKILL']);
   return delivered;
@@ -421,3 +425,98 @@ test('batch bounds account for BSON bytes and journal data rejects sensitive fie
   assert.throws(() => canonicalJournalData({ nested: [{ passwordHash: 'secret' }] }), /prohibited/u);
   assert.throws(() => packBatches(command, [effect(0, { refresh_token: 'secret' })]), /prohibited/u);
 });
+
+async function publishSyntheticMigration(db) {
+  const runId = randomUUID();
+  const fingerprintSha256 = 'a'.repeat(64);
+  const manifestSha256 = 'b'.repeat(64);
+  const reportSha256 = 'c'.repeat(64);
+  const mfaKeyDigest = 'd'.repeat(64);
+  const cursors = migrationCursors(randomBytes(32));
+  const position = { pass: 'media', table: 'user_account', lastSourceId: '101' };
+  const checkpoint = { ...position, token: cursors.seal({ runId, generationId, fingerprint: fingerprintSha256, ...position }, '101') };
+  const current = new Date(Date.now() - 10);
+  const prior = { generationId: null, setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: generationId } };
+  const run = { ...importRunKey({ runId, generationId, installationId }), state: 'verified',
+    fingerprint: { sha256: fingerprintSha256 }, manifestSha256, createdAt: current, updatedAt: current, checkpoint,
+    source: { instanceId: randomUUID(), release: '2.3.1', edition: 'community' }, verification: { reportSha256, detailSha256: '0'.repeat(64) } };
+  run.stageCompletion = cursors.sealCompletion(run);
+  const binding = { verification: { runId, generationId, manifestSha256, fingerprintSha256, reportSha256, missingOriginals: 0, approvalSha256: null },
+    prior, rollback: { kind: 'cold', manifestSha256, fingerprintSha256 },
+    administrator: { userId: actorId, credentialsVersion: 1, revision: 1, factorId: null },
+    mfaKeyDigest, stageCompletion: run.stageCompletion, schemaVersion: 1 };
+  await db.collection('importRuns').insertOne({ ...run, activation: binding });
+  await db.collection('installation').updateOne({ _id: 'installation' }, { $set: {
+    setup: { mode: 'import', pendingAction: 'complete', enrollmentGenerationId: generationId }, mfaKeyDigest,
+    migrationActivation: { state: 'activeReadOnly', activatedAt: current, binding },
+  } });
+  return runId;
+}
+
+for (const [checkpoint, mayRollback] of [['batchStored', true], ['firstWriteFenced', false]]) {
+  test(`migration cutover ${mayRollback ? 'permits rollback before' : 'refuses rollback after'} the durable first-write fence`,
+    { timeout: 55_000 }, async () => withFixtureMongo(async (fixture) => {
+      const { db } = fixture;
+      const ownerDirectory = await seed(fixture);
+      const runId = await publishSyntheticMigration(db);
+      const readonly = open(db, ownerDirectory);
+      try {
+        await readonly.journal.recover();
+        await assert.rejects(readonly.journal.execute(request), WorkspaceReadOnly);
+        assert.equal(await db.collection('commands').countDocuments(byGeneration), 0);
+        assert.equal(await readonly.gate.readSnapshot(() => rawBalance(db, rightId)), 0);
+        assert.equal(readonly.gate.ready, true);
+      } finally { await readonly.gate.closeAndDrain(); }
+      let lease = acquireWriterDirectory(ownerDirectory, owner, owner);
+      try {
+        const writable = await enableMigrationWrites(db, lease, installationId, runId);
+        assert.equal(writable.state, 'writable');
+        assert.deepEqual(await enableMigrationWrites(db, lease, installationId, runId), writable);
+      } finally { lease.release(); }
+
+      await killAt(fixture, ownerDirectory, checkpoint, undefined, () => {
+        assert.throws(() => acquireWriterDirectory(ownerDirectory, owner, owner), /Another Planner writer/u);
+      });
+      const command = await db.collection('commands').findOne(byGeneration);
+      assert.equal(command.status, 'building');
+      assert.equal(await rawBalance(db, rightId), 0);
+      assert.equal(await db.collection('auditEntries').countDocuments(byGeneration), 0);
+      assert.equal(await db.collection('events').countDocuments(byGeneration), 0);
+      const migration = (await db.collection('installation').findOne({ _id: 'installation' })).migrationActivation;
+      assert.equal(migration.fence?.commandId, mayRollback ? undefined : command.id);
+      lease = acquireWriterDirectory(ownerDirectory, owner, owner);
+      try {
+        await assert.rejects(rollbackMigration(db, lease, installationId, randomUUID()), { fault: 'activation-conflict' });
+        if (mayRollback) {
+          const rolledBack = await rollbackMigration(db, lease, installationId, generationId);
+          assert.equal(rolledBack.state, 'rolledBack');
+          assert.deepEqual(await rollbackMigration(db, lease, installationId, generationId), rolledBack);
+          assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, null);
+          await assert.rejects(enableMigrationWrites(db, lease, installationId, runId), { fault: 'activation-conflict' });
+        } else await assert.rejects(rollbackMigration(db, lease, installationId, generationId), { fault: 'rollback-fenced' });
+      } finally { lease.release(); }
+      const resumed = open(db, ownerDirectory);
+      try {
+        await resumed.journal.recover();
+        if (mayRollback) {
+          await assert.rejects(resumed.journal.execute(request), /No active generation/u);
+          assert.equal(await rawBalance(db, rightId), 0);
+        } else {
+          await assert.rejects(resumed.journal.execute({ ...request, idempotencyKey: randomUUID() }), WorkspaceReadOnly);
+          assert.equal(await db.collection('commands').countDocuments(byGeneration), 1);
+          const first = await resumed.journal.execute(request);
+          assert.deepEqual(await resumed.journal.execute(request), first);
+          assert.equal(first.commandId, command.id);
+          await assertApplied(db);
+        }
+      } finally { await resumed.gate.closeAndDrain(); }
+      if (!mayRollback) {
+        await db.collection('installation').updateOne({ _id: 'installation' }, { $unset: { 'migrationActivation.fence': '' } });
+        const corrupt = open(db, ownerDirectory);
+        try {
+          await assert.rejects(corrupt.journal.recover(), /first-write fence/u);
+          assert.equal(corrupt.gate.ready, false);
+        } finally { await corrupt.gate.closeAndDrain(); }
+      }
+    }));
+}

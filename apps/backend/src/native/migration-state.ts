@@ -180,11 +180,11 @@ export async function persistMigrationPreflight(
     await runs.updateOne(key, { $setOnInsert: row }, { ...durable, upsert: true });
     const savedRun = await runs.findOne(key);
     if (!savedRun) throw publishFailure();
-    const { state, checkpoint, updatedAt, verification, verificationStartedAt, stageCompletion, activation, ...original } = savedRun;
+    const { state, checkpoint, updatedAt, verification, verificationStartedAt, stageCompletion, activation, rollback, ...original } = savedRun;
     const { state: _state, checkpoint: _checkpoint, updatedAt: _updatedAt, ...expected } = row;
     if (!isDeepStrictEqual(original, expected) || !(updatedAt instanceof Date) || !Number.isFinite(updatedAt.valueOf())) throw publishFailure();
     if (state === 'preflighted') {
-      if (checkpoint !== null || stageCompletion !== undefined || activation !== undefined || verification !== undefined || verificationStartedAt !== undefined
+      if (checkpoint !== null || stageCompletion !== undefined || activation !== undefined || rollback !== undefined || verification !== undefined || verificationStartedAt !== undefined
         || updatedAt.valueOf() !== createdAt.valueOf()) throw publishFailure();
     } else {
       if (!published || !checkpoint) throw publishFailure();
@@ -472,12 +472,18 @@ export async function readMigrationApproval(path: string, owner: Owner = root): 
   } catch { throw new MigrationError('approval-invalid', 'The local approval file could not be verified.'); }
 }
 
-export async function prepareMigrationActivation(directory: FileHandle, owner: Owner, run: ImportRun,
+export async function prepareMigrationCutover(directory: FileHandle, owner: Owner, run: ImportRun,
   manifestSha256: string, approvalPath?: string) {
   const report = await readMigrationVerification(directory, owner, run);
   if (report.summary.outcome !== 'verified') throw new MigrationError('verification-blocked', 'This import has blocking reconciliation findings.');
   const approval = approvalPath === undefined ? undefined : await readMigrationApproval(approvalPath, owner);
   const { runId, generationId, fingerprintSha256 } = report.summary;
-  return activationExpectation({ runId, generationId, fingerprintSha256, manifestSha256: run.manifestSha256,
+  const verification = activationExpectation({ runId, generationId, fingerprintSha256, manifestSha256: run.manifestSha256,
     reportSha256: report.reportSha256 }, report.missing, migrationDigestSchema.parse(manifestSha256), approval);
+  return { verification, approval };
+}
+
+export async function prepareMigrationActivation(directory: FileHandle, owner: Owner, run: ImportRun,
+  manifestSha256: string, approvalPath?: string) {
+  return (await prepareMigrationCutover(directory, owner, run, manifestSha256, approvalPath)).verification;
 }

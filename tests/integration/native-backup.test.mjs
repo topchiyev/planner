@@ -15,6 +15,9 @@ import { openRestoreMedia } from '../../apps/backend/dist/application/backup/res
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
+import { commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
+import { assertWorkspaceWritable, inspectMigrationCutover } from '../../apps/backend/dist/application/migration/cutover.js';
+import { readInstallation } from '../../apps/backend/dist/storage/schema.js';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { createPrivateMediaStore } from '../../apps/backend/dist/storage/blobs/private-store.js';
@@ -52,13 +55,13 @@ async function mediaObject(store, source) {
   } finally { await stage.dispose(); }
 }
 
-async function sourceFixture(root, mongo) {
+async function sourceFixture(root, mongo, mode = 'fresh') {
   const f = await makeWorkspaceAccessFixture(mongo);
   const src = await dirs(root, 'source');
   const store = await createPrivateMediaStore(src.staging, src.blobs);
   const key = randomBytes(32);
   await f.db.collection('installation').updateOne({ _id: 'installation' }, { $set: { mfaKeyDigest: digest(key) } });
-  const config = { formatVersion: 1, installationId: f.installationId, mode: 'fresh', publicUrl: 'https://source.example.test', appPort: 27430, dbPort: 27431 };
+  const config = { formatVersion: 1, installationId: f.installationId, mode, publicUrl: 'https://source.example.test', appPort: 27430, dbPort: 27431 };
   const activeBytes = Buffer.from('private signed workspace asset');
   const active = await mediaObject(store, activeBytes);
   const staged = await mediaObject(store, Buffer.from('other generation asset'));
@@ -258,5 +261,68 @@ test('refuses substituted BSON parts, symlinks and foreign source data without d
       await chmod(join(root, 'source'), 0o700);
       await source.close();
     }
+  }));
+});
+
+test('restores a migrated workspace with its exact read-only gate or first-write fence', { timeout: 100_000 }, async () => {
+  await scratch((root) => withFixtureMongo(async (sourceMongo) => {
+    const source = await sourceFixture(root, sourceMongo, 'import');
+    const { db: origin, generationId, installationId } = source.f;
+    try {
+      const digestText = (number) => String(number).repeat(64);
+      const runId = randomUUID();
+      const manifestSha256 = digestText(1);
+      const fingerprintSha256 = digestText(2);
+      const reportSha256 = digestText(3);
+      const verification = { runId, generationId, manifestSha256, fingerprintSha256, reportSha256,
+        missingOriginals: 0, approvalSha256: null };
+      const binding = { verification, rollback: { kind: 'cold', manifestSha256, fingerprintSha256 },
+        prior: { generationId: null, setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: generationId } },
+        administrator: { userId: ids.admin, factorId: null, credentialsVersion: 1, revision: 1 },
+        mfaKeyDigest: digest(source.key), stageCompletion: 'archive fixture terminal cursor', schemaVersion: 1 };
+      await source.f.insert('importRuns', runId, { installationId, state: 'verified', activation: binding, manifestSha256,
+        fingerprint: { sha256: fingerprintSha256 }, verification: { reportSha256 }, stageCompletion: binding.stageCompletion });
+      await origin.collection('installation').updateOne({ _id: 'installation' }, { $set: {
+        setup: { mode: 'import', pendingAction: 'complete', enrollmentGenerationId: null },
+        migrationActivation: { state: 'activeReadOnly', activatedAt: new Date(), binding },
+      } });
+
+      const key = randomUUID();
+      const operationId = 'cards.update';
+      const commandId = commandUuid(generationId, ['command', ids.admin, operationId, key]);
+      for (const writable of [false, true]) {
+        if (writable) {
+          const writesEnabledAt = new Date();
+          await source.f.insert('commands', commandId, { actorId: ids.admin, idempotencyKey: key,
+            operationId, status: 'building', createdAt: writesEnabledAt, requestHash: digestText(4) });
+          await origin.collection('installation').updateOne({ _id: 'installation' }, { $set: {
+            'migrationActivation.state': 'writable', 'migrationActivation.writesEnabledAt': writesEnabledAt,
+            'migrationActivation.fence': { at: writesEnabledAt, commandId },
+          } });
+        }
+        const receipt = await source.backup();
+        const backup = await inspectBackup(join(source.src.backups, receipt.backupId), owner, receipt.manifestSha256);
+        try {
+          await withFixtureMongo(async ({ db }) => {
+            const target = await dirs(root, writable ? 'writable' : 'read-only');
+            await db.collection('installation').insertOne({ _id: 'installation', installationId });
+            const lease = acquireWriterDirectory(target.writer, owner, owner);
+            const media = await openRestoreMedia({ ...target, owner, fingerprint: receipt.manifestSha256 });
+            try {
+              await stageRestore(db, lease, media, backup);
+              assert.equal((await readInstallation(db, installationId)).activeGenerationId, null);
+              await activateRestore(db, lease, media, installationId, receipt.manifestSha256, backup.proof,
+                (keyDigest) => assert.equal(keyDigest, binding.mfaKeyDigest));
+              const cutover = await inspectMigrationCutover(db, await readInstallation(db, installationId));
+              assert.equal(cutover.state, writable ? 'writable' : 'activeReadOnly');
+              if (!writable) return await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), { code: 'WORKSPACE_READ_ONLY' });
+              assert.equal((await assertWorkspaceWritable(db, installationId, generationId)).fence.commandId, commandId);
+              await db.collection('commands').deleteOne({ _id: workspaceKey(generationId, commandId) });
+              await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), /first-write fence/);
+            } finally { await media.close(); lease.release(); }
+          });
+        } finally { await backup.close(); }
+      }
+    } finally { await source.close(); }
   }));
 });

@@ -7,7 +7,7 @@ import { currentStorageSchema, readInstallation, requireCurrentSchema } from '..
 import { workspaceKey } from '../../storage/identity.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { durable } from '../command-journal/records.js';
-import type { MigrationActivationBinding } from './activation.js';
+import type { MigrationActivationBinding, MigrationActivationReceipt } from './activation.js';
 import { MigrationError } from './manifest.js';
 import { assertVerifiedSourceSnapshot, trackSourceOperation, type VerifiedSourceSnapshot } from './preflight.js';
 import type { SourceFingerprint } from './source-fingerprint.js';
@@ -29,6 +29,7 @@ export type ImportRun = {
   source: Pick<MigrationCapture['source'], 'instanceId' | 'release' | 'edition'>;
   stageCompletion?: string;
   activation?: MigrationActivationBinding;
+  rollback?: Extract<MigrationActivationReceipt, { state: 'rolledBack' }>;
   verificationStartedAt?: Date;
   verification?: { reportSha256: string; detailSha256: string; missingOriginals: number; missingSha256: string };
 };

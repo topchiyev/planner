@@ -6,6 +6,7 @@ import { decodeRank, encodeRank, workspaceKey } from '../../storage/identity.js'
 import { readInstallation, requireCurrentSchema, verifyStorageSchema } from '../../storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace, workspaceInsertFields } from '../../storage/scoped.js';
 import { CleanCommandRejection, GateUnavailableError, type CommandGate } from '../command-gate/gate.js';
+import { assertMigrationCommandAdmission, assertMigrationJournalSafe, establishMigrationFence } from '../migration/cutover.js';
 import {
   canonicalJournalData, CommandConflict, CommandInputError, CommandRecoveryError, commandOperations, commandUuid,
   isCommandName, journalDigest, type CommandContext, type CommandPlan, type JournalOperation, type JournalValue,
@@ -17,7 +18,7 @@ import {
 } from './records.js';
 
 type Checkpoint = 'beforeIntent' | 'building' | 'batchStored' | 'prepared' | 'deleteReserved' | 'effectApplied'
-  | 'committed' | 'beforeDelivery' | 'afterDelivery';
+  | 'firstWriteFenced' | 'committed' | 'beforeDelivery' | 'afterDelivery';
 
 interface EventRecord {
   _id: string;
@@ -125,6 +126,8 @@ export class CommandJournal {
       const workspace = await this.#workspace();
       const generationId = workspace.generationId;
       await withReadContext(workspace, actorId, (context) => operation.authorize(context, normalized));
+      const id = commandUuid(generationId, ['command', actorId, operationId, idempotencyKey]);
+      if (this.options.scope !== 'enrollment') await assertMigrationCommandAdmission(this.database, this.installationId, generationId, id);
 
       const collection = commands(this.database);
       const identity = { generationId, actorId, operationId, idempotencyKey };
@@ -142,7 +145,6 @@ export class CommandJournal {
         }
         if (command.status === 'prepared') return this.#finish(command);
       } else {
-        const id = commandUuid(generationId, ['command', actorId, operationId, idempotencyKey]);
         command = { ...identity, _id: workspaceKey(generationId, id), id, status: 'building',
           requestHash: hash, createdAt: new Date() };
         await this.options.checkpoint?.('beforeIntent');
@@ -166,7 +168,10 @@ export class CommandJournal {
     await this.gate.recover(async () => {
       const installation = await verifyStorageSchema(this.database, this.installationId);
       const generationId = scopeGeneration(installation, 'active') ?? scopeGeneration(installation, 'enrollment');
-      if (generationId) await this.#recoverScope(generationId);
+      if (generationId) {
+        await assertMigrationJournalSafe(this.database, installation, generationId);
+        await this.#recoverScope(generationId);
+      }
       // Protected claims may have their own replay mechanism. This hook runs before admission.
       await recoverPrivate?.();
     });
@@ -276,6 +281,9 @@ export class CommandJournal {
       await this.options.checkpoint?.('batchStored', batch.batch);
     }
     await this.#validateReplay(prepared);
+    if (this.options.scope !== 'enrollment' && await establishMigrationFence(this.database, this.installationId, command)) {
+      await this.options.checkpoint?.('firstWriteFenced');
+    }
     const written = await commands(this.database).updateOne({ _id: command._id, status: 'building' },
       { $set: preparedFields }, durable);
     assertChanged(written.matchedCount);
@@ -326,6 +334,11 @@ export class CommandJournal {
   }
 
   async #finish(command: CommandRecord): Promise<JournalValue> {
+    const installation = await readInstallation(this.database, this.installationId);
+    requireCurrentSchema(installation);
+    const selected = scopeGeneration(installation, 'active') ?? scopeGeneration(installation, 'enrollment');
+    if (selected !== command.generationId) throw new CommandRecoveryError('The prepared command generation is no longer selected.');
+    await assertMigrationJournalSafe(this.database, installation, command.generationId, command);
     await this.#validateReplay(command);
     const cursor = command.applied!;
     const collection = commands(this.database);

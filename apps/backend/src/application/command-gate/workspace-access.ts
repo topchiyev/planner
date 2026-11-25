@@ -1,5 +1,6 @@
 import { MongoServerError, type Db } from 'mongodb';
 import { openActiveWorkspace } from '../../storage/scoped.js';
+import { assertWorkspaceWritable } from '../migration/cutover.js';
 import { CleanCommandRejection, type CommandGate, GateUnavailableError } from './gate.js';
 
 type Workspace = Awaited<ReturnType<typeof openActiveWorkspace>>;
@@ -62,7 +63,13 @@ export function createWorkspaceAccess(gate: CommandGate, database: Db, installat
       )));
     },
     runCommand<T>(operation: (workspace: Workspace) => T | Promise<T>) {
-      return gate.runCommand(async () => useWorkspace(await openActiveWorkspace(database, installationId), operation));
+      return gate.runCommand(async () => {
+        const workspace = await openActiveWorkspace(database, installationId);
+        if (await assertWorkspaceWritable(database, installationId, workspace.generationId)) {
+          throw new CleanCommandRejection('Migrated workspace writes require a journaled command.');
+        }
+        return useWorkspace(workspace, operation);
+      });
     },
   };
 }

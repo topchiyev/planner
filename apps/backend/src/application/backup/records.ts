@@ -13,8 +13,8 @@ const maximumBsonBytes = 16 * 1024 * 1024;
 const transient = new Set(['sessions', 'trustedDevices', 'recoveryGrants', 'oauthArtifacts']);
 const referenceCollections = ['attachments', 'projectBackgrounds'] as const;
 
-export function rawRows(db: Db, name: string) {
-  return db.collection(name).find<Buffer>({}, { raw: true, batchSize: 64 }).sort({ _id: 1 });
+export function rawRows(db: Db, name: string, generationId?: string) {
+  return db.collection(name).find<Buffer>(generationId === undefined ? {} : { generationId }, { raw: true, batchSize: 64 }).sort({ _id: 1 });
 }
 
 export function bsonRecord(bytes: Buffer): Document {
