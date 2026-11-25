@@ -6,6 +6,7 @@ import { recoverFactorChanges } from './application/auth/mfa-account.js';
 import { recoverFirstAdmin } from './application/auth/first-admin.js';
 import { recoverMigrationAdmin } from './application/auth/migration-admin.js';
 import type { CommandGate } from './application/command-gate/gate.js';
+import { createReadMcpSurface } from './application/mcp/read-surface.js';
 import { createMediaDecoder } from './application/media/decoder.js';
 import { startMediaCleanup, sweepPrivateMedia, verifyActiveMedia } from './application/media/reconcile.js';
 import { createPrivateMediaStore } from './storage/blobs/private-store.js';
@@ -75,6 +76,7 @@ try {
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth,
       oauth: createNativeOAuth(config, gate, mfaKey.key),
+      mcp: createReadMcpSurface(config.publicUrl, events.cursors),
       workspace: createNativeWorkspaceReader(config, gate, events.cursors),
       relationships: createNativeWorkspaceRelationships(config, gate, events.wake, events.streams.revalidateBoards),
       boardEvents: events.streams,

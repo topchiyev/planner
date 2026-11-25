@@ -11,7 +11,17 @@ export function registerNativeMcpRoutes(app: FastifyInstance, oauth: NativeOAuth
     const access = await oauth.request(() => storage.accessToken(token));
     const scopes = access?.scope.split(' ') ?? [];
     if (!access || access.audience !== resource || !scopes.includes(readScope) || !registry.allowsId(access.clientId)) return null;
-    return { generationId: access.generationId, userId: access.userId, clientId: access.clientId, grantId: access.grantId, scopes };
+    return {
+      generationId: access.generationId, userId: access.userId, clientId: access.clientId, grantId: access.grantId, scopes,
+      read: (operation) => oauth.request(() => storage.withAccessTokenRead(token, (database, current) => {
+        if (current.generationId !== access.generationId || current.userId !== access.userId || current.clientId !== access.clientId ||
+          current.grantId !== access.grantId || current.audience !== resource || current.scope !== access.scope ||
+          !registry.allowsId(current.clientId)) return Promise.resolve(null);
+        return operation(database, {
+          generationId: current.generationId, clientId: current.clientId, grantId: current.grantId, actor: current.actor,
+        });
+      })),
+    };
   }, surface);
   const nodeHandler = toNodeHandler(handler, { maxRequestBodySize: mcpBodyLimit });
 

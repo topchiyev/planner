@@ -5,11 +5,11 @@ export const boardFilterKeys = ['labelsAny', 'labelsNone', 'members', 'listIds']
 export const maximumBoardFilterIds = 50;
 export const boardSearchQuery = z.string().trim().max(256);
 export const boardPageSize = z.string().regex(/^[1-9]\d{0,8}$/u).transform((value) => Math.min(Number(value), 100));
-const normalizedIds = z.array(publicIdSchema).max(maximumBoardFilterIds).transform((ids) => [...new Set(ids)].sort());
+export const boardFilterIds = z.array(publicIdSchema).max(maximumBoardFilterIds).transform((ids) => [...new Set(ids)].sort());
 export const boardQueryIds = z.union([publicIdSchema, z.array(publicIdSchema).max(maximumBoardFilterIds)])
-  .transform((value) => normalizedIds.parse(typeof value === 'string' ? [value] : value));
+  .transform((value) => boardFilterIds.parse(typeof value === 'string' ? [value] : value));
 export const boardRecipeSchema = z.strictObject({
-  q: boardSearchQuery, labelsAny: normalizedIds, labelsNone: normalizedIds, members: normalizedIds, listIds: normalizedIds,
+  q: boardSearchQuery, labelsAny: boardFilterIds, labelsNone: boardFilterIds, members: boardFilterIds, listIds: boardFilterIds,
   unassigned: z.boolean(), limit: z.number().int().min(1).max(100),
 });
 export type BoardFilterRecipe = z.infer<typeof boardRecipeSchema>;
@@ -21,7 +21,7 @@ function single(params: URLSearchParams, name: string) {
 
 export function readBoardFilterRecipe(params: URLSearchParams): BoardFilterRecipe {
   const groups = {} as Pick<BoardFilterRecipe, typeof boardFilterKeys[number]>;
-  for (const key of boardFilterKeys) groups[key] = normalizedIds.safeParse(params.getAll(key)).data ?? [];
+  for (const key of boardFilterKeys) groups[key] = boardFilterIds.safeParse(params.getAll(key)).data ?? [];
   return {
     ...groups, q: boardSearchQuery.safeParse(single(params, 'q')).data ?? '',
     unassigned: single(params, 'unassigned') === 'true',

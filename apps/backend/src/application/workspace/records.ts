@@ -1,6 +1,7 @@
-import type { AggregateOptions, Db, Document, Filter, Long, Sort } from 'mongodb';
+import { BSON, type AggregateOptions, type Db, type Document, type Filter, type Long, type Sort } from 'mongodb';
 import type { ListColor, SessionActor, projectGradientSchema } from '@planner/contracts';
 import { publicIdPattern } from '@planner/contracts/storage';
+import { CleanCommandRejection } from '../command-gate/gate.js';
 import { workspaceKey } from '../../storage/identity.js';
 
 type SiteRole = SessionActor['role'];
@@ -96,33 +97,64 @@ export async function together<T extends readonly unknown[] | []>(values: T) {
   return fulfilled as { -readonly [Index in keyof T]: Awaited<T[Index]> };
 }
 
-export function createWorkspaceRecords(database: Db, generationId: string) {
+export class WorkspaceReadLimit extends CleanCommandRejection {
+  constructor() { super('The authorized workspace result exceeds the read limit.'); }
+}
+
+export function createWorkspaceReadBudget() {
+  let records = 0;
+  let bytes = 0;
+  return (record: Document) => {
+    records += 1;
+    bytes += BSON.calculateObjectSize(record);
+    if (records > 8_192 || bytes > 4 * 1024 * 1024) throw new WorkspaceReadLimit();
+  };
+}
+
+export function createWorkspaceRecords(database: Db, generationId: string, budget?: ReturnType<typeof createWorkspaceReadBudget>) {
   function collection<K extends WorkspaceRecordName>(name: K) {
     return database.collection<WorkspaceRow<K>>(name);
   }
   const scoped = <K extends WorkspaceRecordName>(filter: Document) => ({ ...filter, generationId } as Filter<WorkspaceRow<K>>);
+  async function collect<T extends Document>(cursor: AsyncIterable<T> & { toArray(): Promise<T[]>; close(): Promise<void> }) {
+    if (!budget) return cursor.toArray();
+    const rows: T[] = [];
+    try {
+      for await (const row of cursor) {
+        budget(row);
+        rows.push(row);
+      }
+      return rows;
+    } finally { await cursor.close(); }
+  }
+
+  function account<T extends Document>(row: T | null) {
+    if (row && budget) budget(row);
+    return row;
+  }
+
   const personProjection = { _id: 1, generationId: 1, id: 1, name: 1, username: 1, role: 1, disabledAt: 1 };
   function scan<Result extends Document>(
     name: WorkspaceRecordName, filter: Document, stages: Document[],
     options?: Pick<AggregateOptions, 'maxTimeMS' | 'batchSize'>,
   ) {
     return database.collection(name).aggregate<Result>([{ $match: { ...filter, generationId } }, ...stages],
-      { promoteLongs: false, ...options });
+      { promoteLongs: false, ...(budget && { batchSize: 16 }), ...options });
   }
   return {
     get<K extends WorkspaceRecordName>(name: K, id: string) {
       return collection(name).findOne(scoped<K>({
         _id: workspaceKey(generationId, id), id, $expr: { $and: [equal('id', id), equal('generationId', generationId)] },
       }),
-        { promoteLongs: false, ...(name === 'users' && { projection: personProjection }) });
+        { promoteLongs: false, ...(name === 'users' && { projection: personProjection }) }).then(account);
     },
     first<K extends WorkspaceRecordName>(name: K, filter: Document, sort?: Sort) {
       return collection(name).findOne(scoped<K>(filter),
-        { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) });
+        { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) }).then(account);
     },
     find<K extends WorkspaceRecordName>(name: K, filter: Document, sort?: Sort) {
-      return collection(name).find<WorkspaceRow<K>>(scoped<K>(filter),
-        { sort, promoteLongs: false, ...(name === 'users' && { projection: personProjection }) }).toArray();
+      return collect(collection(name).find<WorkspaceRow<K>>(scoped<K>(filter),
+        { sort, promoteLongs: false, ...(budget && { batchSize: 16 }), ...(name === 'users' && { projection: personProjection }) }));
     },
     count<K extends WorkspaceRecordName>(name: K, filter: Document) {
       return collection(name).countDocuments(scoped<K>(filter));
@@ -130,7 +162,7 @@ export function createWorkspaceRecords(database: Db, generationId: string) {
     aggregate<Result extends Document>(
       name: WorkspaceRecordName, filter: Document, stages: Document[], options?: Pick<AggregateOptions, 'maxTimeMS'>,
     ) {
-      return scan<Result>(name, filter, stages, options).toArray();
+      return collect(scan<Result>(name, filter, stages, options));
     },
     scan,
     lookup(name: WorkspaceRecordName, as: string, variables: Document, filter: Document, tail: Document[] = []): Document {

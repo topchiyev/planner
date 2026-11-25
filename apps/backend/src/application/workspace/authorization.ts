@@ -106,8 +106,8 @@ export async function resolveBrowserWorkspace(database: Db, installationId: stri
 }
 
 // For trusted adapters with an already verified current actor and active generation under the same lease.
-export function createWorkspaceAuthorization(database: Db, generationId: string, actor: WorkspaceActor) {
-  const records = createWorkspaceRecords(database, generationId);
+export function createWorkspaceAuthorization(database: Db, generationId: string, actor: WorkspaceActor,
+  records = createWorkspaceRecords(database, generationId)) {
   const roles = Object.freeze({ siteAdmin: actor.role === 'admin', canCreateProject: actor.role === 'admin' || actor.role === 'projectOwner' });
   const principal = Object.freeze({ id: actor.id, role: actor.role });
 
@@ -151,11 +151,26 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
   const managerRow = (project: Project) => records.first('projectManagers', { projectId: project.id, ...actorManager(project.id) });
   const membershipRow = (board: Board) => records.first('boardMembers', { boardId: board.id, ...actorMember(board.id) });
 
-  // Match a linked target inside a paginated board query without inspecting private rows in the result.
-  function readableCardLookup(as: string, from: string, summary = false) {
-    return records.lookup('cards', as, { targetId: from }, {
-      $expr: { $and: [canonical, equal('id', '$$targetId')] },
-    }, [
+  function visibleBoardStages(): Document[] {
+    return [
+      { $match: { $expr: canonical } },
+      records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, actorMember('$$boardId'), [{ $limit: 1 }]),
+      records.lookup('projects', 'targetProject', { projectId: '$projectId' }, {
+        $expr: { $and: [canonical, equal('id', '$$projectId')] },
+      }, [
+        records.lookup('projectManagers', 'actorManager', { projectId: '$id' }, actorManager('$$projectId'), [{ $limit: 1 }]),
+      ]),
+      { $unwind: '$targetProject' },
+      { $match: { $or: [
+        { 'actorMembership.0': { $exists: true } }, { 'targetProject.actorManager.0': { $exists: true } },
+        ...(roles.siteAdmin ? [ownerlessSharedProject('$targetProject.')] : []),
+      ] } },
+    ];
+  }
+
+  function visibleCardStages(): Document[] {
+    return [
+      { $match: { $expr: canonical } },
       records.lookup('lists', 'targetPlacement', { listId: '$listId', boardId: '$boardId', cardKind: '$kind' }, {
         $expr: { $and: [canonical, equal('id', '$$listId'), equal('boardId', '$$boardId'), {
           $or: [
@@ -168,20 +183,19 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
       records.lookup('boards', 'readableTargetBoard', { boardId: '$boardId' }, {
         $expr: { $and: [canonical, equal('id', '$$boardId')] },
       }, [
-        records.lookup('boardMembers', 'actorMembership', { boardId: '$id' }, actorMember('$$boardId'), [{ $limit: 1 }]),
-        records.lookup('projects', 'targetProject', { projectId: '$projectId' }, {
-          $expr: { $and: [canonical, equal('id', '$$projectId')] },
-        }, [
-          records.lookup('projectManagers', 'actorManager', { projectId: '$id' }, actorManager('$$projectId'), [{ $limit: 1 }]),
-        ]),
-        { $unwind: '$targetProject' },
-        { $match: { $or: [
-          { 'actorMembership.0': { $exists: true } }, { 'targetProject.actorManager.0': { $exists: true } },
-          ...(roles.siteAdmin ? [ownerlessSharedProject('$targetProject.')] : []),
-        ] } },
+        ...visibleBoardStages(),
         { $project: { _id: 1 } },
       ]),
       { $match: { 'readableTargetBoard.0': { $exists: true } } },
+    ];
+  }
+
+  // Match a linked target inside a paginated board query without inspecting private rows in the result.
+  function readableCardLookup(as: string, from: string, summary = false) {
+    return records.lookup('cards', as, { targetId: from }, {
+      $expr: { $and: [canonical, equal('id', '$$targetId')] },
+    }, [
+      ...visibleCardStages(),
       { $project: summary ? { _id: 0, id: 1, name: 1, boardId: 1, kind: 1 } : { _id: 1 } },
     ]);
   }
@@ -314,7 +328,7 @@ export function createWorkspaceAuthorization(database: Db, generationId: string,
     generationId, actor: principal, roles,
     requireProject, requireBoard, requireList, requireCard, requireComment, requireAttachment, requireLabel,
     requireChecklist, requireTask, requireFieldGroup, requireFieldDefinition, requireCardField,
-    projectAccess, boardAccess, membershipRow, managerRow, visibleBoards, visibleProjectStages, effectiveDefinitionGroups, readableCardLookup,
+    projectAccess, boardAccess, membershipRow, managerRow, visibleBoards, visibleProjectStages, visibleBoardStages, visibleCardStages, effectiveDefinitionGroups, readableCardLookup,
   });
 }
 

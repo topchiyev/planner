@@ -36,9 +36,9 @@ const entity = ({ id, revision, createdAt, updatedAt }: EntityProjection) =>
 const ordered = (row: EntityProjection & { rank?: Long | null }) => ({ ...entity(row), rank: rank(row.rank) });
 const person = ({ id, name, username }: WorkspaceRow<'users'>) => ({ id, name, username: username ?? null });
 
-export function createWorkspaceReads(database: Db, access: WorkspaceAuthorization, eventCursors: BoardEventCursors) {
+export function createWorkspaceReads(database: Db, access: WorkspaceAuthorization, eventCursors: BoardEventCursors,
+  records = createWorkspaceRecords(database, access.generationId)) {
   const { generationId, actor } = access;
-  const records = createWorkspaceRecords(database, generationId);
   const canonical = canonicalRow(generationId);
   const checklistReads = createChecklistReads(records, access);
   function cursorScope(operation: string, order: string, query: readonly string[]) {

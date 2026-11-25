@@ -12,9 +12,9 @@ const personProjection = { _id: 0, id: 1, name: 1, username: 1 };
 type Person = Pick<WorkspaceRow<'users'>, 'id' | 'name' | 'username'>;
 const personOf = ({ id, name, username }: Person) => ({ id, name, username: username ?? null });
 
-export function createRelationshipReads(database: Db, scope: WorkspaceAuthorization) {
+export function createRelationshipReads(database: Db, scope: WorkspaceAuthorization,
+  records = createWorkspaceRecords(database, scope.generationId)) {
   const { actor, generationId } = scope;
-  const records = createWorkspaceRecords(database, generationId);
   const canonical = canonicalRow(generationId);
 
   function page(operation: RelationshipRead, input: RelationshipReadInput<RelationshipRead>, binding: string[] = []) {

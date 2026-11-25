@@ -3,6 +3,7 @@ import {
   PROTOCOL_VERSION_META_KEY, type AuthInfo, type JSONRPCRequest, type McpRequestContext, type ServerCapabilities, type ServerEventBus,
 } from '@modelcontextprotocol/server';
 import { PLANNER_VERSION, relationshipCommands } from '@planner/contracts';
+import type { McpReadSnapshot } from './read-tools.js';
 import { oauthMetadata, protectedResourceMetadataPath, readScope, writeScope } from '../oauth/provider.js';
 
 export const mcpPath = '/mcp';
@@ -16,6 +17,7 @@ export interface McpActor {
   clientId: string;
   grantId: string;
   scopes: string[];
+  read?: McpReadSnapshot;
 }
 
 export interface McpSurface {
