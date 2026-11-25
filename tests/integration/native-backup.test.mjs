@@ -337,8 +337,8 @@ test('restores a migrated workspace with its exact read-only gate or first-write
               await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), { code: 'WORKSPACE_READ_ONLY' });
               assert.equal((await enable()).state, 'writable');
               const gate = new CommandGate(lease);
+              const operationId = 'restore.first-write';
               try {
-                const operationId = 'restore.first-write';
                 const journal = new CommandJournal(gate, db, installationId, { operations: {
                   [operationId]: {
                     normalize: () => null, authorize: () => {},
@@ -347,9 +347,13 @@ test('restores a migrated workspace with its exact read-only gate or first-write
                 } });
                 await journal.recover();
                 await journal.execute({ operationId, actorId: ids.admin, idempotencyKey: randomUUID(), input: null });
-                const command = await db.collection('commands').findOne({ generationId, operationId, status: 'committed' });
-                assert.equal((await enable()).fence.commandId, command.id);
               } finally { await gate.closeAndDrain(); }
+              const command = await db.collection('commands').findOne({ generationId, operationId, status: 'committed' });
+              const operator = acquireWriterDirectory(target.writer, owner, owner);
+              try {
+                assert.equal((await enableRestoredMigrationWrites(db, operator, installationId, runId,
+                  restored, binding.mfaKeyDigest)).fence.commandId, command.id);
+              } finally { operator.release(); }
             } finally { await media.close(); lease.release(); }
           });
         } finally { await backup.close(); }

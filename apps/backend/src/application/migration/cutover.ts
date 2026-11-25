@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { migrationDigestSchema } from '@planner/contracts';
 import { generationIdSchema, publicIdSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { isStoredDate, workspaceKey } from '../../storage/identity.js';
@@ -6,7 +7,7 @@ import { readInstallation, requireCurrentSchema, type InstallationDocument } fro
 import { coldMigrationAdminBinding, sameVerifiedMigration } from '../auth/migration-admin-grant.js';
 import { CleanCommandRejection } from '../command-gate/gate.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
-import { CommandRecoveryError } from '../command-journal/operation.js';
+import { accountAccessApprovalOperation, CommandRecoveryError } from '../command-journal/operation.js';
 import { checkCommand, commands, durable, type CommandRecord } from '../command-journal/records.js';
 import type { MigrationActivationReceipt } from './activation.js';
 import { importRunKey, type ImportRun } from './checkpoint.js';
@@ -70,10 +71,14 @@ export async function inspectMigrationCutover(db: Db, installation: Installation
     if (!isStoredDate(receipt.writesEnabledAt) || receipt.writesEnabledAt < receipt.activatedAt) return inconsistent();
     if ('fence' in receipt) {
       if (!receipt.fence) return inconsistent();
-      const { commandId, at } = receipt.fence;
+      const { commandId, at, accountApprovalBatchSha256 } = receipt.fence;
       if (!publicIdSchema.safeParse(commandId).success || !isStoredDate(at) || at < receipt.writesEnabledAt) return inconsistent();
       const command = await fenceCommand(db, verification.generationId, commandId);
-      if (command.createdAt < receipt.writesEnabledAt || command.createdAt > at) return inconsistent();
+      if (command.createdAt < receipt.writesEnabledAt || command.createdAt > at
+        || (command.operationId === accountAccessApprovalOperation
+          ? !migrationDigestSchema.safeParse(accountApprovalBatchSha256).success
+            || (command.status !== 'building' && (command.manifest?.length !== 1 || command.manifest[0].digest !== accountApprovalBatchSha256))
+          : accountApprovalBatchSha256 !== undefined)) return inconsistent();
     }
   } else if ('fence' in receipt || 'writesEnabledAt' in receipt) return inconsistent();
   return receipt;
@@ -102,7 +107,8 @@ export async function assertMigrationCommandAdmission(db: Db, installationId: st
 }
 
 /** The entire plan and recovery batches have been checked, while the journal is still building. */
-export async function establishMigrationFence(db: Db, installationId: string, command: CommandRecord) {
+export async function establishMigrationFence(db: Db, installationId: string, command: CommandRecord,
+  accountApprovalBatchSha256?: string) {
   const receipt = await assertWorkspaceWritable(db, installationId, command.generationId);
   if (!receipt) return false;
   if (receipt.fence) {
@@ -112,7 +118,7 @@ export async function establishMigrationFence(db: Db, installationId: string, co
     return false;
   }
   if (command.status !== 'building' || command.createdAt < receipt.writesEnabledAt) return inconsistent();
-  const fence = { commandId: command.id, at: new Date() };
+  const fence = { commandId: command.id, at: new Date(), ...(accountApprovalBatchSha256 !== undefined && { accountApprovalBatchSha256 }) };
   if (fence.at < command.createdAt) return inconsistent();
   const published = await db.collection<InstallationDocument>('installation').updateOne({ _id: 'installation', installationId,
     activeGenerationId: command.generationId, migrationActivation: receipt }, { $set: { 'migrationActivation.fence': fence } }, durable);
@@ -122,11 +128,12 @@ export async function establishMigrationFence(db: Db, installationId: string, co
 
 export async function assertMigrationJournalSafe(db: Db, installation: InstallationDocument, generationId: string, command?: CommandRecord) {
   const receipt = await inspectMigrationCutover(db, installation);
-  if (!receipt || receipt.state === 'rolledBack' || receipt.binding.verification.generationId !== generationId) return;
+  if (!receipt || receipt.state === 'rolledBack' || receipt.binding.verification.generationId !== generationId) return receipt;
   const protectedCommand = command ?? await commands(db).findOne({ generationId, status: { $in: ['prepared', 'committed'] } });
-  if (!protectedCommand) return;
+  if (!protectedCommand) return receipt;
   if (receipt.state !== 'writable' || !receipt.fence || protectedCommand.createdAt < receipt.writesEnabledAt) return inconsistent();
   if (receipt.fence.commandId !== protectedCommand.id && (await fenceCommand(db, generationId, receipt.fence.commandId)).status === 'building') return inconsistent();
+  return receipt;
 }
 
 export async function enableMigrationWrites(db: Db, lease: WriterLease, installationId: string, runId: string) {

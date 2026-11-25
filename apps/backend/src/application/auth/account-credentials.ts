@@ -9,7 +9,7 @@ import { applyCommandEffect } from '../../storage/command-effects.js';
 import { isStoredDate, newPublicId, workspaceKey } from '../../storage/identity.js';
 import type { CommandGate } from '../command-gate/gate.js';
 import { CommandJournal } from '../command-journal/journal.js';
-import { canonicalJournalData, commandUuid, CommandRecoveryError, journalDigest } from '../command-journal/operation.js';
+import { accountAccessApprovalOperation, canonicalJournalData, commandUuid, CommandRecoveryError, journalDigest } from '../command-journal/operation.js';
 import { assertChanged, checkCommand, commands, durable } from '../command-journal/records.js';
 import { assertWorkspaceWritable } from '../migration/cutover.js';
 import { accountById, accountEpoch, accountLookup, AccountActionError, nextAccountRevision, protectLastAdmin, requireSiteAdmin, usableAdmin } from './account-policy.js';
@@ -21,7 +21,6 @@ import { getFactor } from './mfa-account.js';
 import { activeAccountGeneration, loadCurrentBrowserSession } from './sessions.js';
 
 const approvalLifetimeMs = 10 * 60_000;
-const accessApprovalOperation = 'account.access-approval';
 
 interface Approval extends ProtectedGrant {
   kind: 'account-approval';
@@ -129,9 +128,9 @@ function accessApprovalExpectation(approval: Approval) {
 async function assertAccountAccessApproval(db: Db, installationId: string, approval: Approval) {
   const { generationId, actorId, id } = approval;
   if (!await assertWorkspaceWritable(db, installationId, generationId)) return;
-  const commandId = commandUuid(generationId, ['command', actorId, accessApprovalOperation, id]);
+  const commandId = commandUuid(generationId, ['command', actorId, accountAccessApprovalOperation, id]);
   const command = await commands(db).findOne({ _id: workspaceKey(generationId, commandId), generationId,
-    id: commandId, actorId, operationId: accessApprovalOperation, idempotencyKey: id, status: 'committed',
+    id: commandId, actorId, operationId: accountAccessApprovalOperation, idempotencyKey: id, status: 'committed',
   }, { promoteLongs: false });
   if (!command || command.requestHash !== journalDigest(canonicalJournalData(accessApprovalExpectation(approval)))) {
     throw new CommandRecoveryError('The account access change has no committed workspace approval.');
@@ -314,15 +313,15 @@ export function createAccountCredentials(
         };
         // Reserve the exact access change before the protected transition writes any credential material.
         const journal = new CommandJournal(gate, database, installationId, { operations: {
-          [accessApprovalOperation]: {
+          [accountAccessApprovalOperation]: {
             normalize: () => expectation,
             authorize,
             plan: () => ({ effects: [], result: null, audit: {
-              resourceType: 'account', resourceId: expected.userId, action: accessApprovalOperation, origin: 'operator',
+              resourceType: 'account', resourceId: expected.userId, action: accountAccessApprovalOperation, origin: 'operator',
             } }),
           },
         } });
-        await journal.execute({ operationId: accessApprovalOperation, actorId: expected.actorId, idempotencyKey: id, input: null });
+        await journal.execute({ operationId: accountAccessApprovalOperation, actorId: expected.actorId, idempotencyKey: id, input: null });
       }
       return gate.runCommand(async () => {
         const { approval, target, time } = await pendingApproval(id);

@@ -8,13 +8,13 @@ import { openActiveWorkspace, openTrustedStagedWorkspace, workspaceInsertFields 
 import { CleanCommandRejection, GateUnavailableError, type CommandGate } from '../command-gate/gate.js';
 import { assertMigrationCommandAdmission, assertMigrationJournalSafe, establishMigrationFence } from '../migration/cutover.js';
 import {
-  canonicalJournalData, CommandConflict, CommandInputError, CommandRecoveryError, commandOperations, commandUuid,
+  accountAccessApprovalOperation, canonicalJournalData, CommandConflict, CommandInputError, CommandRecoveryError, commandOperations, commandUuid,
   isCommandName, journalDigest, type CommandContext, type CommandPlan, type JournalOperation, type JournalValue,
   type PlannedEffect,
 } from './operation.js';
 import {
   assertChanged, batches, checkCommand, checkOutboxCursor, commands, durable, maximumReplayScopeBytes, packBatches, readBatches, readJournalReplayScope, readJournalResult,
-  validateEffect, type CommandRecord,
+  validateEffect, type BatchSummary, type CommandRecord,
 } from './records.js';
 
 type Checkpoint = 'beforeIntent' | 'building' | 'batchStored' | 'prepared' | 'deleteReserved' | 'effectApplied'
@@ -169,8 +169,8 @@ export class CommandJournal {
       const installation = await verifyStorageSchema(this.database, this.installationId);
       const generationId = scopeGeneration(installation, 'active') ?? scopeGeneration(installation, 'enrollment');
       if (generationId) {
-        await assertMigrationJournalSafe(this.database, installation, generationId);
-        await this.#recoverScope(generationId);
+        const cutover = await assertMigrationJournalSafe(this.database, installation, generationId);
+        await this.#recoverScope(generationId, cutover);
       }
       // Protected claims may have their own replay mechanism. This hook runs before admission.
       await recoverPrivate?.();
@@ -178,14 +178,24 @@ export class CommandJournal {
     this.#wake();
   }
 
-  async #recoverScope(generationId: string) {
+  async #recoverScope(generationId: string, cutover: Awaited<ReturnType<typeof assertMigrationJournalSafe>>) {
+    const fence = cutover?.state === 'writable' ? cutover.fence : undefined;
     const collection = commands(this.database);
     const pending = collection.find({ generationId, status: { $ne: 'committed' } }, { promoteLongs: false })
       .sort({ recoverySequence: 1, id: 1 });
     for await (const command of pending) {
       checkCommand(command);
-      if (command.status === 'building') continue; // Only an authorized retry can rebuild.
-      await this.#finish(command);
+      if (command.status === 'building') {
+        // Only the audit-only admission sealed with the fence can finish without reauthorizing.
+        if (fence?.commandId !== command.id || fence.accountApprovalBatchSha256 === undefined) continue;
+        const fields = await this.#preparedFields(command.generationId, [{ digest: fence.accountApprovalBatchSha256, count: 1 }], 'null', 0);
+        const prepared = { ...command, ...fields };
+        await this.#validateReplay(prepared);
+        await this.#publishPrepared(command, fields);
+        await this.#finish(prepared);
+      } else {
+        await this.#finish(command);
+      }
     }
     const outbox = collection.find({ generationId, status: 'committed' }, {
       projection: { _id: 1, id: 1, delivered: 1, lastDeliveredEventId: 1, eventCount: 1, outboxPending: 1 },
@@ -260,19 +270,7 @@ export class CommandJournal {
     }
     const { records, manifest } = packBatches(command, effects);
     const eventCount = plan.events?.length ?? 0;
-    const latest = await Promise.all((['prepared', 'committed'] as const).map((status) =>
-      commands(this.database).findOne({ generationId: command.generationId, status },
-        { sort: { recoverySequence: -1 }, promoteLongs: false })));
-    const last = latest.reduce((maximum, record) => {
-      if (!record) return maximum;
-      checkCommand(record);
-      const sequence = decodeRank(record.recoverySequence!);
-      return sequence > maximum ? sequence : maximum;
-    }, 0n);
-    const recoverySequence = encodeRank(last + 1n);
-    const preparedFields = { status: 'prepared', recoverySequence, applied: 0, lastAppliedEffectId: null, manifest, result, resultHash: journalDigest(result),
-      ...(replayScope !== undefined && { replayScope, replayScopeHash: journalDigest(replayScope) }),
-      eventCount, delivered: 0, lastDeliveredEventId: null, outboxPending: eventCount > 0 } as const;
+    const preparedFields = await this.#preparedFields(command.generationId, manifest, result, eventCount, replayScope);
     const prepared = { ...command, ...preparedFields };
     const collection = batches(this.database);
     await collection.deleteMany({ generationId: command.generationId, commandId: command.id }, durable);
@@ -281,13 +279,39 @@ export class CommandJournal {
       await this.options.checkpoint?.('batchStored', batch.batch);
     }
     await this.#validateReplay(prepared);
-    if (this.options.scope !== 'enrollment' && await establishMigrationFence(this.database, this.installationId, command)) {
+    const accountApproval = command.operationId === accountAccessApprovalOperation;
+    if (accountApproval && (this.options.scope === 'enrollment' || manifest.length !== 1 || manifest[0].count !== 1
+      || result !== 'null' || replayScope !== undefined || plan.audit.resourceType !== 'account'
+      || plan.audit.action !== accountAccessApprovalOperation || plan.audit.origin !== 'operator')) {
+      throw new CommandRecoveryError('The account access approval must contain only its protected admission audit.');
+    }
+    const approvalBatch = accountApproval ? manifest[0].digest : undefined;
+    if (this.options.scope !== 'enrollment' && await establishMigrationFence(this.database, this.installationId, command, approvalBatch)) {
       await this.options.checkpoint?.('firstWriteFenced');
     }
-    const written = await commands(this.database).updateOne({ _id: command._id, status: 'building' },
-      { $set: preparedFields }, durable);
-    assertChanged(written.matchedCount);
+    await this.#publishPrepared(command, preparedFields);
     return prepared;
+  }
+
+  async #preparedFields(generationId: string, manifest: BatchSummary[], result: string, eventCount: number, replayScope?: string) {
+    const latest = await Promise.all((['prepared', 'committed'] as const).map((status) =>
+      commands(this.database).findOne({ generationId, status },
+        { sort: { recoverySequence: -1 }, promoteLongs: false })));
+    const last = latest.reduce((maximum, record) => {
+      if (!record) return maximum;
+      checkCommand(record);
+      const sequence = decodeRank(record.recoverySequence!);
+      return sequence > maximum ? sequence : maximum;
+    }, 0n);
+    const recoverySequence = encodeRank(last + 1n);
+    return { status: 'prepared', recoverySequence, applied: 0, lastAppliedEffectId: null, manifest, result, resultHash: journalDigest(result),
+      ...(replayScope !== undefined && { replayScope, replayScopeHash: journalDigest(replayScope) }),
+      eventCount, delivered: 0, lastDeliveredEventId: null, outboxPending: eventCount > 0 } as const;
+  }
+
+  async #publishPrepared(command: CommandRecord, fields: Partial<CommandRecord>) {
+    const written = await commands(this.database).updateOne({ _id: command._id, status: 'building' }, { $set: fields }, durable);
+    assertChanged(written.matchedCount);
   }
 
   async #validateReplay(command: CommandRecord) {

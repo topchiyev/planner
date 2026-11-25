@@ -42,6 +42,8 @@ export interface JournalOperation {
   plan(context: CommandPlanningContext, request: JournalValue): CommandPlan | Promise<CommandPlan>;
 }
 
+export const accountAccessApprovalOperation = 'account.access-approval';
+
 export class CommandConflict extends CleanCommandRejection {
   readonly code = 'IDEMPOTENCY_CONFLICT';
   readonly statusCode = 409;

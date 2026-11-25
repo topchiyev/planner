@@ -5,7 +5,9 @@ import test from 'node:test';
 import { AccountActionError } from '../../apps/backend/dist/application/auth/account-policy.js';
 import { tokenDigest } from '../../apps/backend/dist/application/auth/credentials.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
-import { enableMigrationWrites } from '../../apps/backend/dist/application/migration/cutover.js';
+import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
+import { accountAccessApprovalOperation } from '../../apps/backend/dist/application/command-journal/operation.js';
+import { enableMigrationWrites, rollbackMigration } from '../../apps/backend/dist/application/migration/cutover.js';
 import { GateUnavailableError } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { openActiveWorkspace } from '../../apps/backend/dist/storage/scoped.js';
 import { accountFixture, callSocket, changedPassword, password, proxyHeaders } from '../support/account-fixture.mjs';
@@ -379,5 +381,66 @@ test('a read-only import refuses account-access changes and the first approval f
       assert.ok((await db.collection('users').findOne({ _id: availabilityTarget._id })).disabledAt instanceof Date);
       assert.equal(await db.collection('commands').countDocuments({ generationId, operationId: 'account.access-approval', status: 'committed' }), 2);
     } finally { await operator.close(); await browser.close(); await f.close(); }
+  });
+});
+
+test('recovery settles a fenced account admission after expiration without applying the account change', { timeout: 75_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    const { db, generationId, installationId } = f;
+    const owner = { uid: process.getuid(), gid: process.getgid() };
+    const writer = () => acquireWriterDirectory(join(f.directory, 'writer'), owner, owner);
+    try {
+      const admin = await f.seed('admin@example.test', { role: 'admin' });
+      const target = await f.seed('member@example.test');
+      const runId = await publishSyntheticMigration(db, { generationId, installationId, actorId: admin.id });
+      await f.close();
+      let lease = writer();
+      try { await enableMigrationWrites(db, lease, installationId, runId); } finally { lease.release(); }
+      await f.reboot();
+
+      const session = await f.sessions().login({ identifier: admin.email, password });
+      const change = { action: 'role', role: 'projectOwner' };
+      const approval = await f.accountServices().requestApproval(session.token, admin.id, target.id, 1, change);
+      const journal = new CommandJournal(f.gate(), db, installationId, {
+        operations: { [accountAccessApprovalOperation]: {
+          normalize: () => ({ actorEpoch: 1, targetEpoch: 1, targetRevision: 1, userId: target.id, change }),
+          authorize: () => {},
+          plan: () => ({ effects: [], result: null, audit: {
+            resourceType: 'account', resourceId: target.id, action: accountAccessApprovalOperation, origin: 'operator',
+          } }),
+        } },
+        checkpoint(point) { if (point === 'firstWriteFenced') throw new Error('test interruption at sealed approval fence'); },
+      });
+      await assert.rejects(journal.execute({ operationId: accountAccessApprovalOperation, actorId: admin.id, idempotencyKey: approval.id, input: null }),
+        /interruption at sealed approval fence/u);
+      const command = await db.collection('commands').findOne({ generationId, idempotencyKey: approval.id });
+      assert.equal(command.status, 'building');
+      assert.equal(await db.collection('auditEntries').countDocuments({ generationId }), 0);
+      assert.equal(f.gate().ready, false);
+      f.advanceBy(11 * 60_000);
+      const batches = db.collection('commandEffectBatches');
+      const batch = await batches.findOne({ generationId, commandId: command.id });
+      await batches.updateOne({ _id: batch._id }, { $set: { payload: '[]' } });
+      await assert.rejects(f.reboot(), /batch/u);
+      assert.equal(f.gate().ready, false);
+      await batches.updateOne({ _id: batch._id }, { $set: { payload: batch.payload } });
+
+      await f.reboot();
+      assert.equal((await db.collection('commands').findOne({ _id: command._id })).status, 'committed');
+      assert.equal(await db.collection('auditEntries').countDocuments({ generationId, commandId: command.id }), 1);
+      await assert.rejects(f.accountServices().confirmApproval(approval.id), accountError('approval'));
+      assert.equal((await db.collection('users').findOne({ _id: target._id })).role, 'boardUser');
+      assert.equal(await db.collection('auditEntries').countDocuments({ generationId, action: 'account.role' }), 0);
+      const ordinary = await f.accountServices().updatePreferences(session.token, admin.id, randomUUID(),
+        { revision: 1, preferences: { editorMode: 'markup', autoLogout: '5m' } });
+      assert.equal(ordinary.revision, 2);
+      await f.close();
+      lease = writer();
+      try {
+        await assert.rejects(rollbackMigration(db, lease, installationId, generationId), { fault: 'rollback-fenced' });
+        assert.equal((await db.collection('installation').findOne()).migrationActivation.fence.commandId, command.id);
+      } finally { lease.release(); }
+    } finally { await f.close(); }
   });
 });

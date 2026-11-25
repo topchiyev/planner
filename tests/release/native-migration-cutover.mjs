@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, fork, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { request } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -179,6 +179,12 @@ async function qualify() {
   assert.equal((await change()).status, 409);
   const backup = JSON.parse(execFileSync('/usr/bin/plannerctl', ['backup', 'create', '--json'], { encoding: 'utf8' }));
   assert.match(backup.manifestSha256, /^[0-9a-f]{64}$/u);
+  if (mode === 'writable') {
+    const exported = '/root/planner-cutover-restore';
+    await mkdir(exported, { mode: 0o700 });
+    execFileSync('/usr/bin/cp', ['-a', '--no-preserve=ownership', backup.directory, exported + '/snapshot']);
+    await writeFile(exported + '/manifest.sha256', backup.manifestSha256 + '\n', { mode: 0o600 });
+  }
   const writable = operator('enable-writes', '--run', runId);
   assert.equal(writable.state, 'writable');
   assert.deepEqual(operator('enable-writes', '--run', runId), writable);

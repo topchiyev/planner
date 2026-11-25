@@ -31,7 +31,7 @@ export type MigrationActivationBinding = { verification: ActivationExpectation; 
   administrator: Administrator; mfaKeyDigest: string; stageCompletion: string; schemaVersion: number };
 type PublishedActivation = { binding: MigrationActivationBinding; activatedAt: Date };
 export type MigrationActivationReceipt = PublishedActivation & ({ state: 'activeReadOnly' }
-  | { state: 'writable'; writesEnabledAt: Date; fence?: { commandId: string; at: Date } }
+  | { state: 'writable'; writesEnabledAt: Date; fence?: { commandId: string; at: Date; accountApprovalBatchSha256?: string } }
   | { state: 'rolledBack'; priorState: 'activeReadOnly' | 'writable'; writesEnabledAt?: Date; rolledBackAt: Date });
 export type MigrationActivationRequest = { verification: ActivationExpectation; prior: PriorRoute; priorBackup?: PriorBackup;
   administrator: Administrator; mfaKeyDigest: string; approval?: unknown };

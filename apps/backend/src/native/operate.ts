@@ -760,7 +760,7 @@ async function changeMigrationRoute(request: CutoverRequest) {
     }
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
-      const directory = await openNativeMigrationDirectory();
+      const directory = await openNativeMigrationDirectory(restore !== undefined);
       const application = migrationApplication(config, directory);
       try {
         await application.stop();

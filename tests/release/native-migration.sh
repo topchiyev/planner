@@ -454,5 +454,27 @@ if [ "$administrator_recovery" = --cutover ]; then
     second_run=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runId"])' "$work/accepted-231.json")
     plannerctl migration verify --run "$second_run" --format json > "$work/verified-local-cutover.json"
     bash "$media/native-migration-admin.sh" "$media" "$second_run" writable
+
+    export_root=/root/planner-cutover-restore
+    restore_sha=$(cat "$export_root/manifest.sha256")
+    plannerctl stop >"$work/stopped-before-replacement"
+    mkdir "$work/pre-restore"
+    mv /etc/planner "$work/pre-restore/config"
+    mv /var/lib/planner "$work/pre-restore/state"
+    dpkg -i "$package"
+    [ ! -e /var/lib/planner/migration ]
+    plannerctl backup restore --archive "$export_root/snapshot" --expect-manifest "$restore_sha" \
+        --public-url https://planner.example.test --app-port 27530 --db-port 27531 --json >"$work/restore-staged.json"
+    plannerctl backup activate --expect-manifest "$restore_sha" --yes --json >"$work/restore-active.json"
+    [ ! -e /var/lib/planner/migration ]
+    plannerctl migration enable-writes --run "$second_run" --format json >"$work/restore-writable.json"
+    [ "$(stat -c '%U:%G:%a' /var/lib/planner/migration)" = root:root:700 ]
+    [ ! -e /var/lib/planner/migration/application-resume.json ]
+    plannerctl migration enable-writes --run "$second_run" --format json >"$work/restore-writable-retry.json"
+    cmp "$work/restore-writable.json" "$work/restore-writable-retry.json"
+    python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"]=="writable" and not v["firstWriteFenced"]' "$work/restore-writable.json"
+    previous_generation=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["generationId"])' "$work/restore-active.json")
+    refuses target-setup plannerctl migration rollback --expect-generation "$previous_generation" --format json
+    printf 'NATIVE MIGRATION CLEAN BACKUP RESTORE ENABLE-WRITES PASSED\n'
     printf 'NATIVE MIGRATION CUTOVER ACCEPTANCE PASSED\n'
 fi
