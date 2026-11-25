@@ -15,6 +15,7 @@ import {
 import {
   assertChanged, batches, checkCommand, checkOutboxCursor, commands, durable, maximumReplayScopeBytes, packBatches, readBatches, readJournalReplayScope, readJournalResult,
   validateEffect, type BatchSummary, type CommandRecord,
+  isMcpCommandAttribution, type McpCommandAttribution,
 } from './records.js';
 
 type Checkpoint = 'beforeIntent' | 'building' | 'batchStored' | 'prepared' | 'deleteReserved' | 'effectApplied'
@@ -40,6 +41,7 @@ export interface OutboxSignal {
 export type AfterCommandCommit = (database: Db, generationId: string, boardIds: ReadonlySet<string>) => void | Promise<void>;
 
 interface JournalOptions {
+  attribution?: McpCommandAttribution;
   operations?: Readonly<Record<string, JournalOperation>>;
   // Only process composition can bind the verified enrollment generation. Input never supplies a generation.
   scope?: 'active' | 'enrollment';
@@ -103,7 +105,9 @@ export class CommandJournal {
     readonly installationId: string,
     private readonly options: JournalOptions = {},
   ) {
-    this.options = Object.freeze({ ...options });
+    if (options.attribution && !isMcpCommandAttribution(options.attribution)) throw new TypeError('Invalid MCP audit attribution.');
+    this.options = Object.freeze({ ...options,
+      ...(options.attribution && { attribution: Object.freeze({ ...options.attribution }) }) });
     this.#operations = commandOperations(options.operations ?? {});
   }
 
@@ -114,16 +118,19 @@ export class CommandJournal {
       if (!publicIdSchema.safeParse(actorId).success || !publicIdSchema.safeParse(idempotencyKey).success) {
         throw new CommandInputError('Invalid command actor or idempotency key.');
       }
+      const boundWorkspace = operation.bindInput ? await this.#workspace() : undefined;
+      const input = boundWorkspace ? await withReadContext(boundWorkspace, actorId,
+        (context) => operation.bindInput!(context, request.input)) : request.input;
       let normalized: JournalValue;
       let hash: string;
       try {
-        const semantic = canonicalJournalData(operation.normalize(request.input));
+        const semantic = canonicalJournalData(operation.normalize(input));
         normalized = JSON.parse(semantic);
         hash = journalDigest(semantic);
       } catch {
         throw new CommandInputError('Invalid command input.');
       }
-      const workspace = await this.#workspace();
+      const workspace = boundWorkspace ?? await this.#workspace();
       const generationId = workspace.generationId;
       await withReadContext(workspace, actorId, (context) => operation.authorize(context, normalized));
       const id = commandUuid(generationId, ['command', actorId, operationId, idempotencyKey]);
@@ -146,7 +153,7 @@ export class CommandJournal {
         if (command.status === 'prepared') return this.#finish(command);
       } else {
         command = { ...identity, _id: workspaceKey(generationId, id), id, status: 'building',
-          requestHash: hash, createdAt: new Date() };
+          requestHash: hash, createdAt: new Date(), ...(this.options.attribution && { attribution: this.options.attribution }) };
         await this.options.checkpoint?.('beforeIntent');
         await collection.insertOne(command, durable);
         await this.options.checkpoint?.('building');
@@ -247,7 +254,7 @@ export class CommandJournal {
     effects.push({ kind: 'insert', collection: 'auditEntries', id: commandUuid(command.id, ['audit']), fields: {
       actorId: command.actorId, commandId: command.id, resourceType: plan.audit.resourceType,
       resourceId: plan.audit.resourceId, action: plan.audit.action, createdAt: command.createdAt.toISOString(),
-      ...(plan.audit.origin && { origin: plan.audit.origin }),
+      ...(command.attribution ?? (plan.audit.origin && { origin: plan.audit.origin })),
       ...(plan.audit.detail === undefined ? {} : { detail: plan.audit.detail }),
     } });
     const sequences = new Map<string, bigint>();
@@ -326,6 +333,8 @@ export class CommandJournal {
           if (audit || effect.kind !== 'insert' || effect.id !== commandUuid(command.id, ['audit'])
               || effect.fields.commandId !== command.id || effect.fields.actorId !== command.actorId
               || effect.fields.createdAt !== command.createdAt.toISOString()
+              || (command.attribution !== undefined && (effect.fields.origin !== command.attribution.origin
+                || effect.fields.clientId !== command.attribution.clientId))
               || !isCommandName(effect.fields.resourceType) || !isCommandName(effect.fields.action)
               || !publicIdSchema.safeParse(effect.fields.resourceId).success) {
             throw new CommandRecoveryError('A command audit effect has an invalid identity.');

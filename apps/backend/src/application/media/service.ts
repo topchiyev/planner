@@ -9,7 +9,8 @@ import { publicIdSchema, revisionSchema } from '@planner/contracts/storage';
 import { newPublicId } from '../../storage/identity.js';
 import { MediaSizeError, MediaStorageError, type BlobIdentity, type MediaPart, type PrivateMediaStore } from '../../storage/blobs/private-store.js';
 import type { CommandGate } from '../command-gate/gate.js';
-import { CommandJournal } from '../command-journal/journal.js';
+import { CommandJournal, type AfterCommandCommit } from '../command-journal/journal.js';
+import type { McpCommandAttribution } from '../command-journal/records.js';
 import type { JournalFields, JournalOperation, JournalValue, PlannedEffect } from '../command-journal/operation.js';
 import { assertWorkspaceWritable } from '../migration/cutover.js';
 import {
@@ -68,7 +69,8 @@ function referenceDto(row: {
 
 export function createMediaService(
   database: Db, installationId: string, gate: CommandGate, store: PrivateMediaStore, decode: MediaDecoder,
-  options: { now?: () => Date; checkpoint?: (point: string, index?: number) => void | Promise<void>; reserve?: () => () => void } = {},
+  options: { now?: () => Date; checkpoint?: (point: string, index?: number) => void | Promise<void>; reserve?: () => () => void;
+    afterCommit?: AfterCommandCommit } = {},
 ) {
   const now = options.now ?? (() => new Date());
   const reserve = options.reserve ?? reserveSlots(4);
@@ -108,18 +110,21 @@ export function createMediaService(
     }
   }
 
+  function describeAdmission(scope: WorkspaceAuthorization, intent: MediaIntent, parent: Parent): Admission {
+    return Object.freeze({ intent, generationId: scope.generationId, actorId: scope.actor.id, parentId: parentId(parent),
+      ...(parent.type === 'card' && { boardId: parent.value.board.board.id }) });
+  }
+
   async function preflight(token: string, intent: MediaIntent) {
-    return gate.readSnapshot(async (): Promise<Admission> => {
+    return gate.readSnapshot(async () => {
       const scope = await scopeFor(token);
       const parent = await writable(scope, intent);
       await assertWorkspaceWritable(database, installationId, scope.generationId);
-      return Object.freeze({ intent, generationId: scope.generationId, actorId: scope.actor.id, parentId: parentId(parent),
-        ...(parent.type === 'card' && { boardId: parent.value.board.board.id }) });
+      return describeAdmission(scope, intent, parent);
     });
   }
 
-  async function currentAdmission(token: string, admission: Admission, generationId: string) {
-    const scope = await scopeFor(token);
+  async function currentAdmission(scope: WorkspaceAuthorization, admission: Admission, generationId: string) {
     if (scope.generationId !== generationId || generationId !== admission.generationId || scope.actor.id !== admission.actorId) {
       throw new WorkspaceAccessError('session');
     }
@@ -158,26 +163,38 @@ export function createMediaService(
     } }];
   }
 
-  async function applyMutation(token: string, admission: Admission, payload: { name?: string; url?: string; media?: PreparedMedia }): Promise<MediaMutation> {
-    const { intent } = admission;
+  async function applyMutation(
+    resolve: (context: { actorId: string; generationId: string }) => Promise<WorkspaceAuthorization>, actorId: string, intent: MediaIntent,
+    payload: { name?: string; url?: string; media?: PreparedMedia },
+    previousAdmission?: Admission, attribution?: McpCommandAttribution,
+  ): Promise<MediaMutation> {
     const { media } = payload;
     const operationId = mediaOperations[intent.operation].id;
+    let admission = previousAdmission;
     const operation: JournalOperation = {
+      ...(!previousAdmission && {
+        async bindInput({ generationId }: { generationId: string }) {
+          const scope = await resolve({ actorId, generationId });
+          if (scope.generationId !== generationId || scope.actor.id !== actorId) throw new WorkspaceAccessError('session');
+          admission = describeAdmission(scope, intent, await writable(scope, intent));
+          return null;
+        },
+      }),
       normalize: () => ({
-        parentId: admission.parentId, ...(admission.boardId && { boardId: admission.boardId }),
+        parentId: admission!.parentId, ...(admission!.boardId && { boardId: admission!.boardId }),
         id: intent.id ?? null, backgroundId: intent.backgroundId ?? null, expectedRevision: intent.expectedRevision,
         name: media?.name ?? payload.name ?? null, url: payload.url ?? null, digest: media?.digest ?? null,
         byteLength: media?.byteLength ?? null,
       }),
       async authorize({ generationId }) {
-        await currentAdmission(token, admission, generationId);
+        await currentAdmission(await resolve({ actorId, generationId }), admission!, generationId);
         if (media) {
           const records = mediaRecords(database, generationId);
           if (!await records.catalog(media.digest) && await records.occupiedCatalog(media.digest)) throw new MediaRejection('catalog');
         }
       },
       async plan({ generationId, timestamp }) {
-        const parent = await currentAdmission(token, admission, generationId);
+        const parent = await currentAdmission(await resolve({ actorId, generationId }), admission!, generationId);
         const id = parentId(parent);
         const effects: PlannedEffect[] = [];
         let reference: MediaMutation['data']['reference'] = null;
@@ -268,10 +285,10 @@ export function createMediaService(
       },
     };
     const journal = new CommandJournal(gate, database, installationId, {
-      operations: { [operationId]: operation }, checkpoint: options.checkpoint,
+      operations: { [operationId]: operation }, checkpoint: options.checkpoint, attribution, afterCommit: options.afterCommit,
     });
     return mediaMutationSchema.parse(await journal.execute({
-      actorId: admission.actorId, operationId, idempotencyKey: intent.key, input: null,
+      actorId, operationId, idempotencyKey: intent.key, input: null,
     }));
   }
 
@@ -290,8 +307,8 @@ export function createMediaService(
         signal.throwIfAborted();
         unpin = await stage.publish(parts);
         signal.throwIfAborted();
-        return await applyMutation(token, admission, { media: { ...blob.identity, name: blob.name,
-          mimeType: format ? imageTypes[format] : originalType, variants } });
+        return await applyMutation(() => scopeFor(token), admission.actorId, admission.intent, { media: { ...blob.identity, name: blob.name,
+          mimeType: format ? imageTypes[format] : originalType, variants } }, admission);
       } catch (error) {
         if (error instanceof MediaSizeError) throw new MediaRejection('limit');
         throw error;
@@ -352,7 +369,11 @@ export function createMediaService(
   }
 
   return { preflight, upload, openForRead,
-    mutate: (token: string, admission: Admission, payload: { name?: string; url?: string }) => applyMutation(token, admission, payload),
+    mutate: (token: string, admission: Admission, payload: { name?: string; url?: string }) =>
+      applyMutation(() => scopeFor(token), admission.actorId, admission.intent, payload, admission),
+    mutateMetadata: (resolve: (context: { actorId: string; generationId: string }) => Promise<WorkspaceAuthorization>, actorId: string,
+      intent: MediaIntent & { operation: 'addLink' | 'renameAttachment' | 'removeAttachment' | 'removeBackground' },
+      payload: { name?: string; url?: string }, attribution: McpCommandAttribution) => applyMutation(resolve, actorId, intent, payload, undefined, attribution),
   };
 }
 

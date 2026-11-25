@@ -1,7 +1,7 @@
 import { WorkspaceReadOnly } from '../application/migration/cutover.js';
 import {
-  boardDeleteReceipt, fieldDefinitionDeleteReceipt, fieldGroupDeleteReceipt, fieldCommands, checklistDeleteReceipt, removedComment, taskDeleteReceipt, labelDeleteReceipt, listDeleteReceipt, relationshipCommands, relationshipParentRevisionHeader, relationshipReads, removedRelationship, type RelationshipCommand, type RelationshipCommandInput, type RelationshipCommandOutput,
-  type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
+  relationshipCommands, relationshipParentRevisionHeader, relationshipReads, type RelationshipCommand, type RelationshipCommandInput,
+  type RelationshipCommandOutput, type RelationshipRead, type RelationshipReadInput, type RelationshipReadOutput,
 } from '@planner/contracts';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
 import { publicIdSchema, revisionSchema } from '@planner/contracts/storage';
@@ -15,6 +15,7 @@ import { InvalidPageCursor } from '../application/pagination/cursor.js';
 import { resolveBrowserWorkspace, WorkspaceAccessError } from '../application/workspace/authorization.js';
 import { createRelationshipJournalOperations } from '../application/workspace/relationship-commands.js';
 import { CardPlacementConflict, RelationshipError } from '../application/workspace/relationship-policy.js';
+import { relationshipDeletionSummary } from '../application/workspace/relationship-receipts.js';
 import { createRelationshipReads } from '../application/workspace/relationship-reads.js';
 import { databaseName } from './mongo-identity.js';
 import { connectConfiguredNativeMongo } from './mongo-readiness.js';
@@ -155,31 +156,10 @@ export function registerRelationshipRoutes(app: FastifyInstance, relationships: 
             const result = await relationships.execute(token, actor.id, operation.id, key.data,
               input.data as RelationshipCommandInput<RelationshipCommand>);
             if (operation.status === 204) {
-              if (operation.id === 'boards.delete') {
-                reply.header(relationshipParentRevisionHeader, boardDeleteReceipt.parse(result).data.parentRevision);
-              } else if (operation.id === 'lists.delete') {
-                reply.header(relationshipParentRevisionHeader, listDeleteReceipt.parse(result).data.parentRevision);
-              } else if (operation.id === 'labels.delete') {
-                reply.header(relationshipParentRevisionHeader, labelDeleteReceipt.parse(result).data.parentRevision);
-              } else if (operation.id === 'checklists.delete') {
-                reply.header(relationshipParentRevisionHeader, checklistDeleteReceipt.parse(result).data.parentRevision);
-              } else if (operation.id === 'fields.deleteGroup') {
-                const { data } = fieldGroupDeleteReceipt.parse(result);
-                reply.header(relationshipParentRevisionHeader, data.parentRevision);
-                reply.header('X-Planner-Removed-Groups', data.removedGroups);
-                reply.header('X-Planner-Removed-Values', data.removedValues);
-              } else if (operation.id === 'fields.delete') {
-                reply.header(relationshipParentRevisionHeader, fieldDefinitionDeleteReceipt.parse(result).data.parentRevision);
-              } else if (operation.id === 'fields.clearValue') {
-                reply.header(relationshipParentRevisionHeader, fieldCommands[operation.id].output.parse(result).data.revision);
-              } else if (operation.id === 'comments.delete') {
-                reply.header(relationshipParentRevisionHeader, removedComment.parse(result).data.cardRevision);
-              } else if (operation.id === 'tasks.delete') {
-                reply.header(relationshipParentRevisionHeader, taskDeleteReceipt.parse(result).data.checklist.revision);
-              } else if (operation.target === 'edge') {
-                const { parentRevision } = removedRelationship.parse(result).data;
-                if (parentRevision !== null) reply.header(relationshipParentRevisionHeader, parentRevision);
-              }
+              const { parentRevision, removedGroups, removedValues } = relationshipDeletionSummary(operation.id, result);
+              if (parentRevision !== undefined) reply.header(relationshipParentRevisionHeader, parentRevision);
+              if (removedGroups !== undefined) reply.header('X-Planner-Removed-Groups', removedGroups);
+              if (removedValues !== undefined) reply.header('X-Planner-Removed-Values', removedValues);
               return reply.code(204).send();
             }
             return reply.code(operation.status).send(result);
