@@ -196,6 +196,7 @@ test('the 64 write descriptors run once through MCP and replay the same authoriz
         assert.equal(audit.length, 1);
         const generatedBoard = command.operationId === 'boards.create' ? audit[0].resourceId : null;
         return {
+          effectCount: command.manifest.reduce((count, batch) => count + batch.count, 0),
           audit: [audit[0].action, audit[0].resourceType, audit[0].actorId],
           events: events.map(({ boardId, kind }) => [boardId === generatedBoard ? 'created-board' : boardId, kind]).sort(),
           activities: activities.map(({ boardId, kind }) => [boardId, kind]).sort(),
@@ -340,7 +341,7 @@ test('durable mutation recovery retains the first client and current authorizati
       const { path, options } = restTarget(entry, oversized, committedKey, cookie);
       const web = await f.call(path, cookie, options);
       assert.equal(web.status, 200);
-      assert.equal(web.data.data.group.definitions.length, 350);
+      assert.equal(web.data.data.group.definitions.length, 351);
       const replay = await executeMcpMutation(actorFor(actor, cookie), 'field_update_group',
         { ...oversized, idempotencyKey: committedKey });
       assert.deepEqual(replay.structuredContent, { data: { acknowledged: true, resultOmitted: true } });
