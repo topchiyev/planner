@@ -78,8 +78,10 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
     const stored = { ...fields, ...key(id) };
     const rows = db.collection<StoredRow>(collection);
     if (verify) {
+      const lateProvenance = ['attachment', 'background_image', 'uploaded_file', 'user_account'].includes(fields.entity);
       const projection = collection === 'users' ? { avatarMedia: 0, avatarBlobDigest: 0 }
-        : collection === 'importIds' ? { 'provenance.observedCommentCount': 0, 'provenance.media': 0 } : undefined;
+        : collection === 'importIds' && fields.entity === 'card' ? { 'provenance.observedCommentCount': 0 }
+        : collection === 'importIds' && lateProvenance ? { 'provenance.media': 0 } : undefined;
       const actual = await rows.findOne(key(id), { projection, promoteLongs: false });
       if (!isDeepStrictEqual(actual, stored)) throw stagedMismatch();
       verify.accept(collection, fields);
@@ -178,10 +180,14 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
         { $set: { avatarBlobDigest: digest, avatarMedia: media } }, durable);
       if (saved.matchedCount !== 1) throw new MigrationError('target-write', 'The staged avatar association could not be recorded.');
     },
-    async assertNoAvatar(id: string) {
+    async assertNoAvatar(sourceId: string, id: string) {
       lease.assertHeld();
-      const row = await db.collection<StoredAvatar>('users').findOne(key(id), { projection: { avatarMedia: 1, avatarBlobDigest: 1 } });
-      if (!row || row.avatarMedia !== undefined || row.avatarBlobDigest !== undefined) throw stagedMismatch();
+      const [row, mapped] = await Promise.all([
+        db.collection<StoredAvatar>('users').findOne(key(id), { projection: { avatarMedia: 1, avatarBlobDigest: 1 } }),
+        mapping('user_account', sourceId),
+      ]);
+      if (!row || !mapped || row.avatarMedia !== undefined || row.avatarBlobDigest !== undefined || mapped.provenance.media !== undefined)
+        throw stagedMismatch();
     },
     async hasProjectManager(projectSourceId: string) {
       lease.assertHeld();

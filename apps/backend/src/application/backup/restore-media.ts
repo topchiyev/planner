@@ -7,6 +7,25 @@ import { anchoredDirectory, BackupError, childPath, digestPattern, fdPath, fileC
 const { O_RDONLY, O_RDWR, O_NOFOLLOW, O_DIRECTORY, O_NONBLOCK, O_EXCL, O_CREAT } = constants;
 const code = (error: unknown) => (error as NodeJS.ErrnoException).code;
 
+async function checkBlob(directory: FileHandle, owner: Owner, entry: Part) {
+  if (!digestPattern.test(entry.sha256) || !Number.isSafeInteger(entry.byteLength) || entry.byteLength < 0) throw new BackupError();
+  const file = await open(childPath(directory, entry.sha256), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.uid !== owner.uid || stat.gid !== owner.gid || (stat.mode & 0o7777) !== 0o400
+        || stat.nlink < 1 || stat.nlink > 2 || stat.size !== entry.byteLength) throw new BackupError('A destination media object has unsafe ownership or bytes.');
+    await verifyPart(file, entry);
+  } finally { await file.close(); }
+}
+
+export async function openPrivateBlobVerifier(blobs: string, owner: Owner) {
+  const directory = await anchoredDirectory(blobs, owner, 0o700);
+  return {
+    verifyBlob: ({ digest, byteLength }: BlobIdentity) => checkBlob(directory, owner, { sha256: digest, byteLength }),
+    close: () => directory.close(),
+  };
+}
+
 export async function openRestoreMedia({ staging, blobs, owner, fingerprint }: {
   staging: string; blobs: string; owner: Owner; fingerprint: string;
 }) {
@@ -30,17 +49,7 @@ export async function openRestoreMedia({ staging, blobs, owner, fingerprint }: {
   const workspace = stagingRoot;
   const temporary = scratch;
 
-  function asPart(identity: BlobIdentity) { return { sha256: identity.digest, byteLength: identity.byteLength }; }
-  async function checkBlob(entry: Part) {
-    if (!digestPattern.test(entry.sha256) || !Number.isSafeInteger(entry.byteLength) || entry.byteLength < 0) throw new BackupError();
-    const file = await open(childPath(destination, entry.sha256), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    try {
-      const stat = await file.stat();
-      if (!stat.isFile() || stat.uid !== owner.uid || stat.gid !== owner.gid || (stat.mode & 0o7777) !== 0o400
-          || stat.nlink < 1 || stat.nlink > 2 || stat.size !== entry.byteLength) throw new BackupError('A destination media object has unsafe ownership or bytes.');
-      await verifyPart(file, entry);
-    } finally { await file.close(); }
-  }
+  const checkDestination = (entry: Part) => checkBlob(destination, owner, entry);
   async function discardPart(digest: string) {
     const temp = childPath(temporary, digest);
     const stat = await optionalStat(temp);
@@ -60,7 +69,7 @@ export async function openRestoreMedia({ staging, blobs, owner, fingerprint }: {
     },
     async writeBlob(input: FileHandle, entry: Part) {
       try {
-        await checkBlob(entry);
+        await checkDestination(entry);
         await verifyPart(input, entry);
         await discardPart(entry.sha256);
         return;
@@ -77,13 +86,13 @@ export async function openRestoreMedia({ staging, blobs, owner, fingerprint }: {
         await file.chmod(0o400);
         await file.sync();
         try { await link(temp, childPath(destination, entry.sha256)); }
-        catch (error) { if (code(error) !== 'EEXIST') throw error; await checkBlob(entry); }
+        catch (error) { if (code(error) !== 'EEXIST') throw error; await checkDestination(entry); }
         await destination.sync();
       } finally {
         try { await file.close(); } finally { await discardPart(entry.sha256); await temporary.sync(); }
       }
     },
-    verifyBlob: (identity: BlobIdentity) => checkBlob(asPart(identity)),
+    verifyBlob: ({ digest, byteLength }: BlobIdentity) => checkDestination({ sha256: digest, byteLength }),
     async close() {
       try {
         if ((await readdir(fdPath(temporary))).length === 0) {

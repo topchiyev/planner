@@ -23,6 +23,24 @@ function invalidApproval() {
   return new MigrationError('approval-invalid', 'The approval must exactly match the missing originals for this run and manifest.');
 }
 
+export function parseMigrationApproval(text: string): unknown {
+  try {
+    const approval: unknown = JSON.parse(text);
+    const objects: Set<string>[] = [];
+    for (const token of text.matchAll(/"(?:\\[\s\S]|[^"\\])*"(?:\s*:)?|[{}]/gu)) {
+      if (token[0] === '{') objects.push(new Set());
+      else if (token[0] === '}') objects.pop();
+      else if (token[0].endsWith(':')) {
+        const key: string = JSON.parse(token[0].slice(0, -1));
+        const keys = objects.at(-1)!;
+        if (keys.has(key)) throw invalidApproval();
+        keys.add(key);
+      }
+    }
+    return approval;
+  } catch { throw invalidApproval(); }
+}
+
 export function canonicalMissingOriginals(value: readonly MissingOriginal[]) {
   const missing = z.array(missingOriginalSchema).parse(value);
   missing.sort((first, second) => compareSourceKeys('uploaded_file', first.sourceId, second.sourceId));

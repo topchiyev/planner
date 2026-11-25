@@ -209,7 +209,7 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
       case 'user_account': {
         const { row } = entry;
         if (row.avatar === null) {
-          if ('verifyBlob' in target) await records.assertNoAvatar(id);
+          if ('verifyBlob' in target) await records.assertNoAvatar(row.id, id);
           return;
         }
         const data = object(row.avatar.value);
