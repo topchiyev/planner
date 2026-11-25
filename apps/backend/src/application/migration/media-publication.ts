@@ -22,7 +22,7 @@ export async function prepareMigrationMedia(stage: PrivateMediaStage, received: 
   decode: MediaDecoder, signal: AbortSignal) {
   const { identity, prefix } = received;
   const format = detectImage(prefix);
-  const variants = format ? await decode(stage, format, signal) : null;
+  const variants = format ? await decode(stage, format, signal, 'migration') : null;
   const parts: { part: MediaPart; identity: BlobIdentity }[] = [{ part: 'original', identity }];
   if (variants) parts.push({ part: 'small', identity: variants.small }, { part: 'large', identity: variants.large });
   return { parts, media: { ...identity, mimeType: format ? imageTypes[format] : originalType, variants } };
