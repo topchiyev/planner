@@ -157,9 +157,19 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       },
     };
     let beforeMcpCommand;
+    let afterMcpCommand;
+    let afterMcpProof;
+    let oauthClockOffset = 0;
     const app = (clients = [client]) => {
       const oauth = createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients,
-        createOAuthClientRegistry(clients, transport), (grant) => { revoked.push(grant); });
+        createOAuthClientRegistry(clients, transport), (grant) => { revoked.push(grant); },
+        () => new Date(Date.now() + oauthClockOffset));
+      const { currentAccessTokenForCommand } = oauth.storage;
+      oauth.storage.currentAccessTokenForCommand = async (...args) => {
+        const proof = await currentAccessTokenForCommand(...args);
+        if (proof) afterMcpProof?.();
+        return proof;
+      };
       const { withCommandDatabase } = oauth;
       oauth.withCommandDatabase = (operation) => {
         beforeMcpCommand?.();
@@ -168,7 +178,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       return buildApp({ native: { origin, proxyToken, readAccess: async () => access, auth: { ...sessions, confirm: async () => false,
         mfa: { manage, verify: (input) => sessions.verifyMfa(input) } }, oauth,
         mcp: createReadMcpSurface(origin, createBoardEventCursors(key), true),
-        mcpWrites: { store: {}, decode: async () => assert.fail('Unexpected media decode') },
+        mcpWrites: { store: {}, decode: async () => assert.fail('Unexpected media decode'), afterCommit: () => { afterMcpCommand?.(); } },
       } });
     };
     let server = await serve(app(), fixture);
@@ -350,6 +360,8 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       const boardKey = randomUUID();
       let boardArguments;
       let boardReceipt;
+      let expiredArguments;
+      let durableExpiredReceipt;
       await withMcpSdk('2026-07-28', full.json.access_token, async (sdk) => {
         const run = (name, args, idempotencyKey = randomUUID()) => sdk.callTool({ name,
           arguments: { ...args, idempotencyKey } });
@@ -389,6 +401,33 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
         assert.equal(JSON.parse(forbidden.content[0].text).code, 'FORBIDDEN');
         assert.equal(await db.collection('commands').countDocuments({ generationId, idempotencyKey: queuedKey }), 0);
         await gate.runCommand(() => changeRole('admin'));
+
+        const expire = () => { oauthClockOffset = 16 * 60_000; };
+        expiredArguments = { id: board.id, expectedRevision: group.structuredContent.data.parentRevision,
+          name: 'Committed through grant expiry', idempotencyKey: randomUUID() };
+        afterMcpCommand = expire;
+        try {
+          const withheld = await sdk.callTool({ name: 'board_update', arguments: expiredArguments });
+          assert.equal(JSON.parse(withheld.content[0].text).code, 'UNAUTHENTICATED');
+          assert.equal(withheld.structuredContent, undefined);
+          assert.equal((await probeMcp(bearer)).status, 401);
+          const command = await db.collection('commands').findOne({ generationId, idempotencyKey: expiredArguments.idempotencyKey });
+          assert.equal(command.status, 'committed');
+          durableExpiredReceipt = JSON.parse(command.result);
+          assert.equal(durableExpiredReceipt.data.board.name, expiredArguments.name);
+        } finally { afterMcpCommand = undefined; oauthClockOffset = 0; }
+
+        let proofs = 0;
+        afterMcpProof = () => { if (++proofs === 2) expire(); };
+        try {
+          const stale = await run('card_move', { id: card.id, expectedRevision: 999, toListId: list.id,
+            beforeCardId: null, sourceOrderVersion: 1, destinationOrderVersion: 1 });
+          assert.equal(proofs, 2);
+          const { code, fields } = JSON.parse(stale.content[0].text);
+          assert.equal(code, 'UNAUTHENTICATED');
+          assert.equal(fields, undefined);
+          assert.equal(stale.structuredContent, undefined);
+        } finally { afterMcpProof = undefined; oauthClockOffset = 0; }
       });
       const persistent = { scope: 'planner:read planner:write offline_access' };
       const rejectedOffline = await token(await approve(await interaction(persistent), false));
@@ -445,6 +484,11 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
             const replay = await sdk.callTool({ name: 'board_create', arguments: boardArguments });
             assert.deepEqual(replay.structuredContent, boardReceipt.structuredContent);
             assert.deepEqual(replay.content, boardReceipt.content);
+            const lateReplay = await sdk.callTool({ name: 'board_update', arguments: expiredArguments });
+            assert.deepEqual(lateReplay.structuredContent, durableExpiredReceipt);
+            const expirationAudit = await db.collection('auditEntries').findOne({ generationId, action: 'boards.update' });
+            assert.equal(expirationAudit.clientId, 'registered:' + clientId);
+            assert.equal(await db.collection('auditEntries').countDocuments({ generationId, action: 'boards.update' }), 1);
             const first = await db.collection('auditEntries').findOne({ generationId, action: 'boards.create' });
             assert.equal(first.clientId, 'registered:' + clientId);
             assert.equal(await db.collection('auditEntries').countDocuments({ generationId, action: 'boards.create' }), 1);
