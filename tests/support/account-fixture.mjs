@@ -69,7 +69,7 @@ export async function accountFixture({ db, directory }) {
   const readAccess = async () => gate.ready ? { kind: 'ready' } : { kind: 'unavailable', reason: 'schema-or-recovery' };
   const sessions = () => createBrowserSessions(db, installationId, gate, hasher, now);
 
-  async function startBrowser(origin, { oauth = false } = {}) {
+  async function startBrowser(origin, { oauth = false, clients = [] } = {}) {
     if (oauth) time = new Date();
     const key = createSecretKey(randomBytes(32));
     const proxyDir = join(directory, 'proxy');
@@ -78,7 +78,7 @@ export async function accountFixture({ db, directory }) {
     const app = buildApp({
       frontendRoot: fileURLToPath(new URL('../../apps/frontend/dist/', import.meta.url)),
       native: { origin, proxyToken, readAccess, workspace: createWorkspaceReader(db, installationId, gate, cursors, now),
-        ...(oauth && { oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db)) }),
+        ...(oauth && { oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients) }),
         auth: { confirm: async () => false, ...sessions(), accountManagement: accountServices(),
           ...(oauth && { mfa: { manage: createMfaManagement(db, installationId, gate, key, hasher, now),
             verify: async () => null } }),

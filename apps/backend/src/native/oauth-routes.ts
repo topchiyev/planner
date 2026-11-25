@@ -246,9 +246,17 @@ export function registerNativeOAuthRoutes(app: FastifyInstance, oauth: NativeOAu
           const csrf = oauth.secrets.consent(session.generationId, uid, session.sessionId);
           const write = scopes.includes(writeScope);
           const offline = scopes.includes(offlineScope);
-          if (!decision) return reply.type('text/html; charset=utf-8').send(
-            consentForm(csrf, session.account.actor.name, client.client_name, new URL(redirect_uri), write, offline),
-          );
+          if (!decision) {
+            const redirect = new URL(redirect_uri);
+            // Browser navigation forms preserve the same-origin POST Origin. Chromium also
+            // applies form-action to redirects, so admit only the validated callback origin.
+            return reply.headers({
+              'Referrer-Policy': 'same-origin',
+              'Content-Security-Policy': `default-src 'none'; form-action 'self' ${redirect.origin}; frame-ancestors 'none'; base-uri 'none'`,
+            }).type('text/html; charset=utf-8').send(
+              consentForm(csrf, session.account.actor.name, client.client_name, redirect, write, offline),
+            );
+          }
           if (!token || !timingSafeEqual(Buffer.from(csrf), Buffer.from(decision.csrf)) || (decision.write && !write) || (decision.offline && !offline)) {
             return reply.code(403).send({ error: 'access_denied' });
           }

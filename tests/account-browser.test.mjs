@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
 import { Secret, TOTP } from 'otpauth';
@@ -213,5 +215,95 @@ test('Chromium shows and disconnects only the signed-in account’s OAuth connec
       await expect(item).toContainText('Disconnected');
       assert.equal((await context.request.get(web.origin + '/api/v1/session')).status(), 200);
     } finally { await browser?.close(); await web?.close(); await f.close(); }
+  });
+});
+
+test('Chromium submits OAuth consent with an exact origin and follows only the verified callback', { timeout: 45_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    const clientId = 'chromium-consent-fixture';
+    let foreignForm;
+    const callbacks = [];
+    const callback = createServer((incoming, reply) => {
+      if (incoming.url === '/foreign') {
+        return reply.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8', 'Referrer-Policy': 'strict-origin-when-cross-origin',
+        }).end(foreignForm);
+      }
+      const url = new URL(incoming.url, 'http://127.0.0.1');
+      if (url.pathname !== '/callback') return reply.writeHead(404).end();
+      callbacks.push({ issuer: url.searchParams.get('iss'), state: url.searchParams.get('state'),
+        hasCode: url.searchParams.has('code'), error: url.searchParams.get('error'), referrer: incoming.headers.referer });
+      return reply.writeHead(200, { 'Content-Type': 'text/plain' }).end('Synthetic OAuth callback');
+    });
+    let web;
+    let browser;
+    try {
+      callback.listen(0, '127.0.0.1');
+      await once(callback, 'listening');
+      const callbackOrigin = 'http://127.0.0.1:' + callback.address().port;
+      const redirect = callbackOrigin + '/callback';
+      const account = await f.seed('browser-consent@example.test');
+      web = await tlsBridge(mongo.directory, (origin) => f.startBrowser(origin, { oauth: true,
+        clients: [{ client_id: clientId, client_name: 'Synthetic browser connector', redirect_uris: [redirect] }],
+      }));
+      browser = await chromium.launch();
+      const page = await browser.newPage({ ignoreHTTPSErrors: true });
+      await signIn(page, web.origin, account.email, password);
+      const challenge = createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url');
+      async function authorize(state) {
+        const response = await page.goto(web.origin + '/oauth/authorize?' + new URLSearchParams({
+          response_type: 'code', client_id: clientId, redirect_uri: redirect, state,
+          scope: 'planner:read', resource: web.origin + '/mcp', code_challenge_method: 'S256', code_challenge: challenge,
+        }));
+        assert.equal(response.status(), 200);
+        assert.equal(response.headers()['referrer-policy'], 'same-origin');
+        assert.equal(response.headers()['content-security-policy'],
+          `default-src 'none'; form-action 'self' ${callbackOrigin}; frame-ancestors 'none'; base-uri 'none'`);
+        await expect(page.getByRole('heading', { name: 'Connect to Planner' })).toBeVisible();
+        return page.url();
+      }
+      const allow = page.getByRole('button', { name: 'Allow', exact: true });
+      const interaction = await authorize('allow-fixture');
+      const csrf = await page.locator('input[name=csrf]').inputValue();
+      assert.match(csrf, /^[A-Za-z0-9_-]+$/u);
+      foreignForm = `<form method="post" action="${interaction}"><input type="hidden" name="csrf" value="${csrf}">
+        <button name="decision" value="allow">Foreign approval</button></form>`;
+      async function submitOrigin(button, expectedOrigin, status) {
+        const posted = page.waitForRequest((req) => req.method() === 'POST' && req.url() === interaction);
+        const answered = page.waitForResponse((response) =>
+          response.url() === interaction && response.request().method() === 'POST');
+        await button.click();
+        assert.equal(await (await posted).headerValue('origin'), expectedOrigin);
+        const response = await answered;
+        assert.equal(response.status(), status);
+        assert.equal(response.headers()['referrer-policy'], 'no-referrer');
+      }
+      await page.goto(callbackOrigin + '/foreign');
+      await submitOrigin(page.getByRole('button', { name: 'Foreign approval' }), callbackOrigin, 403);
+      await page.goto(interaction);
+      await page.locator('input[name=csrf]').evaluate((input) => {
+        input.value = (input.value.startsWith('A') ? 'B' : 'A') + input.value.slice(1);
+      });
+      await submitOrigin(allow, web.origin, 403);
+      assert.deepEqual(callbacks, []);
+
+      await page.goto(interaction);
+      const permitted = page.waitForURL((url) => url.origin === callbackOrigin && url.pathname === '/callback');
+      await submitOrigin(allow, web.origin, 303);
+      await permitted;
+      assert.deepEqual(callbacks, [{ issuer: web.origin, state: 'allow-fixture', hasCode: true, error: null, referrer: undefined }]);
+
+      await authorize('cancel-fixture');
+      const cancelled = page.waitForURL((url) => url.origin === callbackOrigin && url.pathname === '/callback');
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await cancelled;
+      assert.deepEqual(callbacks[1], { issuer: web.origin, state: 'cancel-fixture', hasCode: false, error: 'access_denied', referrer: undefined });
+    } finally {
+      await browser?.close();
+      await web?.close();
+      await f.close();
+      await new Promise((resolve) => callback.close(resolve));
+    }
   });
 });
