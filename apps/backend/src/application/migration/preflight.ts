@@ -103,6 +103,9 @@ const admittedSnapshots = new WeakMap<VerifiedSourceSnapshot, SnapshotOperations
 export type VerifiedSourceSnapshot = {
   readonly fingerprint: SourceFingerprint;
   readonly capture: Readonly<{ capturedAt: string; sourceInstanceId: string }>;
+  readonly manifestSha256: string;
+  readonly sourceCounts: Readonly<Record<string, string>>;
+  assets(): Iterable<Readonly<VerifiedSourceAsset>>;
   readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number): Promise<SourceBatch<T>>;
   readUpload(id: string): Promise<SourceRow<'uploaded_file'> | null>;
   asset(key: string): Readonly<VerifiedSourceAsset>;
@@ -165,6 +168,12 @@ export async function withMigrationSnapshot<T>(
       const snapshot: VerifiedSourceSnapshot = Object.freeze({
         fingerprint: Object.freeze(fingerprint),
         capture: Object.freeze({ capturedAt: capture.capturedAt, sourceInstanceId: capture.source.instanceId }),
+        manifestSha256,
+        sourceCounts: Object.freeze(source.rows),
+        assets() {
+          assertVerifiedSourceSnapshot(snapshot, true);
+          return verifiedAssets.values();
+        },
         readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number) {
           return trackSourceOperation(snapshot, () => readSourceBatch(client, table, lastSourceId, limit));
         },

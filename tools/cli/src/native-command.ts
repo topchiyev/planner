@@ -5,7 +5,7 @@ import { publicIdSchema } from '@planner/contracts/storage';
 import { parsePreflightOptions } from '@planner/contracts/native';
 
 type NativeCommand = 'setup' | 'status' | 'start' | 'stop' | 'restart' | 'verify-storage' | 'account-inspect' | 'account-confirm'
-  | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight';
+  | 'backup-create' | 'backup-restore' | 'backup-activate' | 'migration-prepare' | 'migration-preflight' | 'migration-verify' | 'migration-report';
 const operator = fileURLToPath(new URL('../../../apps/backend/dist/native/operate.js', import.meta.url));
 
 const serviceName = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/u;
@@ -56,6 +56,21 @@ export function runNativeCommand(command: NativeCommand, args: string[]) {
       }
       if (args.length) throw new Error('Unexpected migration command options.');
       helperArgs = [command, JSON.stringify(input), json ? 'json' : 'text'];
+    } else if (command === 'migration-verify' || command === 'migration-report') {
+      const runId = flagValue(args, '--run');
+      publicIdSchema.parse(runId);
+      const report = command === 'migration-report';
+      const format = report || args.includes('--format') ? flagValue(args, '--format') : 'text';
+      if (format !== 'json' && (report || format !== 'text')) throw new Error('Specify --format json.');
+      const paged = report && (args.includes('--offset') || args.includes('--limit'));
+      const pageValue = (flag: string, fallback: number) => {
+        const value = args.includes(flag) ? flagValue(args, flag) : String(fallback);
+        if (!/^(?:0|[1-9][0-9]*)$/u.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`Invalid ${flag} value.`);
+        return Number(value);
+      };
+      const page = paged ? { offset: pageValue('--offset', 0), limit: pageValue('--limit', 100) } : undefined;
+      if (args.length || (page && (page.limit < 1 || page.limit > 1000))) throw new Error('Invalid migration verification options.');
+      helperArgs = [command, JSON.stringify({ runId, page }), format];
     } else if (command === 'backup-restore') {
       const archive = flagValue(args, '--archive');
       const fingerprint = flagValue(args, '--expect-manifest');

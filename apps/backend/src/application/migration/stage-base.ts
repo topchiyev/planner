@@ -4,14 +4,14 @@ import type { WriterLease } from '../command-gate/writer-lease.js';
 import { assertBoardSystemLists, boardHistoryHighWater, openBaseOrder } from './base-order.js';
 import { invalidBaseRow } from './base-fields.js';
 import { baseRelationshipTables, baseWorkspaceTables, reserveSourceRecord, writeBaseRelationship, writeBaseRow } from './base-workspace.js';
-import { importRunKey, migrationPasses, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint,
+import { importRunKey, migrationPasses, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint, type MigrationPosition,
   type migrationCursors } from './checkpoint.js';
 import { discussionTables, writeImportedDiscussion } from './discussion-stage.js';
 import { MigrationError } from './manifest.js';
 import { createMigrationMediaStage, migrationMediaTables, type MigrationMediaRow, type MigrationMediaTarget } from './media-stage.js';
 import { assertVerifiedSourceSnapshot, type VerifiedSourceSnapshot } from './preflight.js';
 import { maximumSourceBatch, projectedSourceTables } from './source-projections.js';
-import { openImportRecords, type ImportedEntity } from './staged-records.js';
+import { openImportRecords, type ImportedEntity, type ImportRecords } from './staged-records.js';
 import { relationshipRankTables, workspaceRelationshipTables, writeWorkspaceRelationship } from './workspace-relationships.js';
 
 const reservable = (table: typeof projectedSourceTables[number]): table is ImportedEntity => table !== 'internal_config' && table !== 'storage_usage';
@@ -51,16 +51,38 @@ async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdenti
   const { generationId } = identity;
   const records = await openImportRecords(db, lease, identity, run.source.instanceId);
   const stageMedia = mediaTarget && createMigrationMediaStage(records, snapshot, lease, mediaTarget);
-  const { capturedAt } = snapshot.capture;
   let checkpoint = run.checkpoint;
   if (checkpoint && cursors.open({ runId: run.id, generationId, fingerprint: identity.fingerprint.sha256,
     pass: checkpoint.pass, table: checkpoint.table }, checkpoint.token) !== checkpoint.lastSourceId) {
     throw new MigrationError('target-write', 'The protected import run has an invalid cursor.');
   }
+  await walkMigrationStage(db, identity, snapshot, batchSize, records, stageMedia, {
+    checkpoint: () => checkpoint,
+    async batch(position, apply) {
+      checkpoint = await writeMigrationBatch(lease, db, identity, snapshot, cursors, checkpoint, position, apply);
+    },
+    row(_position, _sourceId, apply) { return apply(); },
+  });
+  return checkpoint;
+}
 
+type StageWalk = {
+  checkpoint(): MigrationCheckpoint | null;
+  batch(position: MigrationPosition, apply: () => Promise<void>): Promise<void>;
+  row(position: MigrationPosition, sourceId: string, apply: () => Promise<void>): Promise<void>;
+};
+
+export const completedMigrationTable = migrationMediaTables.at(-1)!;
+export const reservableSourceTable = reservable;
+
+export async function walkMigrationStage(db: Db, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,
+  batchSize: number, records: ImportRecords, stageMedia: ReturnType<typeof createMigrationMediaStage> | undefined, walk: StageWalk) {
+  const { generationId } = identity;
+  const { capturedAt } = snapshot.capture;
   for (const { pass, tables } of stageTables) {
     if (pass === 'media' && !stageMedia) break;
     for (const table of tables) {
+      const checkpoint = walk.checkpoint();
       const previous = checkpoint && (migrationPasses.indexOf(checkpoint.pass) - migrationPasses.indexOf(pass)
         || projectedSourceTables.indexOf(checkpoint.table) - projectedSourceTables.indexOf(table));
       if (previous !== null && (previous > 0 || (previous === 0 && checkpoint?.lastSourceId === null))) continue;
@@ -75,9 +97,10 @@ async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdenti
           hasMore = batch.hasMore;
           if (batch.rows.length === 0 && after !== null) break;
           if (hasMore && batch.lastSourceId === after) invalidBaseRow('The verified source cursor did not advance.');
-          checkpoint = await writeMigrationBatch(lease, db, identity, snapshot, cursors,
-            checkpoint, { pass, table, lastSourceId: batch.lastSourceId }, async () => {
-              for (const row of batch.rows) {
+          const position = { pass, table, lastSourceId: batch.lastSourceId };
+          await walk.batch(position, async () => {
+            for (const row of batch.rows) {
+              await walk.row(position, row.id, async () => {
                 if (pass === 'reserve') {
                   await reserveSourceRecord(records, { table, row });
                 } else if (pass === 'edges') {
@@ -98,12 +121,13 @@ async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdenti
                   if (table === 'card' && sequence === null) invalidBaseRow('The staged card history does not match the verified source.');
                   await writeBaseRow(records, capturedAt, { table, row } as Parameters<typeof writeBaseRow>[2], position, sequence ?? 0n);
                 }
-              }
-              if (!hasMore) {
-                await rank?.complete();
-                await history?.complete();
-              }
-            });
+              });
+            }
+            if (!hasMore) {
+              await rank?.complete();
+              await history?.complete();
+            }
+          });
           after = batch.lastSourceId;
         }
       } finally {
@@ -111,5 +135,4 @@ async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdenti
       }
     }
   }
-  return checkpoint;
 }

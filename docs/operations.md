@@ -116,6 +116,21 @@ For an object capture, replace `--assets-root` with `--asset-service NAME`. Defi
 
 The command checks the restored catalog and migration ledger, hashes the allowlisted logical rows in a single PostgreSQL read-only snapshot, and hashes the verified file or versioned object inventory. It checks the combined capacity of any shared target volumes. It records an inactive import run and a root-only receipt in `/var/lib/planner/migration` under the native writer lease. The application briefly releases its lease for publication and resumes its previous service state. The installation still has no active imported generation. Record the run ID, manifest hash and logical fingerprint separately from the private capture and credentials. A change to the logical source snapshot requires a new run. Retrying identical preflight inputs after an interruption returns the original run and public receipt, with any staged progress preserved.
 
+## Verifying a staged PLANKA run
+
+Keep the frozen source service and asset snapshot available until verification finishes. After the run has staged its graph and media, verify the inactive generation and read the aggregate report.
+
+```sh
+sudo plannerctl migration verify --run "$run_id" --format json
+sudo plannerctl migration report --run "$run_id" --format json
+```
+
+The report records source and destination counts, approval eligibility and the report digest. It lists absent originals separately from absent derivatives and preserves counts for quarantined inbox rows. Verification confirms the final staging checkpoint before recording its start. It checks original and preview bytes, including preview digests rebuilt from the frozen source originals. A blocked report prevents activation. An interrupted scan can be retried on the same frozen inputs. Verification preserves the previous application service state and generation routing.
+
+For local reconciliation, add `--offset 0 --limit 100` to the report command and use the returned `nextOffset` for subsequent pages. Those pages include opaque source identifiers and reason codes. Share only aggregate counts and digests.
+
+When verification finds absent originals, the local approval file has `runId`, `snapshotSha256` and `missing` fields. Set `snapshotSha256` to the verified capture manifest SHA-256. Include each reported `uploaded_file` with reason `missing-original` once as `{ "type": "uploaded_file", "sourceId": "…", "reason": "missing-original" }`. Multiple references to the same absent original require one entry. Different original keys for one upload ID block verification. Keep the approval file in a root-owned mode-0700 directory with no permissions for other accounts. Keep the approved file and report digest for an exact retry.
+
 ## Workspace storage schema
 
 Setup and the guarded service start verify the installation identity in the dedicated MongoDB instance. A supported schema upgrade runs with the application stopped. Planner copies and verifies any legacy first-administrator grant under its generation-scoped key, creates and checks its collection indexes, and then publishes the new schema version. An interrupted upgrade resumes from the stored phase on the next operator start. The version check preserves the active generation and the setup state.

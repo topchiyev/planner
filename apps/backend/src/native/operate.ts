@@ -10,12 +10,15 @@ import {
 } from '@planner/contracts/native';
 import { publicIdSchema } from '@planner/contracts/storage';
 import type { MongoClient } from 'mongodb';
+import { z } from 'zod';
 import { BackupError, digestPattern } from '../application/backup/archive.js';
 import { activateRestore, inspectBackup, readActivatedRestore, stageRestore } from '../application/backup/restore.js';
-import { openRestoreMedia } from '../application/backup/restore-media.js';
+import { openPrivateBlobVerifier, openRestoreMedia } from '../application/backup/restore-media.js';
+import { createMediaDecoder } from '../application/media/decoder.js';
 import { MigrationError } from '../application/migration/manifest.js';
-import { inspectMigration, migrationPath, parseMigrationInput, type MigrationInput } from '../application/migration/preflight.js';
+import { inspectMigration, migrationPath, parseMigrationInput, withMigrationSnapshot, type MigrationInput } from '../application/migration/preflight.js';
 import { prepareMigration } from '../application/migration/prepare.js';
+import { collectMigrationVerification } from '../application/migration/verification.js';
 import { firstAdminBinding } from '../application/auth/first-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
@@ -29,7 +32,9 @@ import {
 import { adminRuntimeDirectory } from './admin-socket.js';
 import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
-import { assertMigrationTarget, checkMigrationCapacity, publishMigrationPreflight } from './migration-state.js';
+import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, migrationVerificationPage, openNativeMigrationDirectory,
+  persistMigrationVerification, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
+  readProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
@@ -573,6 +578,63 @@ async function migrationPreflight(input: MigrationInput) {
   });
 }
 
+const migrationVerificationRequest = z.strictObject({ runId: publicIdSchema,
+  page: z.strictObject({ offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(1000) }).optional() });
+
+async function migrationVerification(runId: string, verify: boolean) {
+  return withInstallationLock(async (owner) => {
+    const config = readInstallationConfig(owner.appGroup);
+    const restore = readRestoreIntent(owner.receipt);
+    verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
+    if (!config || config.mode !== 'import' || restore) throw new MigrationError('target-setup', 'Select a protected import installation.');
+    const client = await connectOwnedDatabase(config, owner.appGroup);
+    try {
+      const directory = await openNativeMigrationDirectory();
+      try {
+        const db = client.db(databaseName);
+        const { run, input, cursors } = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, runId);
+        if (!verify || run.state === 'verified' || run.state === 'blocked') return readMigrationVerification(directory, migrationOwner, run);
+        const wasRunning = appListening(config.appPort, true);
+        if (wasRunning) systemctl('stop', app);
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        process.once('SIGINT', cancel);
+        process.once('SIGTERM', cancel);
+        try {
+          return await withStoppedWriter(async (writer) => {
+            const media = await openPrivateBlobVerifier(backupBlobs, { uid: owner.appUid, gid: owner.appGroup });
+            try {
+              const identity = { runId, installationId: run.installationId, generationId: run.generationId, fingerprint: run.fingerprint };
+              const decode = createMediaDecoder(fileURLToPath(new URL('../../../../lib/decode-media.py', import.meta.url)),
+                '/usr/bin/python3', { uid: owner.appUid, gid: owner.appGroup });
+              const sourceConfig = await migrationConfig('postgres');
+              const objectConfig = input.assetService !== undefined ? await migrationConfig('objects') : undefined;
+              const { value: { report, verifying } } = await withNativeVerificationScratch(runId, (scratch) =>
+                withMigrationSnapshot(input, migrationOwner, sourceConfig, objectConfig, { expectedFingerprint: run.fingerprint.sha256 },
+                  async (snapshot) => {
+                    controller.signal.throwIfAborted();
+                    const verifying = await beginMigrationVerification(writer, db, run, snapshot);
+                    const report = await collectMigrationVerification(db, writer, identity, snapshot, cursors,
+                      { verifyBlob: media.verifyBlob, scratch, decode }, controller.signal);
+                    return { report, verifying };
+                  }));
+              controller.signal.throwIfAborted();
+              return await persistMigrationVerification(writer, db, directory, migrationOwner, verifying, report);
+            } finally { await media.close(); }
+          });
+        } catch (error) {
+          if (controller.signal.aborted) throw new MigrationError('verification-incomplete', 'Migration verification was interrupted.');
+          throw error;
+        } finally {
+          process.off('SIGINT', cancel);
+          process.off('SIGTERM', cancel);
+          if (wasRunning) await startApplication(config.appPort);
+        }
+      } finally { await directory.close(); }
+    } finally { await client.close(); }
+  });
+}
+
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === 'package-remove' && args.length === 0) {
@@ -594,6 +656,16 @@ try {
       const result = await migrationPreflight(parseMigrationInput(JSON.parse(args[0])));
       console.log(args[1] === 'json' ? JSON.stringify(result) : `Run ${result.runId} preflighted for manifest ${result.manifestSha256}. Missing originals ${result.assets.missingOriginals}, missing derivatives ${result.assets.missingDerivatives}.`);
     }
+  } else if ((action === 'migration-verify' || action === 'migration-report') && args.length === 2
+      && (args[1] === 'json' || (action === 'migration-verify' && args[1] === 'text'))) {
+    const request = migrationVerificationRequest.parse(JSON.parse(args[0]));
+    const verify = action === 'migration-verify';
+    if (verify && request.page) throw new MigrationError('verification-incomplete', 'Only a verification report accepts detail pagination.');
+    const result = await migrationVerification(request.runId, verify);
+    const output = request.page ? migrationVerificationPage(result, request.page.offset, request.page.limit) : publicMigrationVerification(result);
+    if (args[1] === 'json') console.log(JSON.stringify(output));
+    else console.log(`Run ${result.summary.runId} ${result.summary.outcome}. Report ${result.reportSha256}. Missing originals ${result.summary.assets.missingOriginals}.`);
+    if (verify && result.summary.outcome === 'blocked') process.exitCode = 1;
   } else if (action === 'backup-create' && args.length === 1) {
     const result = await withInstallationLock(localBackupRequest);
     console.log(args[0] === 'json' ? JSON.stringify(result) : `Backup ${result.directory} verified with manifest ${result.manifestSha256}.`);

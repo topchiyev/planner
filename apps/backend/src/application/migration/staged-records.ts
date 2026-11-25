@@ -43,7 +43,7 @@ export type ImportProvenance = SourceTimes & {
 
 export type ImportReference = { parent: string; kind?: string; templateSourceId?: string | null };
 
-type ImportMap = {
+export type ImportMap = {
   _id: string; id: string; generationId: string; entity: ImportedEntity; sourceId: string; sourceInstanceId: string;
   provenance: ImportProvenance; order?: ImportOrder; reference?: ImportReference;
 };
@@ -52,9 +52,15 @@ type StageCollection = Exclude<WorkspaceCollection, 'auditEntries' | 'sessions' 
   | 'oauthArtifacts' | 'oauthConnections' | 'commands' | 'commandEffectBatches' | 'events' | 'importRuns' | 'importIds' | 'users'>;
 
 type StoredRow = { _id: string; id: string; generationId: string } & Document;
+type VerifyRecords = { accept(collection: WorkspaceCollection, fields: Document): void };
+
+function stagedMismatch() {
+  return new MigrationError('verification-blocked', 'A staged record or provenance differs from the frozen source.');
+}
 
 /** A migration must resume its exact immutable data before any activation is possible. */
-export async function openImportRecords(db: Db, lease: WriterLease, identity: ImportIdentity, sourceInstanceId: string) {
+export async function openImportRecords(db: Db, lease: WriterLease, identity: ImportIdentity, sourceInstanceId: string,
+  verify?: VerifyRecords) {
   lease.assertHeld();
   const { installationId, generationId } = identity;
   const installation = await verifyStorageSchema(db, installationId);
@@ -71,6 +77,16 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
     lease.assertHeld();
     const stored = { ...fields, ...key(id) };
     const rows = db.collection<StoredRow>(collection);
+    if (verify) {
+      const lateProvenance = ['attachment', 'background_image', 'uploaded_file', 'user_account'].includes(fields.entity);
+      const projection = collection === 'users' ? { avatarMedia: 0, avatarBlobDigest: 0 }
+        : collection === 'importIds' && fields.entity === 'card' ? { 'provenance.observedCommentCount': 0 }
+        : collection === 'importIds' && lateProvenance ? { 'provenance.media': 0 } : undefined;
+      const actual = await rows.findOne(key(id), { projection, promoteLongs: false });
+      if (!isDeepStrictEqual(actual, stored)) throw stagedMismatch();
+      verify.accept(collection, fields);
+      return;
+    }
     try {
       await rows.insertOne(stored, durable);
     } catch (error) {
@@ -119,6 +135,7 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
       if (!Number.isSafeInteger(observed)) throw new MigrationError('target-write', 'The source card has too many comments.');
       const previous = card.provenance.observedCommentCount;
       if (previous === observed) return;
+      if (verify) throw stagedMismatch();
       if (previous !== undefined) throw new MigrationError('target-write', 'The staged source comment count changed.');
       lease.assertHeld();
       const saved = await ids.updateOne({ ...key(card.id), sourceId, sourceInstanceId, entity: 'card',
@@ -141,6 +158,7 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
       if (!mapped) throw new MigrationError('target-write', 'The staged source media mapping is unavailable.');
       const previous = mapped.provenance.media;
       if (isDeepStrictEqual(previous, media)) return;
+      if (verify) throw stagedMismatch();
       if (previous !== undefined) throw new MigrationError('target-write', 'The staged source media provenance changed.');
       lease.assertHeld();
       const saved = await ids.updateOne({ ...key(mapped.id), entity, sourceId, sourceInstanceId,
@@ -154,12 +172,22 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
       const current = await users.findOne(filter, { projection: { avatarBlobDigest: 1, avatarMedia: 1 } });
       if (!current) throw new MigrationError('target-write', 'The staged avatar account is unavailable.');
       if (current.avatarBlobDigest === digest && isDeepStrictEqual(current.avatarMedia, media)) return;
+      if (verify) throw stagedMismatch();
       if (current.avatarMedia !== undefined || current.avatarBlobDigest !== undefined)
         throw new MigrationError('target-write', 'The staged avatar association changed.');
       lease.assertHeld();
       const saved = await users.updateOne({ ...filter, avatarMedia: { $exists: false }, avatarBlobDigest: { $exists: false } },
         { $set: { avatarBlobDigest: digest, avatarMedia: media } }, durable);
       if (saved.matchedCount !== 1) throw new MigrationError('target-write', 'The staged avatar association could not be recorded.');
+    },
+    async assertNoAvatar(sourceId: string, id: string) {
+      lease.assertHeld();
+      const [row, mapped] = await Promise.all([
+        db.collection<StoredAvatar>('users').findOne(key(id), { projection: { avatarMedia: 1, avatarBlobDigest: 1 } }),
+        mapping('user_account', sourceId),
+      ]);
+      if (!row || !mapped || row.avatarMedia !== undefined || row.avatarBlobDigest !== undefined || mapped.provenance.media !== undefined)
+        throw stagedMismatch();
     },
     async hasProjectManager(projectSourceId: string) {
       lease.assertHeld();

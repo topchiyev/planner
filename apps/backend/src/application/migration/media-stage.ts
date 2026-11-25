@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { mediaNameSchema } from '@planner/contracts';
 import { nameBasedUuid } from '../../storage/identity.js';
-import { MediaStorageError, type BlobIdentity, type MediaPart, type PrivateMediaStore } from '../../storage/blobs/private-store.js';
+import { MediaStorageError, type BlobIdentity, type MediaPart, type PrivateMediaStage, type PrivateMediaStore } from '../../storage/blobs/private-store.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { detectImage, imageTypes, type MediaDecoder } from '../media/decoder.js';
 import { MediaRejection } from '../media/errors.js';
@@ -17,6 +17,7 @@ export const migrationMediaTables = ['attachment', 'background_image', 'uploaded
 type MediaTable = typeof migrationMediaTables[number];
 export type MigrationMediaRow = { [K in MediaTable]: { table: K; row: SourceRow<K> } }[MediaTable];
 export type MigrationMediaTarget = { store: PrivateMediaStore; decode: MediaDecoder; signal?: AbortSignal };
+type MigrationMediaVerification = { signal?: AbortSignal; verifyBlob(key: string, identity: BlobIdentity, requireImage: boolean): Promise<void> };
 
 type UploadType = 'attachment' | 'backgroundImage' | 'userAvatar';
 type SourceImage = { width: number; height: number; thumbnailsExtension: string };
@@ -109,9 +110,20 @@ function verifiedAsset(snapshot: VerifiedSourceSnapshot, key: string, kind: Veri
 type TargetFile = { availability: typeof availableMedia; blobDigest: string; byteLength: number }
   | { availability: typeof unavailableMedia; blobDigest: null };
 
+export async function deriveMigratedMedia(stage: PrivateMediaStage, snapshot: VerifiedSourceSnapshot, key: string,
+  original: BlobIdentity, requireImage: boolean, decode: MediaDecoder, signal: AbortSignal) {
+  const { identity, prefix } = await snapshot.readAsset(key, signal,
+    (bytes, reading) => stage.receive(Readable.from(bytes), original.byteLength, reading));
+  if (identity.digest !== original.digest || identity.byteLength !== original.byteLength) {
+    throw new MigrationError('asset-integrity', 'Staged media does not match the verified source bytes.');
+  }
+  const format = detectImage(prefix);
+  if (!format && requireImage) throw new MigrationError('asset-integrity', 'The verified profile or background asset is not a supported image.');
+  return { identity, mimeType: format ? imageTypes[format] : originalType, variants: format ? await decode(stage, format, signal) : null };
+}
+
 export function createMigrationMediaStage(records: ImportRecords, snapshot: VerifiedSourceSnapshot, lease: WriterLease,
-  target: MigrationMediaTarget) {
-  const { store, decode } = target;
+  target: MigrationMediaTarget | MigrationMediaVerification) {
   const signal = target.signal ?? new AbortController().signal;
   const fallback = snapshot.capture.capturedAt;
 
@@ -123,35 +135,33 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
     const { originalKey, derivativeKeys, ...provenance } = file;
     const original = verifiedAsset(snapshot, originalKey, 'original');
     const derivatives = derivativeKeys.map((key) => verifiedAsset(snapshot, key, 'derivative'));
-    // The source variants remain evidence. Planner creates PNG variants at its own bounds from the original.
-    for (const derivative of derivatives) {
-      if (derivative.sha256 !== null) await snapshot.readAsset(derivative.key, signal, async (bytes) => {
-        for await (const _chunk of bytes) { /* Verify the complete immutable response. */ }
-      });
-    }
     const state = original.sha256 === null ? unavailableMedia : availableMedia;
     const persist = async (fields: TargetFile) => {
       await records.recordMediaProvenance(table, sourceId, { ...provenance, kind: 'file', original, derivatives, state });
       await writeReference(fields);
     };
     const { byteLength, sha256 } = original;
+    if ('verifyBlob' in target) {
+      if (sha256 === null || byteLength === null) return persist({ availability: unavailableMedia, blobDigest: null });
+      await target.verifyBlob(original.key, { digest: sha256, byteLength }, file.uploadType !== 'attachment');
+      return persist({ availability: availableMedia, blobDigest: sha256, byteLength });
+    }
+
+    // The source variants remain evidence. Planner creates PNG variants at its own bounds from the original.
+    for (const derivative of derivatives) {
+      if (derivative.sha256 !== null) await snapshot.readAsset(derivative.key, signal, async (bytes) => {
+        for await (const _chunk of bytes) { /* Verify the complete immutable response. */ }
+      });
+    }
     if (sha256 === null || byteLength === null) {
       return persist({ availability: unavailableMedia, blobDigest: null });
     }
 
-    const stage = await store.stage();
+    const stage = await target.store.stage();
     let unpin: (() => void) | undefined;
     try {
-      const { identity, prefix } = await snapshot.readAsset(original.key, signal,
-        (bytes, reading) => stage.receive(Readable.from(bytes), byteLength, reading));
-      if (identity.digest !== sha256 || identity.byteLength !== byteLength) {
-        throw new MigrationError('asset-integrity', 'Staged media does not match the verified source bytes.');
-      }
-      const format = detectImage(prefix);
-      if (!format && file.uploadType !== 'attachment') {
-        throw new MigrationError('asset-integrity', 'The verified profile or background asset is not a supported image.');
-      }
-      const variants = format ? await decode(stage, format, signal) : null;
+      const { identity, mimeType, variants } = await deriveMigratedMedia(stage, snapshot, original.key,
+        { digest: sha256, byteLength }, file.uploadType !== 'attachment', target.decode, signal);
       const parts: { part: MediaPart; identity: BlobIdentity }[] = [{ part: 'original', identity }];
       if (variants) parts.push({ part: 'small', identity: variants.small }, { part: 'large', identity: variants.large });
       signal.throwIfAborted();
@@ -159,7 +169,7 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
       unpin = await stage.publish(parts);
       signal.throwIfAborted();
       const blobId = nameBasedUuid(snapshot.capture.sourceInstanceId, `blob:${identity.digest}`);
-      await records.write('blobs', blobId, { ...identity, mimeType: format ? imageTypes[format] : originalType, variants,
+      await records.write('blobs', blobId, { ...identity, mimeType, variants,
         lifecycleState: availableMedia, createdAt: new Date(fallback) });
       await persist({ availability: availableMedia, blobDigest: identity.digest, byteLength: identity.byteLength });
     } catch (error) {
@@ -202,7 +212,10 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
       }
       case 'user_account': {
         const { row } = entry;
-        if (row.avatar === null) return;
+        if (row.avatar === null) {
+          if ('verifyBlob' in target) await records.assertNoAvatar(row.id, id);
+          return;
+        }
         const data = object(row.avatar.value);
         const file = protectedFile('userAvatar', sourceKey('uploaded_file', data.uploadedFileId), extension(data.extension), nonnegative(data.size));
         const avatarId = nameBasedUuid(id, 'avatar');

@@ -17,12 +17,14 @@ export function detectImage(header: Buffer): ImageFormat | undefined {
   return undefined;
 }
 
-function decode(executable: string, script: string, format: ImageFormat, handles: FileHandle[], signal: AbortSignal) {
+type DecodeIdentity = { uid: number; gid: number };
+
+function decode(executable: string, script: string, format: ImageFormat, handles: FileHandle[], signal: AbortSignal, identity?: DecodeIdentity) {
   signal.throwIfAborted();
   return new Promise<void>((resolve, reject) => {
     const child = spawn(executable, ['-I', '-B', script, format], {
       stdio: ['ignore', 'ignore', 'ignore', ...handles.map(({ fd }) => fd)],
-      shell: false, cwd: '/', env: { LC_ALL: 'C.UTF-8' },
+      shell: false, cwd: '/', env: { LC_ALL: 'C.UTF-8' }, ...identity,
     });
     let expired = false;
     const abort = () => { child.kill('SIGKILL'); };
@@ -42,7 +44,7 @@ function decode(executable: string, script: string, format: ImageFormat, handles
   });
 }
 
-export function createMediaDecoder(script: string, executable = '/usr/bin/python3') {
+export function createMediaDecoder(script: string, executable = '/usr/bin/python3', identity?: DecodeIdentity) {
   const reserve = reserveSlots(2);
   return async (stage: PrivateMediaStage, format: ImageFormat, signal: AbortSignal): Promise<MediaVariants> => {
     const release = reserve();
@@ -51,7 +53,7 @@ export function createMediaDecoder(script: string, executable = '/usr/bin/python
       handles.push(await stage.openPart('original'));
       handles.push(await stage.createPart('small'));
       handles.push(await stage.createPart('large'));
-      await decode(executable, script, format, handles, signal);
+      await decode(executable, script, format, handles, signal, identity);
       const small = await stage.seal('small', handles[1], maximumDerivativeBytes);
       const large = await stage.seal('large', handles[2], maximumDerivativeBytes);
       if (!small.byteLength || !large.byteLength) throw new MediaStorageError();
