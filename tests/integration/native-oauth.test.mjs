@@ -347,16 +347,20 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
           assert.ok(task.inputSchema.anyOf.every(({ required }) => required.includes('idempotencyKey')));
         });
       }
+      const boardKey = randomUUID();
+      let boardArguments;
+      let boardReceipt;
       await withMcpSdk('2026-07-28', full.json.access_token, async (sdk) => {
         const run = (name, args, idempotencyKey = randomUUID()) => sdk.callTool({ name,
           arguments: { ...args, idempotencyKey } });
         const project = (await run('project_create', { name: 'MCP fixture project', type: 'shared' })).structuredContent.data;
         const boardArgs = { id: project.id, expectedRevision: 1, name: 'MCP fixture board' };
-        const key = randomUUID();
-        const [created, replay] = await Promise.all([run('board_create', boardArgs, key), run('board_create', boardArgs, key)]);
+        boardArguments = { ...boardArgs, idempotencyKey: boardKey };
+        const [created, replay] = await Promise.all([run('board_create', boardArgs, boardKey), run('board_create', boardArgs, boardKey)]);
         assert.deepEqual(created, replay);
+        boardReceipt = created;
         const board = created.structuredContent.data.board;
-        const clash = await run('board_create', { ...boardArgs, name: 'Changed payload' }, key);
+        const clash = await run('board_create', { ...boardArgs, name: 'Changed payload' }, boardKey);
         assert.equal(JSON.parse(clash.content[0].text).code, 'IDEMPOTENCY_CONFLICT');
         const list = (await run('list_create', { id: board.id, expectedRevision: board.revision,
           name: 'MCP fixture list', kind: 'active' })).structuredContent.data.list;
@@ -424,7 +428,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal((await call(requestCode({ client_id: dynamic[0].id, redirect_uri: 'http://localhost:49152/other' }))).status, 400);
       for (const profile of dynamic) {
         const input = { client_id: profile.id, redirect_uri: profile.callback };
-        const pinnedCode = await approve(await interaction(input), false, false, profile.callback);
+        const pinnedCode = await approve(await interaction(input), profile === dynamic[0], false, profile.callback);
         const otherCallback = new URL(profile.callback);
         if (otherCallback.protocol === 'http:') otherCallback.port = '49154';
         else otherCallback.pathname += '-other';
@@ -432,6 +436,16 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
         const admitted = await token(pinnedCode, input);
         assert.equal(admitted.status, 200, admitted.text);
         assert.equal((await probeMcp({ Authorization: 'Bearer ' + admitted.json.access_token })).status, 200);
+        if (profile === dynamic[0]) {
+          await withMcpSdk('2025-11-25', admitted.json.access_token, async (sdk) => {
+            const replay = await sdk.callTool({ name: 'board_create', arguments: boardArguments });
+            assert.deepEqual(replay.structuredContent, boardReceipt.structuredContent);
+            assert.deepEqual(replay.content, boardReceipt.content);
+            const first = await db.collection('auditEntries').findOne({ generationId, action: 'boards.create' });
+            assert.equal(first.clientId, 'registered:' + clientId);
+            assert.equal(await db.collection('auditEntries').countDocuments({ generationId, action: 'boards.create' }), 1);
+          });
+        }
       }
       assert.equal(metadataReads.length, dynamic.length + 1);
       const own = await call('/api/v1/me/connections', { jar });
@@ -524,6 +538,9 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.deepEqual((await call('/oauth/jwks')).json, publicKeys);
       assert.ok(csrfFrom(await call(pendingRestart, { jar })));
       assert.equal((await probeMcp(bearer)).status, 200);
+      await withMcpSdk('2026-07-28', full.json.access_token, async (sdk) => {
+        assert.deepEqual(await sdk.callTool({ name: 'board_create', arguments: boardArguments }), boardReceipt);
+      });
       const afterRestart = await refresh(beforeRestart.json.refresh_token);
       assert.equal(afterRestart.status, 200);
 
@@ -561,6 +578,22 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       await server.close();
       server = await serve(app(), fixture);
       assert.equal((await probeMcp(bearer)).status, 200);
+
+      // A token that passed transport admission must still match the credential epoch at commit.
+      await withMcpSdk('2026-07-28', full.json.access_token, async (sdk) => {
+        const idempotencyKey = randomUUID();
+        let change;
+        beforeMcpCommand = () => {
+          beforeMcpCommand = undefined;
+          change = gate.runCommand(() => users.updateOne(actor, { $inc: { 'localAuth.credentialsVersion': 1 } }));
+        };
+        const rejected = await sdk.callTool({ name: 'project_create',
+          arguments: { name: 'Former credentials', type: 'shared', idempotencyKey } });
+        await change;
+        assert.equal(JSON.parse(rejected.content[0].text).code, 'UNAUTHENTICATED');
+        assert.equal(await db.collection('commands').countDocuments({ generationId, idempotencyKey }), 0);
+        await gate.runCommand(() => users.updateOne(actor, { $inc: { 'localAuth.credentialsVersion': -1 } }));
+      });
 
       // Verify each durable condition independently of the revocation sweeps.
       const saved = await users.findOne(actor);
