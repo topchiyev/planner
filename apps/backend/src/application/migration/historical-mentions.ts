@@ -13,6 +13,15 @@ const markdown = new Marked({ extensions: [{
     if (!match || !publicIdSchema.safeParse(match[1]).success) return;
     return { type: 'migrationMention', raw: match[0], identifier: match[1] };
   },
+}, {
+  // Marked handles bare web URLs and angle autolinks. Bare mailto: references also stay literal.
+  name: 'migrationMailto',
+  level: 'inline',
+  start: (source) => /mailto:/iu.exec(source)?.index,
+  tokenizer(source) {
+    const match = /^mailto:[^\s<>]+/iu.exec(source);
+    if (match) return { type: 'migrationMailto', raw: match[0] };
+  },
 }] });
 
 function structuredText(text: string) {
@@ -28,15 +37,11 @@ function mentionsInText(text: string) {
   // Marked normalizes container indentation. Probe with distinct UUIDs and retain the original
   // offsets so the rewrite preserves every source byte outside a recognized ID.
   const occupied = new Set(text.match(/00000000-0000-4000-8000-[\da-f]{12}/gu));
-  const urls = [...text.matchAll(/(?:https?:\/\/|mailto:)[^\s<>]+/giu)];
   const probes: { marker: string; token: (typeof candidates)[number] }[] = [];
   const chunks: string[] = [];
   let after = 0;
   let next = 0;
-  let urlIndex = 0;
   for (const token of candidates) {
-    while (urls[urlIndex] && urls[urlIndex].index + urls[urlIndex][0].length <= token.start) urlIndex++;
-    if (urls[urlIndex] && urls[urlIndex].index <= token.start) continue;
     if (!signedInt64TextSchema.safeParse(token.identifier).success) continue;
     let marker: string;
     do { marker = '00000000-0000-4000-8000-' + (next++).toString(16).padStart(12, '0'); }
