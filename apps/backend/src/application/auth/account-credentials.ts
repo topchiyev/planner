@@ -269,6 +269,28 @@ export function createAccountCredentials(
     return { approval, target, time };
   }
 
+  async function applyApproval({ approval, target, time }: Awaited<ReturnType<typeof pendingApproval>>) {
+    const { id, change } = approval;
+    const claim = { id, actorEpoch: approval.actorEpoch, targetEpoch: approval.targetEpoch, change };
+    const identity = { id, approval: claim, actorId: approval.actorId, origin: 'operator', appliedAt: time } as const;
+    const result = { outcome: 'applied', approval: describeApproval(approval) } as const;
+    if (change.action === 'role') {
+      await commit(target, { ...identity, kind: 'role' }, { role: change.role });
+    } else if (change.action === 'availability') {
+      await commit(target, { ...identity, kind: 'availability' }, {
+        disabledAt: change.disabled ? time : null, localAuth: nextAuth(target),
+      });
+    } else {
+      const grant = newToken();
+      const recovery = { id: newPublicId(), digest: tokenDigest(grant), actorEpoch: approval.actorEpoch };
+      await commit(target, { ...identity, kind: 'reset-issued', recovery }, { localAuth: nextAuth(target, null) });
+      return accountApprovalResultSchema.parse({
+        ...result, recovery: { grant, expiresAt: new Date(time.getTime() + recoveryLifetimeMs).toISOString() },
+      });
+    }
+    return accountApprovalResultSchema.parse(result);
+  }
+
   return {
     requestApproval(token: string, actorId: string, targetId: string, revision: number, change: AccountApprovalAction) {
       return gate.runCommand(async () => {
@@ -297,54 +319,37 @@ export function createAccountCredentials(
       return gate.readSnapshot(async () => describeApproval((await pendingApproval(id)).approval));
     },
     async confirmApproval(id: string) {
-      const expected = await gate.readSnapshot(async () => {
-        const { approval } = await pendingApproval(id);
+      const admission = await gate.runCommand(async () => {
+        const checked = await pendingApproval(id);
+        const { approval } = checked;
         if (approval.change.action === 'recovery' || !await assertWorkspaceWritable(database, installationId, approval.generationId)) {
-          return null;
+          return { result: await applyApproval(checked) };
         }
-        return approval;
+        return { approval };
       });
-      if (expected) {
-        const expectation = accessApprovalExpectation(expected);
-        const authorize = async (context: { actorId: string; generationId: string }) => {
-          const { approval } = await pendingApproval(id);
-          if (context.generationId !== approval.generationId || context.actorId !== approval.actorId
-            || !isDeepStrictEqual(accessApprovalExpectation(approval), expectation)) throw new AccountActionError('approval');
-        };
-        // Reserve the exact access change before the protected transition writes any credential material.
-        const journal = new CommandJournal(gate, database, installationId, { operations: {
-          [accountAccessApprovalOperation]: {
-            normalize: () => expectation,
-            authorize,
-            plan: () => ({ effects: [], result: null, audit: {
-              resourceType: 'account', resourceId: expected.userId, action: accountAccessApprovalOperation, origin: 'operator',
-            } }),
-          },
-        } });
-        await journal.execute({ operationId: accountAccessApprovalOperation, actorId: expected.actorId, idempotencyKey: id, input: null });
-      }
+      if (admission.result) return admission.result;
+      const expected = admission.approval;
+      const expectation = accessApprovalExpectation(expected);
+      const authorize = async (context: { actorId: string; generationId: string }) => {
+        const { approval } = await pendingApproval(id);
+        if (context.generationId !== approval.generationId || context.actorId !== approval.actorId
+          || !isDeepStrictEqual(accessApprovalExpectation(approval), expectation)) throw new AccountActionError('approval');
+      };
+      // Reserve the exact access change before the protected transition writes any credential material.
+      const journal = new CommandJournal(gate, database, installationId, { operations: {
+        [accountAccessApprovalOperation]: {
+          normalize: () => expectation,
+          authorize,
+          plan: () => ({ effects: [], result: null, audit: {
+            resourceType: 'account', resourceId: expected.userId, action: accountAccessApprovalOperation, origin: 'operator',
+          } }),
+        },
+      } });
+      await journal.execute({ operationId: accountAccessApprovalOperation, actorId: expected.actorId, idempotencyKey: id, input: null });
       return gate.runCommand(async () => {
-        const { approval, target, time } = await pendingApproval(id);
-        const { change } = approval;
-        if (change.action !== 'recovery') await assertAccountAccessApproval(database, installationId, approval);
-        const claim = { id, actorEpoch: approval.actorEpoch, targetEpoch: approval.targetEpoch, change };
-        const identity = { id, approval: claim, actorId: approval.actorId, origin: 'operator', appliedAt: time } as const;
-        const result = { outcome: 'applied', approval: describeApproval(approval) } as const;
-        if (change.action === 'role') {
-          await commit(target, { ...identity, kind: 'role' }, { role: change.role });
-        } else if (change.action === 'availability') {
-          await commit(target, { ...identity, kind: 'availability' }, {
-            disabledAt: change.disabled ? time : null, localAuth: nextAuth(target),
-          });
-        } else {
-          const grant = newToken();
-          const recovery = { id: newPublicId(), digest: tokenDigest(grant), actorEpoch: approval.actorEpoch };
-          await commit(target, { ...identity, kind: 'reset-issued', recovery }, { localAuth: nextAuth(target, null) });
-          return accountApprovalResultSchema.parse({
-            ...result, recovery: { grant, expiresAt: new Date(time.getTime() + recoveryLifetimeMs).toISOString() },
-          });
-        }
-        return accountApprovalResultSchema.parse(result);
+        const checked = await pendingApproval(id);
+        await assertAccountAccessApproval(database, installationId, checked.approval);
+        return applyApproval(checked);
       });
     },
     changePassword(token: string, actorId: string, input: PasswordChange) {
