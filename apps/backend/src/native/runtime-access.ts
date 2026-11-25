@@ -63,7 +63,7 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
           && /^[a-f0-9]{64}$/u.test(restored.fingerprint) && installation.setup.pendingAction === 'complete'
           ? { kind: 'ready' } : { kind: 'unavailable', reason: 'setup' };
       }
-      if (config.mode === 'import') return inspectColdMigrationAccess(database, config.installationId, new Date());
+      if (config.mode === 'import') return await inspectColdMigrationAccess(database, config.installationId, new Date());
       const binding = firstAdminBinding(installation);
       if (binding?.published) return { kind: 'ready' };
       if (installation.activeGenerationId !== null) return { kind: 'unavailable', reason: 'schema-or-recovery' };
