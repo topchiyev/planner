@@ -83,10 +83,18 @@ type MetadataTransport = { resolve: typeof resolvePublicHost; read: typeof readP
 const network: MetadataTransport = { resolve: resolvePublicHost, read: readPinnedResponse };
 
 const loopback = /^(http:\/\/(?:127\.0\.0\.1|localhost))(?::([1-9]\d{0,4}))?(\/[^?#]*)$/u;
+const dnsLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+function literalRedirectHost(hostname: string) {
+  if (hostname.startsWith('[') && hostname.endsWith(']')) return isIP(hostname.slice(1, -1)) === 6;
+  const dns = hostname.replace(/\.$/u, '');
+  return dns.length <= 253 && dns.split('.').every((label) => dnsLabel.test(label));
+}
+
 function redirectShape(value: string) {
   const url = URL.parse(value);
   return !!url && url.href === value && !url.username && !url.password && !url.hash && !value.includes('#')
-    && !/[\p{Cc}\\]/u.test(value) && (url.protocol === 'https:' || loopback.test(value));
+    && !/[\p{Cc}\\]/u.test(value)
+    && (url.protocol === 'https:' ? literalRedirectHost(url.hostname) : loopback.test(value));
 }
 const clientName = z.string().trim().min(1).max(80).refine((value) => !/[\p{Cc}\p{Cf}]/u.test(value));
 const registration = z.strictObject({

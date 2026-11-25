@@ -10,7 +10,7 @@ import { Secret, TOTP } from 'otpauth';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
 import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
-import { createOAuthClientRegistry } from '../../apps/backend/dist/application/oauth/clients.js';
+import { createOAuthClientRegistry, parseOAuthClientRegistrations } from '../../apps/backend/dist/application/oauth/clients.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
 import { createReadMcpSurface } from '../../apps/backend/dist/application/mcp/read-surface.js';
@@ -102,6 +102,26 @@ async function serve(app, fixture) {
     close: async () => { await new Promise((resolve) => server.close(resolve)); await app.close(); },
   };
 }
+
+test('pre-registered OAuth callbacks require literal HTTPS or loopback origins', () => {
+  const registration = (redirect_uri) => ({ version: 1, clients: [{ client_id: 'configured-browser',
+    client_name: 'Configured browser', redirect_uris: [redirect_uri] }] });
+  for (const uri of [
+    'https://oauth.example.test:8443/callback', 'https://192.0.2.17/callback', 'https://[2001:db8::17]:8443/callback',
+    'http://127.0.0.1:49153/callback', 'https://callback.example.test./callback',
+  ]) {
+    const clients = parseOAuthClientRegistrations(registration(uri));
+    assert.deepEqual(clients[0].redirect_uris, [uri]);
+    assert.doesNotThrow(() => createOAuthClientRegistry(clients));
+  }
+  for (const uri of [
+    'https://*.example.test/callback', 'https://example;policy.test/callback', 'https://callback!.example.test/callback',
+  ]) {
+    assert.equal(new URL(uri).href, uri);
+    assert.throws(() => parseOAuthClientRegistrations(registration(uri)));
+    assert.throws(() => createOAuthClientRegistry(registration(uri).clients));
+  }
+});
 
 test('native OAuth binds protected discovery, browser MFA and consent to one resource and one code exchange',
   { timeout: 75_000 }, async () => withFixtureMongo(async (fixture) => {
