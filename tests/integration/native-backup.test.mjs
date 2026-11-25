@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createSecretKey, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -12,11 +12,15 @@ import { archiveRows, digestRawRows } from '../../apps/backend/dist/application/
 import { createBackup } from '../../apps/backend/dist/application/backup/capture.js';
 import { inspectBackup, stageRestore, activateRestore } from '../../apps/backend/dist/application/backup/restore.js';
 import { openRestoreMedia } from '../../apps/backend/dist/application/backup/restore-media.js';
+import { createTotpSecret } from '../../apps/backend/dist/application/auth/mfa-crypto.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
 import { commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
-import { assertWorkspaceWritable, inspectMigrationCutover } from '../../apps/backend/dist/application/migration/cutover.js';
+import { activateVerifiedMigration } from '../../apps/backend/dist/application/migration/activation.js';
+import { bindMissingOriginals } from '../../apps/backend/dist/application/migration/approval.js';
+import { completedMigrationTable, importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
+import { assertWorkspaceWritable, inspectMigrationCutover, rollbackMigration } from '../../apps/backend/dist/application/migration/cutover.js';
 import { readInstallation } from '../../apps/backend/dist/storage/schema.js';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
@@ -326,3 +330,58 @@ test('restores a migrated workspace with its exact read-only gate or first-write
     } finally { await source.close(); }
   }));
 });
+
+test('a prior active route requires its exact retained backup and a matching live workspace before publication',
+  { timeout: 100_000 }, async () => {
+    await scratch((root) => withFixtureMongo(async (mongo) => {
+      const source = await sourceFixture(root, mongo, 'import');
+      const { f, key } = source;
+      const { db, generationId: priorGeneration, stagedGenerationId: generationId, installationId } = f;
+      try {
+        const setup = { mode: 'import', pendingAction: 'complete', enrollmentGenerationId: null };
+        await db.collection('installation').updateOne({ _id: 'installation' }, { $set: { setup } });
+        const factorId = randomUUID();
+        const { encrypted } = createTotpSecret(createSecretKey(key), { installationId, generationId, userId: ids.admin, factorId }, 'Fixture');
+        const user = await db.collection('users').findOneAndUpdate({ _id: workspaceKey(generationId, ids.admin) }, { $set: {
+          'localAuth.mfa': 'totp', 'localAuth.factor': { id: factorId, encrypted, greatestCounter: 0, recoveryDigests: [] },
+        } }, { returnDocument: 'after' });
+        const runId = randomUUID();
+        const fingerprint = { sha256: 'a'.repeat(64) };
+        const manifestSha256 = 'b'.repeat(64);
+        const reportSha256 = 'c'.repeat(64);
+        const cursors = migrationCursors(randomBytes(32));
+        const position = { pass: 'media', table: completedMigrationTable, lastSourceId: null };
+        const run = { ...importRunKey({ runId, generationId, installationId }), state: 'verified', fingerprint, manifestSha256,
+          verification: { reportSha256, ...bindMissingOriginals([]) }, checkpoint: { ...position,
+            token: cursors.seal({ runId, generationId, fingerprint: fingerprint.sha256, ...position }, null) } };
+        run.stageCompletion = cursors.sealCompletion(run);
+        await db.collection('importRuns').insertOne(run);
+        const backup = await source.backup();
+        const request = { verification: { runId, generationId, manifestSha256, fingerprintSha256: fingerprint.sha256,
+          reportSha256, missingOriginals: 0, approvalSha256: null }, mfaKeyDigest: digest(key),
+          administrator: { userId: ids.admin, revision: user.revision, credentialsVersion: user.localAuth.credentialsVersion, factorId },
+          prior: { generationId: priorGeneration, setup }, priorBackup: {
+            path: join(source.src.backups, backup.backupId), owner, receipt: { backupId: backup.backupId, manifestSha256: backup.manifestSha256 },
+          } };
+        await f.gate.closeAndDrain();
+        const lease = acquireWriterDirectory(source.src.writer, owner, owner);
+        try {
+          const activate = (expected = request) => activateVerifiedMigration(db, lease, installationId, cursors, expected);
+          await assert.rejects(activate({ ...request, priorBackup: undefined }), { fault: 'activation-conflict' });
+          await assert.rejects(activate({ ...request, priorBackup: { ...request.priorBackup,
+            receipt: { ...request.priorBackup.receipt, backupId: randomUUID() } } }), { fault: 'activation-conflict' });
+          const modified = await f.insert('labels', randomUUID(), { boardId: ids.privateBoard, name: 'Write after backup' });
+          await assert.rejects(activate(), { fault: 'activation-conflict' });
+          assert.equal((await readInstallation(db, installationId)).activeGenerationId, priorGeneration);
+          await db.collection('labels').deleteOne({ _id: workspaceKey(priorGeneration, modified) });
+          const activation = await activate();
+          assert.equal(activation.state, 'activeReadOnly');
+          assert.equal(activation.binding.rollback.backupId, backup.backupId);
+          assert.deepEqual(await activate(), activation);
+          const rolledBack = await rollbackMigration(db, lease, installationId, generationId);
+          assert.equal(rolledBack.state, 'rolledBack');
+          assert.equal((await readInstallation(db, installationId)).activeGenerationId, priorGeneration);
+        } finally { lease.release(); }
+      } finally { await source.close(); }
+    }));
+  });
