@@ -270,6 +270,8 @@ Run the [operator acceptance test](../tests/release/native-setup.sh) for each se
 
 Run the [HTTP and proxy acceptance test](../tests/release/native-http.sh) in a separate clean offline guest. Place the signed candidate, test public key, sample nginx configuration and `native-http-fixture.mjs` at the ISO root. Put the two nginx packages pinned by the test in `nginx/`. The test uses a guest-only event source to measure streaming through TLS.
 
+For the installed [OAuth client smoke test](../tests/release/native-http.sh), use the same signed native HTTP media and add `native-oauth-smoke.mjs`, `noble-media-closure.sha256`, and the pinned Pillow packages in `pillow/`. Pass `--oauth-smoke` as the second argument. The offline guest uses a synthetic root-owned static client and exercises HTTPS discovery, explicit offline consent, exact public code exchange, refresh, and account-owned disconnection.
+
 Run the [writer ownership acceptance test](../tests/release/native-writer.sh) in a clean offline guest with the signed candidate, test public key and `release.py` at the ISO root. Place the signed pre-schema package and its test public key in `previous/`. The test exercises upgrade contention, the systemd backend's held inode, crash recovery and failed launch cleanup.
 
 Run the [storage upgrade acceptance test](../tests/release/native-storage.sh) in a clean offline guest. Pair the signed current candidate at the root of the read-only ISO with the signed schema-0 operator build under `previous/`. The test uses the installed operator commands and the guest's authenticated Planner database.

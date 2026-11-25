@@ -5,6 +5,8 @@ trap 'printf "Native HTTP acceptance failed on line %s.\n" "$LINENO" >&2' ERR
 umask 077
 
 media=${1:?Pass the read-only qualification media mount point}
+profile=${2:-}
+[ -z "$profile" ] || [ "$profile" = --oauth-smoke ]
 release=/opt/planner/current
 node=$release/runtime/node/bin/node
 work=$(mktemp -d /var/tmp/planner-native-http.XXXXXX)
@@ -45,6 +47,10 @@ PY
 c125a2ad6bfd25b6fdf92e3534a3facbf35180e05a054dcb84f68b63fc38227e  nginx_1.24.0-2ubuntu7.21_amd64.deb
 HASHES
 )
+if [ "$profile" = --oauth-smoke ]; then
+    (cd "$media/pillow" && sha256sum --strict -c "$media/noble-media-closure.sha256")
+    dpkg -i "$media/pillow/"*.deb
+fi
 dpkg -i "$package"
 dpkg -i "$media/nginx/"*.deb
 plannerctl preflight --public-url "$origin" --json > "$work/preflight.json"
@@ -74,6 +80,18 @@ check_access() {
     check_status | python3 -c 'import json,sys; v=json.load(sys.stdin); assert v == {"version":"0.1.0","access":json.loads(sys.argv[1])},v' "$1"
 }
 status_code() { "$@" -o /dev/null -w '%{http_code}'; }
+
+if [ "$profile" = --oauth-smoke ]; then
+    [ -z "$(ip route show default)" ]
+    cat > "$work/oauth-clients.json" <<'JSON'
+{"version":1,"clients":[{"client_id":"native-cli","client_name":"Offline synthetic client","redirect_uris":["http://127.0.0.1/callback"],"loopbackPorts":true}]}
+JSON
+    install -o root -g planner -m 0640 "$work/oauth-clients.json" /etc/planner/oauth-clients.json
+    plannerctl restart --json > "$work/oauth-restarted.json"
+    "$node" "$media/native-oauth-smoke.mjs" "$work/setup.json"
+    printf 'NATIVE OAUTH CLIENT ACCEPTANCE PASSED\n'
+    exit
+fi
 
 [ "$(ss -H -ltn 'sport = :27430' | awk '{print $4}')" = '127.0.0.1:27430' ]
 [ "$(stat -c '%U:%G:%a' /run/planner)" = 'planner:planner:750' ]
