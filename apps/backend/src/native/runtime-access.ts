@@ -74,7 +74,7 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
           await assertMigrationJournalSafe(database, installation, installation.activeGenerationId);
           return { kind: 'ready' };
         }
-        return inspectColdMigrationAccess(database, config.installationId, new Date());
+        return await inspectColdMigrationAccess(database, config.installationId, new Date());
       }
       const binding = firstAdminBinding(installation);
       if (binding?.published) return { kind: 'ready' };

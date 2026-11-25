@@ -49,7 +49,7 @@ systemctl disable planner.service
 systemctl is-active --quiet planner.service
 bootstrap --source-user 101 > "$work/issued.json"
 systemctl is-active --quiet planner.service
-[ "$(systemctl is-enabled planner.service)" = disabled ]
+[ "$(systemctl is-enabled planner.service || true)" = disabled ]
 systemctl stop planner.service
 bootstrap --source-user 101 > "$work/replay.json"
 ! systemctl is-active --quiet planner.service
@@ -64,6 +64,15 @@ assert replay == {'status': 'already-issued', 'userId': issued['userId'], 'expir
 (work/'grant').write_text(issued['grant'] + '\n')
 PY2
 systemctl start planner.service
+http_status=000
+for _ in $(seq 1 40); do
+    http_status=$(curl --silent --max-time 1 --cacert "$cert" --resolve planner.example.test:443:127.0.0.1 \
+        --output /dev/null --write-out '%{http_code}' https://planner.example.test/account-recovery || true)
+    [ "$http_status" != 200 ] || break
+    sleep 0.25
+done
+printf 'Native account-recovery route returned HTTP %s.\n' "$http_status"
+[ "$http_status" = 200 ]
 certificate_key=$(openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER | \
     openssl dgst -sha256 -binary | openssl base64 -A)
 chgrp nogroup "$work" "$work/grant"
@@ -74,7 +83,7 @@ if [ -n "$cutover" ]; then
     install -o nobody -g nogroup -m 0600 /dev/null "$work/recovery-code"
     cutover_args=("$work/recovery-code")
 fi
-runuser -u nobody -- env LD_LIBRARY_PATH="$media/browser-libs" "$node" "$media/native-mfa-browser.mjs" \
+runuser -u nobody -- env -u NODE_EXTRA_CA_CERTS LD_LIBRARY_PATH="$media/browser-libs" "$node" "$media/native-mfa-browser.mjs" \
     "$media/chromium/chrome-headless-shell" "$certificate_key" "$work/grant" --migration-recovery "${cutover_args[@]}"
 systemctl stop planner.service
 "$node" --input-type=module - "$run_id" <<'JS'
