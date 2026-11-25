@@ -17,6 +17,7 @@ export const migrationMediaTables = ['attachment', 'background_image', 'uploaded
 type MediaTable = typeof migrationMediaTables[number];
 export type MigrationMediaRow = { [K in MediaTable]: { table: K; row: SourceRow<K> } }[MediaTable];
 export type MigrationMediaTarget = { store: PrivateMediaStore; decode: MediaDecoder; signal?: AbortSignal };
+type MigrationMediaVerification = { signal?: AbortSignal; verifyBlob(identity: BlobIdentity): Promise<void> };
 
 type UploadType = 'attachment' | 'backgroundImage' | 'userAvatar';
 type SourceImage = { width: number; height: number; thumbnailsExtension: string };
@@ -110,8 +111,7 @@ type TargetFile = { availability: typeof availableMedia; blobDigest: string; byt
   | { availability: typeof unavailableMedia; blobDigest: null };
 
 export function createMigrationMediaStage(records: ImportRecords, snapshot: VerifiedSourceSnapshot, lease: WriterLease,
-  target: MigrationMediaTarget) {
-  const { store, decode } = target;
+  target: MigrationMediaTarget | MigrationMediaVerification) {
   const signal = target.signal ?? new AbortController().signal;
   const fallback = snapshot.capture.capturedAt;
 
@@ -123,23 +123,29 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
     const { originalKey, derivativeKeys, ...provenance } = file;
     const original = verifiedAsset(snapshot, originalKey, 'original');
     const derivatives = derivativeKeys.map((key) => verifiedAsset(snapshot, key, 'derivative'));
-    // The source variants remain evidence. Planner creates PNG variants at its own bounds from the original.
-    for (const derivative of derivatives) {
-      if (derivative.sha256 !== null) await snapshot.readAsset(derivative.key, signal, async (bytes) => {
-        for await (const _chunk of bytes) { /* Verify the complete immutable response. */ }
-      });
-    }
     const state = original.sha256 === null ? unavailableMedia : availableMedia;
     const persist = async (fields: TargetFile) => {
       await records.recordMediaProvenance(table, sourceId, { ...provenance, kind: 'file', original, derivatives, state });
       await writeReference(fields);
     };
     const { byteLength, sha256 } = original;
+    if ('verifyBlob' in target) {
+      if (sha256 === null || byteLength === null) return persist({ availability: unavailableMedia, blobDigest: null });
+      await target.verifyBlob({ digest: sha256, byteLength });
+      return persist({ availability: availableMedia, blobDigest: sha256, byteLength });
+    }
+
+    // The source variants remain evidence. Planner creates PNG variants at its own bounds from the original.
+    for (const derivative of derivatives) {
+      if (derivative.sha256 !== null) await snapshot.readAsset(derivative.key, signal, async (bytes) => {
+        for await (const _chunk of bytes) { /* Verify the complete immutable response. */ }
+      });
+    }
     if (sha256 === null || byteLength === null) {
       return persist({ availability: unavailableMedia, blobDigest: null });
     }
 
-    const stage = await store.stage();
+    const stage = await target.store.stage();
     let unpin: (() => void) | undefined;
     try {
       const { identity, prefix } = await snapshot.readAsset(original.key, signal,
@@ -151,7 +157,7 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
       if (!format && file.uploadType !== 'attachment') {
         throw new MigrationError('asset-integrity', 'The verified profile or background asset is not a supported image.');
       }
-      const variants = format ? await decode(stage, format, signal) : null;
+      const variants = format ? await target.decode(stage, format, signal) : null;
       const parts: { part: MediaPart; identity: BlobIdentity }[] = [{ part: 'original', identity }];
       if (variants) parts.push({ part: 'small', identity: variants.small }, { part: 'large', identity: variants.large });
       signal.throwIfAborted();
@@ -202,7 +208,10 @@ export function createMigrationMediaStage(records: ImportRecords, snapshot: Veri
       }
       case 'user_account': {
         const { row } = entry;
-        if (row.avatar === null) return;
+        if (row.avatar === null) {
+          if ('verifyBlob' in target) await records.assertNoAvatar(id);
+          return;
+        }
         const data = object(row.avatar.value);
         const file = protectedFile('userAvatar', sourceKey('uploaded_file', data.uploadedFileId), extension(data.extension), nonnegative(data.size));
         const avatarId = nameBasedUuid(id, 'avatar');
