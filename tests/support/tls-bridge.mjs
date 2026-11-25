@@ -10,10 +10,11 @@ export async function tlsBridge(directory, startProxy) {
   const key = join(directory, 'tls-key');
   const cert = join(directory, 'tls-cert');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-    '-subj', '/CN=127.0.0.1', '-keyout', key, '-out', cert], { stdio: 'ignore' });
+    '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', key, '-out', cert], { stdio: 'ignore' });
   let proxy;
   let origin;
-  const server = createServer({ key: await readFile(key), cert: await readFile(cert) }, (incoming, reply) => {
+  const certificate = await readFile(cert);
+  const server = createServer({ key: await readFile(key), cert: certificate }, (incoming, reply) => {
     const forwarded = request({ socketPath: proxy.path, path: incoming.url, method: incoming.method,
       headers: { ...incoming.headers, ...proxyHeaders(origin) } }, (response) => {
       reply.writeHead(response.statusCode, response.headers);
@@ -30,7 +31,7 @@ export async function tlsBridge(directory, startProxy) {
   origin = 'https://127.0.0.1:' + server.address().port;
   try { proxy = await startProxy(origin); }
   catch (error) { server.close(); throw error; }
-  return { origin, close: async () => {
+  return { origin, certificate, close: async () => {
     await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
     await proxy.close();
   } };
