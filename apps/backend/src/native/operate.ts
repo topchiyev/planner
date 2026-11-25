@@ -20,6 +20,7 @@ import { inspectMigration, migrationPath, parseMigrationInput, withMigrationSnap
 import { prepareMigration } from '../application/migration/prepare.js';
 import { collectMigrationVerification } from '../application/migration/verification.js';
 import { firstAdminBinding } from '../application/auth/first-admin.js';
+import { issueMigrationAdminRecovery, migrationAdminRequest } from '../application/auth/migration-admin.js';
 import { WriterOwnershipError, type WriterLease } from '../application/command-gate/writer-lease.js';
 import {
   currentStorageSchema, migrateStorageSchema, readInstallation, requireCurrentSchema, StorageSchemaError, verifyStorageSchema,
@@ -635,6 +636,29 @@ async function migrationVerification(runId: string, verify: boolean) {
   });
 }
 
+async function bootstrapMigrationAdmin(input: ReturnType<typeof migrationAdminRequest.parse>) {
+  return withInstallationLock(async (owner) => {
+    const config = readInstallationConfig(owner.appGroup);
+    const restore = readRestoreIntent(owner.receipt);
+    verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
+    if (!config || config.mode !== 'import' || restore) throw new MigrationError('target-setup', 'Select a protected import installation.');
+    const client = await connectOwnedDatabase(config, owner.appGroup);
+    try {
+      const directory = await openNativeMigrationDirectory();
+      try {
+        const db = client.db(databaseName);
+        const { run } = await readProtectedMigrationRun(db, config.installationId, directory, migrationOwner, input.runId);
+        const report = await readMigrationVerification(directory, migrationOwner, run);
+        if (report.summary.outcome !== 'verified') throw new MigrationError('target-setup', 'Select a verified inactive migration run.');
+        const wasRunning = appListening(config.appPort, true);
+        if (wasRunning) systemctl('stop', app);
+        try { return await withStoppedWriter((writer) => issueMigrationAdminRecovery(db, writer, run, input)); }
+        finally { if (wasRunning) await startApplication(config.appPort); }
+      } finally { await directory.close(); }
+    } finally { await client.close(); }
+  });
+}
+
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === 'package-remove' && args.length === 0) {
@@ -666,6 +690,16 @@ try {
     if (args[1] === 'json') console.log(JSON.stringify(output));
     else console.log(`Run ${result.summary.runId} ${result.summary.outcome}. Report ${result.reportSha256}. Missing originals ${result.summary.assets.missingOriginals}.`);
     if (verify && result.summary.outcome === 'blocked') process.exitCode = 1;
+  } else if (action === 'migration-bootstrap-admin' && args.length === 2 && (args[1] === 'text' || args[1] === 'json')) {
+    const result = await bootstrapMigrationAdmin(migrationAdminRequest.parse(JSON.parse(args[0])));
+    if (args[1] === 'json') console.log(JSON.stringify(result));
+    else {
+      console.log(`Administrator ${result.userId} recovery expires at ${result.expiresAt}.`);
+      if (result.status === 'issued') {
+        console.log('Give this grant privately to the designated administrator for /account-recovery.');
+        console.log(result.grant);
+      } else console.log('The grant was already issued. Use --rotate to replace an unused or incomplete grant.');
+    }
   } else if (action === 'backup-create' && args.length === 1) {
     const result = await withInstallationLock(localBackupRequest);
     console.log(args[0] === 'json' ? JSON.stringify(result) : `Backup ${result.directory} verified with manifest ${result.manifestSha256}.`);

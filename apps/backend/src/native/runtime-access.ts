@@ -1,7 +1,9 @@
 import { generationIdSchema } from '@planner/contracts/storage';
 import type { NativeInstallationConfig } from '@planner/contracts/native';
+import type { Db } from 'mongodb';
 import { readStagedMfaEnrollment } from '../application/auth/mfa-account.js';
 import { firstAdminBinding, hasFirstAdminGrant } from '../application/auth/first-admin.js';
+import { canRecoverMigrationAdmin } from '../application/auth/migration-admin.js';
 import { StorageSchemaError, verifyStorageSchema } from '../storage/schema.js';
 import { checkDirectory } from './mongo-host.js';
 import { databaseName } from './mongo-identity.js';
@@ -9,8 +11,15 @@ import { connectConfiguredNativeMongo } from './mongo-readiness.js';
 
 export type RuntimeAccess =
   | { kind: 'ready' }
-  | { kind: 'enrollment'; step: 'recovery' | 'mfa' }
+  | { kind: 'enrollment'; step: 'recovery' | 'account-recovery' | 'mfa' }
   | { kind: 'unavailable'; reason: 'database' | 'staging' | 'setup' | 'migration' | 'schema-or-recovery' | 'probe' };
+
+export async function inspectColdMigrationAccess(database: Db, installationId: string, time: Date): Promise<RuntimeAccess> {
+  if (await canRecoverMigrationAdmin(database, installationId, time)) return { kind: 'enrollment', step: 'account-recovery' };
+  return await readStagedMfaEnrollment(database, installationId, time)
+    ? { kind: 'enrollment', step: 'mfa' }
+    : { kind: 'unavailable', reason: 'migration' };
+}
 
 export function boundedRuntimeProbe(check: () => Promise<RuntimeAccess>, timeoutMs = 3_000) {
   const unavailable = { kind: 'unavailable', reason: 'probe' } as const;
@@ -54,12 +63,7 @@ export async function inspectRuntimeAccess(config: NativeInstallationConfig): Pr
           && /^[a-f0-9]{64}$/u.test(restored.fingerprint) && installation.setup.pendingAction === 'complete'
           ? { kind: 'ready' } : { kind: 'unavailable', reason: 'setup' };
       }
-      if (config.mode === 'import') {
-        const staged = await readStagedMfaEnrollment(database, config.installationId, new Date());
-        return staged
-          ? { kind: 'enrollment', step: 'mfa' }
-          : { kind: 'unavailable', reason: 'migration' };
-      }
+      if (config.mode === 'import') return inspectColdMigrationAccess(database, config.installationId, new Date());
       const binding = firstAdminBinding(installation);
       if (binding?.published) return { kind: 'ready' };
       if (installation.activeGenerationId !== null) return { kind: 'unavailable', reason: 'schema-or-recovery' };

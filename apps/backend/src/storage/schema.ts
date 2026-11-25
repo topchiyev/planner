@@ -3,6 +3,7 @@ import {
   generationIdSchema, installationIdSchema, normalizedEmailSchema, parseSourceIdentity, publicIdSchema, revisionSchema,
 } from '@planner/contracts/storage';
 import { MongoServerError, type Db, type Filter } from 'mongodb';
+import type { MigrationAdminBinding } from '../application/auth/migration-admin-grant.js';
 import { ownedIndexes, workspaceCollections, type OwnedIndex, type WorkspaceCollection } from './catalog.js';
 import { isStoredDate, readLongField, readStoredInstant, signedLongFields, storedInstantFields, workspaceKey } from './identity.js';
 
@@ -29,6 +30,7 @@ export interface InstallationDocument {
     pendingAction: 'first-admin-enrollment' | 'migration-preflight' | 'complete';
     enrollmentGenerationId: string | null;
     firstAdminGrantIssuedAt?: Date;
+    migrationAdminRecovery?: MigrationAdminBinding;
     stagedMfaEnrollment?: {
       userId: string;
       recoveryId: string;
