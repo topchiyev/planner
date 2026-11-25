@@ -7,13 +7,13 @@ import { z } from 'zod';
 
 const pins = new Map([
   ['https://chatgpt.com/oauth/codex/client.json', {
-    name: 'Codex', redirects: ['http://127.0.0.1/callback', 'http://localhost/callback'], loopbackPorts: true,
+    name: 'Codex', auditId: 'codex', redirects: ['http://127.0.0.1/callback', 'http://localhost/callback'], loopbackPorts: true,
   }],
   ['https://claude.ai/oauth/claude-code-client-metadata', {
-    name: 'Claude Code', redirects: ['http://localhost/callback', 'http://127.0.0.1/callback'], loopbackPorts: true,
+    name: 'Claude Code', auditId: 'claude-code', redirects: ['http://localhost/callback', 'http://127.0.0.1/callback'], loopbackPorts: true,
   }],
   ['https://claude.ai/oauth/mcp-oauth-client-metadata', {
-    name: 'Claude connector', redirects: ['https://claude.ai/api/mcp/auth_callback'], loopbackPorts: false,
+    name: 'Claude connector', auditId: 'claude-connector', redirects: ['https://claude.ai/api/mcp/auth_callback'], loopbackPorts: false,
   }],
 ]);
 const metadataTimeoutMs = 2_500;
@@ -181,6 +181,7 @@ export function createOAuthClientRegistry(registrations: readonly PlannerOAuthCl
   return {
     resolve,
     allowsId: (id: string) => pins.has(id) || staticClients.has(id),
+    auditId: (id: string) => pins.get(id)?.auditId ?? (staticClients.has(id) ? `registered:${id}` : null),
     staticClients: [...staticClients.values()].map(providerClient),
     cacheDuration: { min: cacheSeconds, max: cacheSeconds },
     allowFetch: (id: string) => pins.has(id),

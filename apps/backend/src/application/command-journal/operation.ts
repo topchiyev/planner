@@ -32,6 +32,8 @@ export interface CommandPlanningContext extends CommandContext {
 }
 
 export interface JournalOperation {
+  // Resolve current parent identity for operations whose stable input includes a server-side relationship.
+  bindInput?(context: CommandContext, request: unknown): Promise<unknown>;
   // Return only journal-safe normalized semantics, including submitted revision preconditions.
   normalize(input: unknown): JournalValue;
   // Check current actor and resource access. Original revision checks belong in plan.
