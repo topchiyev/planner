@@ -239,6 +239,7 @@ export function registerNativeOAuthRoutes(app: FastifyInstance, oauth: NativeOAu
       if (fields.size !== params.size) return reply.code(400).send(invalid);
       const flow = params.get('grant_type');
       if (flow !== 'authorization_code' && flow !== 'refresh_token') return reply.code(400).send({ error: 'unsupported_grant_type' });
+      if (flow === 'authorization_code' && !params.get('redirect_uri')) return reply.code(400).send(invalid);
       const allowed = flow === 'authorization_code' ? ['code', 'code_verifier', 'redirect_uri'] : ['refresh_token', 'scope'];
       for (const field of ['grant_type', 'client_id', 'resource', ...allowed]) fields.delete(field);
       if (fields.size || request.headers.authorization !== undefined) return reply.code(400).send(invalid);

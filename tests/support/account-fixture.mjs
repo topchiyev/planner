@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createAccountCredentials, recoverAccountChanges } from '../../apps/backend/dist/application/auth/account-credentials.js';
 import { createAccountDirectory } from '../../apps/backend/dist/application/auth/account-directory.js';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
+import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
 import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
@@ -14,6 +15,7 @@ import { acquireWriterDirectory } from '../../apps/backend/dist/application/comm
 import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { buildApp } from '../../apps/backend/dist/build-app.js';
 import { startAdminSocket } from '../../apps/backend/dist/native/admin-socket.js';
+import { createNativeOAuthRuntime } from '../../apps/backend/dist/native/oauth-routes.js';
 import { startProxySocket } from '../../apps/backend/dist/native/proxy-socket.js';
 import { createWorkspaceReader } from '../../apps/backend/dist/native/workspace-routes.js';
 import { workspaceKey } from '../../apps/backend/dist/storage/identity.js';
@@ -67,14 +69,19 @@ export async function accountFixture({ db, directory }) {
   const readAccess = async () => gate.ready ? { kind: 'ready' } : { kind: 'unavailable', reason: 'schema-or-recovery' };
   const sessions = () => createBrowserSessions(db, installationId, gate, hasher, now);
 
-  async function startBrowser(origin) {
+  async function startBrowser(origin, { oauth = false } = {}) {
+    const key = createSecretKey(randomBytes(32));
     const proxyDir = join(directory, 'proxy');
     await mkdir(proxyDir);
     await chmod(proxyDir, 0o711);
     const app = buildApp({
       frontendRoot: fileURLToPath(new URL('../../apps/frontend/dist/', import.meta.url)),
       native: { origin, proxyToken, readAccess, workspace: createWorkspaceReader(db, installationId, gate, cursors, now),
-        auth: { confirm: async () => false, ...sessions(), accountManagement: accountServices() } },
+        ...(oauth && { oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db)) }),
+        auth: { confirm: async () => false, ...sessions(), accountManagement: accountServices(),
+          ...(oauth && { mfa: { manage: createMfaManagement(db, installationId, gate, key, hasher, now),
+            verify: async () => null } }),
+        } },
     });
     const closeProxy = await startProxySocket(proxyDir, app);
     return { path: join(proxyDir, 'http.sock'), close: async () => { await closeProxy(); await app.close(); } };

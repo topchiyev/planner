@@ -245,6 +245,10 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       for (const overrides of [{ code_verifier: 'x'.repeat(43) }, { redirect_uri: redirect + '?wrong=1' }]) {
         assert.equal((await token(authorizationCode, overrides)).status, 400);
       }
+      const omittedRedirect = await post('/oauth/token', { grant_type: 'authorization_code', client_id: clientId,
+        code: authorizationCode, code_verifier: verifier, resource }, undefined, form, {});
+      assert.equal(omittedRedirect.status, 400);
+      assert.equal(omittedRedirect.json.error, 'invalid_request');
       assert.equal((await token(authorizationCode, { client_id: 'unregistered' })).status, 401);
       const swaps = await Promise.all([token(authorizationCode), token(authorizationCode)]);
       const success = swaps.find(({ status }) => status === 200);

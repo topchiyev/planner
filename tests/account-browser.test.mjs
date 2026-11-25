@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
 import { Secret, TOTP } from 'otpauth';
+import { workspaceKey } from '../apps/backend/dist/storage/identity.js';
 import { readMigrationAdminActivationProof } from '../apps/backend/dist/application/auth/migration-admin.js';
 import { accountFixture, callSocket, changedPassword, password } from './support/account-fixture.mjs';
 import { migrationAdminFixture, stagedPassword } from './support/migration-admin-fixture.mjs';
@@ -166,5 +168,47 @@ test('Chromium manages accounts, completes local recovery, changes credentials a
       const response = await member.request.get(web.origin + '/api/v1/session');
       assert.equal(response.status(), 401);
     } finally { await Promise.allSettled([browser?.close(), local?.close(), web?.close(), f.close()]); }
+  });
+});
+
+test('Chromium shows and disconnects only the signed-in account’s OAuth connections', { timeout: 45_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const f = await accountFixture(mongo);
+    let web;
+    let browser;
+    try {
+      const account = await f.seed('connector@example.test');
+      const other = await f.seed('other@example.test');
+      const now = new Date();
+      const grants = mongo.db.collection('oauthConnections');
+      async function seedConnection(userId, clientName) {
+        const id = randomUUID();
+        await grants.insertOne({ _id: workspaceKey(f.generationId, id), generationId: f.generationId, id,
+          userId, clientName, clientId: clientName, providerGrantId: randomUUID(), credentialsVersion: 1, factorId: null,
+          scope: 'planner:read', issuedAt: now, expiresAt: new Date(now.getTime() + 60_000), revokedAt: null });
+        return id;
+      }
+      const selected = await seedConnection(account.id, 'Synthetic Codex');
+      const kept = await seedConnection(account.id, 'Synthetic editor');
+      const hidden = await seedConnection(other.id, 'Someone else’s client');
+      web = await tlsBridge(mongo.directory, (origin) => f.startBrowser(origin, { oauth: true }));
+      browser = await chromium.launch();
+      const context = await browser.newContext({ ignoreHTTPSErrors: true });
+      const page = await context.newPage();
+      await signIn(page, web.origin, account.email, password);
+      await page.goto(web.origin + '/settings/security');
+      await expect(page.getByRole('heading', { name: 'Connected clients' })).toBeVisible();
+      const item = page.getByRole('listitem').filter({ hasText: 'Synthetic Codex' });
+      await expect(item).toContainText('Read only');
+      await expect(page.getByText('Someone else’s client')).toHaveCount(0);
+      await item.getByRole('button', { name: 'Disconnect' }).click();
+      await expect(item).toContainText('Disconnected');
+      await expect(page.getByRole('listitem').filter({ hasText: 'Synthetic editor' }).getByRole('button', { name: 'Disconnect' })).toBeVisible();
+      assert.ok((await grants.findOne({ id: selected })).revokedAt instanceof Date);
+      for (const id of [kept, hidden]) assert.equal((await grants.findOne({ id })).revokedAt, null);
+      await page.reload();
+      await expect(item).toContainText('Disconnected');
+      assert.equal((await context.request.get(web.origin + '/api/v1/session')).status(), 200);
+    } finally { await browser?.close(); await web?.close(); await f.close(); }
   });
 });
