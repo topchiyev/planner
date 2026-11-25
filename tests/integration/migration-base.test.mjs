@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { fork, spawnSync } from 'node:child_process';
 import { createSecretKey, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { chmod, cp, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,7 +10,11 @@ import test from 'node:test';
 import { getCACertificates, setDefaultCACertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
+import { Secret, TOTP } from 'otpauth';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
+import { activateVerifiedMigration } from '../../apps/backend/dist/application/migration/activation.js';
+import { consumeMigrationAdminRecovery, issueMigrationAdminRecovery, readMigrationAdminActivationProof } from '../../apps/backend/dist/application/auth/migration-admin.js';
+import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { getLocalAccount } from '../../apps/backend/dist/application/auth/accounts.js';
 import { sessionCookieName } from '../../apps/backend/dist/application/auth/credentials.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
@@ -27,7 +31,7 @@ import { sourceColumns } from '../../apps/backend/dist/application/migration/sou
 import { stageBaseWorkspace, stageMigrationWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
 import { collectMigrationVerification } from '../../apps/backend/dist/application/migration/verification.js';
 import { beginMigrationVerification, migrationVerificationPage, persistMigrationVerification, persistMigrationPreflight, prepareMigrationActivation,
-  publicMigrationVerification, readMigrationVerification, readProtectedMigrationRun } from '../../apps/backend/dist/native/migration-state.js';
+  publicMigrationStatus, publicMigrationVerification, readMigrationVerification, readProtectedMigrationRun, stageProtectedMigrationRun } from '../../apps/backend/dist/native/migration-state.js';
 import { registerMediaRoutes } from '../../apps/backend/dist/native/media-routes.js';
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createWorkspaceReads } from '../../apps/backend/dist/application/workspace/reads.js';
@@ -992,7 +996,7 @@ test('verified PLANKA directory and object media stage exact bytes and independe
         const run = await db.collection('importRuns').findOne(importRunKey(identity));
         return (await withMigrationSnapshot(source.input, owner, source.config, source.objectConfig,
           { expectedFingerprint: identity.fingerprint.sha256 }, async (snapshot) => {
-            await beginMigrationVerification(lease, db, run, snapshot);
+            await beginMigrationVerification(lease, db, run, snapshot, cursorSet);
             return collectMigrationVerification(db, lease, identity, snapshot, cursorSet,
               { verifyBlob: store.verifyBlob, scratch: store, decode }, new AbortController().signal);
           })).value;
@@ -1226,5 +1230,152 @@ test('verified PLANKA directory and object media stage exact bytes and independe
       assert.deepEqual(ambiguous.missing, []);
       const availableBytes = await readFile(join(objectFiles.input.assetsRoot, 'private/attachments/9007199254741221/Fixture Deck.txt'));
       await assertApprovedUnavailableMedia(db, installationId, absentRun.generationId, objectId, store, decode, availableBytes);
+    }));
+  });
+
+async function killMigrationAt(fixture, options) {
+  const child = fork(fileURLToPath(new URL('../support/migration-replay-crash.mjs', import.meta.url)), [], {
+    execArgv: [], serialization: 'advanced', stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+  });
+  const { username, password } = fixture.client.options.credentials;
+  try {
+    await new Promise((resolve, reject) => {
+      let reported;
+      child.once('error', reject);
+      child.once('message', (point) => { reported = point; child.kill('SIGKILL'); });
+      child.once('exit', (code, signal) => {
+        if (signal === 'SIGKILL' && reported === options.point) resolve();
+        else reject(new Error(`Owned migration child did not reach ${options.point} (${code ?? signal}).`));
+      });
+      child.send({ ...options, socketPath: fixture.socketPath, database: fixture.db.databaseName, auth: { username, password } });
+    });
+  } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
+}
+
+test('native migration replay survives SIGKILL before the stage checkpoint and after the activation CAS',
+  { timeout: 100_000, skip: !mediaDecoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required' }, async (t) => {
+    const root = await mkdtemp(join(homedir(), '.planner-migration-replay-'));
+    t.after(() => rm(root, { force: true, recursive: true }));
+    const postgres = await startFixturePostgres(t, root);
+    postgres.write('postgres', 'ALTER ROLE fixture_reader NOINHERIT');
+    const source = await configureSource(root, postgres, '2.3.0');
+    await unlink(join(source.input.assetsRoot, 'private/attachments/9007199254741220/Re\u0301seau Tile.png'));
+    const receipt = await inspect(source);
+    await withFixtureMongo((fixture) => loadTarget(fixture, async ({ db, installationId, lease }) => {
+      const writer = join(fixture.directory, 'writer');
+      const staging = join(fixture.directory, 'staging');
+      const blobs = join(fixture.directory, 'blobs');
+      const receipts = join(root, 'receipts');
+      for (const dir of [staging, blobs, receipts]) await mkdir(dir, { mode: 0o700 });
+      const state = db.collection('installation');
+      await state.updateOne({ _id: 'installation' }, { $set: { activeGenerationId: null } });
+      const directory = await open(receipts);
+      const store = await createPrivateMediaStore(staging, blobs);
+      const decode = createMediaDecoder(fileURLToPath(new URL('../../ops/package/decode-media.py', import.meta.url)), mediaPython);
+      const capacity = { mongoBytes: '1', blobBytes: '1', stagingBytes: '1' };
+      let owned = lease;
+      try {
+        const { runId } = await persistMigrationPreflight(owned, db, installationId, directory, owner, source.input, receipt, capacity);
+        const reread = () => readProtectedMigrationRun(db, installationId, directory, owner, runId);
+        const saved = await reread();
+        const generationId = saved.run.generationId;
+        const scoped = { generationId };
+        const args = { writer, receipts, runId, installationId, staging, blobs, source: source.config };
+        const before = publicMigrationStatus(saved.run);
+        assert.equal(before.state, 'preflighted');
+        assert.equal(before.stageComplete, false);
+        owned.release();
+        await killMigrationAt(fixture, { ...args, point: 'before-checkpoint' });
+        assert.equal(await db.collection('importIds').countDocuments(scoped), 1);
+        assert.deepEqual(publicMigrationStatus((await reread()).run), before);
+        assert.equal((await state.findOne({ _id: 'installation' })).activeGenerationId, null);
+        owned = acquireWriterDirectory(writer, owner, owner);
+        const stage = (current = saved) => stageProtectedMigrationRun(db, owned, current, owner, source.config,
+          undefined, { store, decode }, 2);
+        const raw = await readFile(source.input.manifest);
+        await writeFile(source.input.manifest, Buffer.concat([raw, Buffer.from('\n')]));
+        await assert.rejects(stage(), refuses('source-changed'));
+        assert.equal(await db.collection('importIds').countDocuments(scoped), 1);
+        assert.deepEqual(publicMigrationStatus((await reread()).run), before);
+        await writeFile(source.input.manifest, raw);
+        const complete = await stage();
+        assert.equal(complete.stageComplete, true);
+        assert.equal(complete.checkpoint.table, 'user_account');
+        assert.deepEqual(await stage(await reread()), complete);
+        assert.equal(await db.collection('attachments').countDocuments(scoped), 6);
+        assert.equal(await db.collection('events').countDocuments(scoped), 0);
+        assert.equal((await persistMigrationPreflight(owned, db, installationId, directory, owner, source.input, receipt, capacity)).runId, runId);
+
+        const identity = { runId, generationId, installationId, fingerprint: receipt.fingerprint };
+        const { run, cursors } = await reread();
+        const verify = (current) => withMigrationSnapshot(source.input, owner, source.config, undefined, {}, async (snapshot) => {
+          const verifying = await beginMigrationVerification(owned, db, current, snapshot, cursors);
+          const report = await collectMigrationVerification(db, owned, identity, snapshot, cursors,
+            { verifyBlob: store.verifyBlob, scratch: store, decode }, new AbortController().signal);
+          return persistMigrationVerification(owned, db, directory, owner, verifying, report);
+        });
+        await assert.rejects(verify({ ...run, stageCompletion: undefined }), refuses('verification-incomplete'));
+        const mfaKey = randomBytes(32);
+        const administrator = { userId: publicIds(receipt.capture.source.instanceId)('user_account', '101'),
+          revision: 3, credentialsVersion: 3, factorId: randomUUID() };
+        const prior = { generationId: null, setup: (await state.findOne({ _id: 'installation' })).setup };
+        const verification = { runId, generationId, manifestSha256: receipt.manifestSha256, fingerprintSha256: receipt.fingerprint.sha256,
+          reportSha256: '0'.repeat(64), missingOriginals: 0, approvalSha256: null };
+        const request = { verification, administrator, prior, mfaKeyDigest: sha256(mfaKey), approval: undefined };
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, request), refuses('activation-conflict'));
+        const { value: report } = await verify(run);
+        assert.equal(report.summary.outcome, 'verified');
+        const approvalPath = join(receipts, 'approval.json');
+        request.approval = { runId, snapshotSha256: receipt.manifestSha256, missing: report.missing };
+        await writeFile(approvalPath, JSON.stringify(request.approval), { mode: 0o600 });
+        request.verification = await prepareMigrationActivation(directory, owner, (await reread()).run, receipt.manifestSha256, approvalPath);
+        await state.updateOne({ _id: 'installation' }, { $set: { mfaKeyDigest: request.mfaKeyDigest } });
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, request), refuses('activation-conflict'));
+        const verifiedRun = (await reread()).run;
+        const issued = await issueMigrationAdminRecovery(db, owned, verifiedRun, { runId, sourceUserId: '101', rotate: false });
+        assert.equal(issued.userId, administrator.userId);
+        const gate = { runCommand: (operation) => { owned.assertHeld(); return operation(); } };
+        const hasher = createPasswordHasher();
+        const recovery = await consumeMigrationAdminRecovery(db, installationId, gate, hasher, {
+          grant: issued.grant, password: 'synthetic replay fixture',
+        });
+        assert.equal(recovery.status, 'enrollment-required');
+        assert.equal(await readMigrationAdminActivationProof(db, verifiedRun), null);
+        const mfa = createMfaManagement(db, installationId, gate, createSecretKey(mfaKey), hasher);
+        const secret = await mfa.begin({ enrollmentId: recovery.enrollmentId });
+        const totp = new TOTP({ secret: Secret.fromBase32(secret.secret), algorithm: 'SHA1', digits: 6, period: 30 });
+        const factors = await mfa.confirm({ enrollmentId: recovery.enrollmentId }, totp.generate());
+        assert.equal(factors.recoveryCodes.length, 10);
+        const proof = await readMigrationAdminActivationProof(db, verifiedRun);
+        assert.equal(proof.userId, administrator.userId);
+        request.administrator = { userId: proof.userId, revision: proof.accountRevision, credentialsVersion: proof.credentialsVersion,
+          factorId: proof.factorId, recoveryId: proof.recoveryId };
+        request.prior = { generationId: null, setup: (await state.findOne({ _id: 'installation' })).setup };
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, { ...request,
+          administrator: { ...request.administrator, recoveryId: randomUUID() } }), refuses('activation-conflict'));
+        mfaKey.fill(0);
+        const wrongApproval = { ...request, verification: { ...request.verification, approvalSha256: 'a'.repeat(64) } };
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, wrongApproval), refuses('approval-invalid'));
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, { ...request, approval: undefined }), refuses('approval-required'));
+        const wrongFingerprint = { ...request, verification: { ...request.verification, fingerprintSha256: '0'.repeat(64) } };
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, wrongFingerprint), refuses('activation-conflict'));
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, { ...request,
+          prior: { ...request.prior, generationId: randomUUID() } }), refuses('activation-conflict'));
+        assert.equal((await state.findOne({ _id: 'installation' })).activeGenerationId, null);
+        owned.release();
+        await killMigrationAt(fixture, { ...args, point: 'activation', activation: request });
+        const published = await state.findOne({ _id: 'installation' });
+        assert.equal(published.activeGenerationId, generationId);
+        assert.equal(published.migrationActivation.state, 'activeReadOnly');
+        assert.equal(published.setup.migrationAdminRecovery, undefined);
+        owned = acquireWriterDirectory(writer, owner, owner);
+        const replay = await activateVerifiedMigration(db, owned, installationId, cursors, request);
+        assert.deepEqual(replay, published.migrationActivation);
+        await assert.rejects(activateVerifiedMigration(db, owned, installationId, cursors, { ...request, mfaKeyDigest: 'a'.repeat(64) }), refuses('activation-conflict'));
+        assert.deepEqual(await state.findOne({ _id: 'installation' }), published);
+        assert.equal(await db.collection('attachments').countDocuments(scoped), 6);
+        assert.equal(await db.collection('events').countDocuments(scoped), 0);
+        assert.deepEqual(await readFile(source.input.manifest), raw);
+      } finally { owned.release(); await store.close(); await directory.close(); }
     }));
   });

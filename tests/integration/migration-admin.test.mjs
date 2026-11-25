@@ -171,3 +171,49 @@ test('a selected imported administrator without source MFA completes password re
     await assert.rejects(fixture.issue({ sourceUserId: '101' }, true), refuses);
   });
 });
+
+test('rotation preserves the authorized recovery while a durable MFA change is awaiting replay', { timeout: 30_000 }, async () => {
+  await withFixtureMongo(async (mongo) => {
+    const fixture = await migrationAdminFixture(mongo);
+    const member = await fixture.seed('101', { mfa: true });
+    const { grant } = await fixture.issue({ sourceUserId: '101' });
+    await fixture.startGate();
+    try {
+      const { enrollmentId } = await fixture.consume(grant);
+      const setup = await fixture.mfa().begin({ enrollmentId });
+      const totp = new TOTP({ secret: Secret.fromBase32(setup.secret), algorithm: 'SHA1', digits: 6, period: 30 });
+      const original = fixture.db.collection;
+      const interrupted = new Error('test interruption after the durable factor write');
+      fixture.db.collection = function (name, ...args) {
+        const collection = original.call(this, name, ...args);
+        if (name === 'users') {
+          const save = collection.findOneAndUpdate.bind(collection);
+          collection.findOneAndUpdate = async (filter, update, ...options) => {
+            const result = await save(filter, update, ...options);
+            if (result && update.$set?.['localAuth.factorAudit']) throw interrupted;
+            return result;
+          };
+        }
+        return collection;
+      };
+      try {
+        await assert.rejects(fixture.mfa().confirm({ enrollmentId }, totp.generate({ timestamp: fixture.now().valueOf() })),
+          (error) => error === interrupted);
+      } finally { fixture.db.collection = original; }
+    } finally { await fixture.closeGate(); }
+    const installation = await readInstallation(fixture.db, fixture.scope.installationId);
+    const recovered = await fixture.db.collection('users').findOne(member);
+    assert.ok(recovered.localAuth.factorAudit);
+    assert.equal(await readMigrationAdminActivationProof(fixture.db, fixture.run), null);
+    await assert.rejects(fixture.issue({ sourceUserId: '101' }, true), refuses);
+    assert.deepEqual(await readInstallation(fixture.db, fixture.scope.installationId), installation);
+    await fixture.startGate();
+    try {
+      const proof = await readMigrationAdminActivationProof(fixture.db, fixture.run);
+      assert.equal(proof.userId, member.id);
+      assert.equal(proof.factorId, recovered.localAuth.factor.id);
+      assert.equal(await fixture.db.collection('auditEntries').countDocuments({ action: 'mfa.enabled' }), 1);
+      await assertCold(fixture.db, fixture.scope);
+    } finally { await fixture.closeGate(); }
+  });
+});

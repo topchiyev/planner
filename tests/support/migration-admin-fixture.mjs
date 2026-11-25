@@ -31,10 +31,12 @@ export async function migrationAdminFixture({ db, directory }) {
   const scope = { installationId, generationId, runId: randomUUID() };
   const fingerprint = { sha256: '1'.repeat(64) };
   const position = { pass: 'media', table: 'user_account' };
-  const token = migrationCursors(randomBytes(32)).seal({ ...scope, ...position, fingerprint: fingerprint.sha256 }, null);
+  const cursors = migrationCursors(randomBytes(32));
+  const token = cursors.seal({ ...scope, ...position, fingerprint: fingerprint.sha256 }, null);
   const run = { ...importRunKey(scope), state: 'verified', fingerprint, manifestSha256: '2'.repeat(64),
     verification: { reportSha256: '3'.repeat(64), detailSha256: '4'.repeat(64) }, verificationStartedAt: createdAt, createdAt, updatedAt: createdAt,
     checkpoint: { ...position, lastSourceId: null, token }, source: { instanceId: sourceInstanceId, release: '2.3.1', edition: 'community' } };
+  run.stageCompletion = cursors.sealCompletion(run);
   await db.collection('installation').insertOne({ _id: 'installation', installationId, schemaVersion: 0, activeGenerationId: null,
     setup: { mode: 'import', pendingAction: 'migration-preflight', enrollmentGenerationId: null } });
   await migrateStorageSchema(db, installationId);

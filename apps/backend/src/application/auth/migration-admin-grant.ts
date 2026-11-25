@@ -3,7 +3,7 @@ import { migrationDigestSchema } from '@planner/contracts';
 import { generationIdSchema, publicIdSchema, revisionSchema, signedInt64TextSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { z } from 'zod';
-import { importRunKey, type ImportRun } from '../migration/checkpoint.js';
+import { completedMigrationTable, importRunKey, type ImportRun } from '../migration/checkpoint.js';
 import { isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { readInstallation, requireCurrentSchema, type InstallationDocument } from '../../storage/schema.js';
 import { isProtectedGrant, recoveryLifetimeMs, type ProtectedGrant } from './account-grant.js';
@@ -11,7 +11,8 @@ import type { PasswordVerifier } from './password.js';
 
 const bindingSchema = z.strictObject({
   runId: publicIdSchema, generationId: generationIdSchema, fingerprintSha256: migrationDigestSchema, reportSha256: migrationDigestSchema,
-  manifestSha256: migrationDigestSchema, checkpointToken: z.string().regex(/^[\w-]{1,512}\.[\w-]{43}$/u),
+  manifestSha256: migrationDigestSchema, stageCompletion: migrationDigestSchema,
+  checkpointToken: z.string().regex(/^[\w-]{1,512}\.[\w-]{43}$/u),
   userId: publicIdSchema, sourceUserId: signedInt64TextSchema.nullable(), grantId: publicIdSchema,
   accountRevision: revisionSchema, credentialsVersion: z.number().int().positive(), requiresMfa: z.boolean(),
 });
@@ -35,7 +36,8 @@ export function coldMigrationAdminBinding(installation: InstallationDocument) {
 export function sameVerifiedMigration(run: ImportRun, binding: MigrationAdminBinding) {
   return run.state === 'verified' && run.id === binding.runId && run.generationId === binding.generationId
     && run.fingerprint.sha256 === binding.fingerprintSha256 && run.verification?.reportSha256 === binding.reportSha256
-    && run.manifestSha256 === binding.manifestSha256 && run.checkpoint?.pass === 'media' && run.checkpoint.token === binding.checkpointToken;
+    && run.manifestSha256 === binding.manifestSha256 && run.stageCompletion === binding.stageCompletion
+    && run.checkpoint?.pass === 'media' && run.checkpoint.table === completedMigrationTable && run.checkpoint.token === binding.checkpointToken;
 }
 
 export async function readMigrationAdminBinding(db: Db, installationId: string) {

@@ -4,7 +4,7 @@ import type { WriterLease } from '../command-gate/writer-lease.js';
 import { assertBoardSystemLists, boardHistoryHighWater, openBaseOrder } from './base-order.js';
 import { invalidBaseRow } from './base-fields.js';
 import { baseRelationshipTables, baseWorkspaceTables, reserveSourceRecord, writeBaseRelationship, writeBaseRow } from './base-workspace.js';
-import { importRunKey, migrationPasses, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint, type MigrationPosition,
+import { importRunKey, migrationPasses, sealMigrationStage, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint, type MigrationPosition,
   type migrationCursors } from './checkpoint.js';
 import { discussionTables, writeImportedDiscussion } from './discussion-stage.js';
 import { MigrationError } from './manifest.js';
@@ -48,6 +48,8 @@ async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdenti
     || run.source.instanceId !== snapshot.capture.sourceInstanceId) {
     throw new MigrationError('target-write', 'The protected import run does not match the verified snapshot.');
   }
+  if (mediaTarget && run.manifestSha256 !== snapshot.manifestSha256)
+    throw new MigrationError('source-changed', 'The source capture manifest changed. Start a new import run.');
   const { generationId } = identity;
   const records = await openImportRecords(db, lease, identity, run.source.instanceId);
   const stageMedia = mediaTarget && createMigrationMediaStage(records, snapshot, lease, mediaTarget);
@@ -56,13 +58,25 @@ async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdenti
     pass: checkpoint.pass, table: checkpoint.table }, checkpoint.token) !== checkpoint.lastSourceId) {
     throw new MigrationError('target-write', 'The protected import run has an invalid cursor.');
   }
+  if (run.stageCompletion !== undefined) {
+    cursors.assertComplete(run);
+    return checkpoint;
+  }
   await walkMigrationStage(db, identity, snapshot, batchSize, records, stageMedia, {
     checkpoint: () => checkpoint,
     async batch(position, apply) {
-      checkpoint = await writeMigrationBatch(lease, db, identity, snapshot, cursors, checkpoint, position, apply);
+      mediaTarget?.signal?.throwIfAborted();
+      checkpoint = await writeMigrationBatch(lease, db, identity, snapshot, cursors, checkpoint, position, async () => {
+        await apply();
+        mediaTarget?.signal?.throwIfAborted();
+      });
     },
-    row(_position, _sourceId, apply) { return apply(); },
+    row(_position, _sourceId, apply) { mediaTarget?.signal?.throwIfAborted(); return apply(); },
   });
+  if (mediaTarget) {
+    mediaTarget.signal?.throwIfAborted();
+    await sealMigrationStage(lease, db, identity, snapshot, cursors, checkpoint);
+  }
   return checkpoint;
 }
 
@@ -72,7 +86,7 @@ type StageWalk = {
   row(position: MigrationPosition, sourceId: string, apply: () => Promise<void>): Promise<void>;
 };
 
-export const completedMigrationTable = migrationMediaTables.at(-1)!;
+export { completedMigrationTable } from './checkpoint.js';
 export const reservableSourceTable = reservable;
 
 export async function walkMigrationStage(db: Db, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,

@@ -11,7 +11,7 @@ import type { CommandGate } from '../command-gate/gate.js';
 import type { WriterLease } from '../command-gate/writer-lease.js';
 import { commandUuid, CommandRecoveryError } from '../command-journal/operation.js';
 import { durable } from '../command-journal/records.js';
-import { importRunKey, type ImportRun } from '../migration/checkpoint.js';
+import { completedMigrationTable, importRunKey, type ImportRun } from '../migration/checkpoint.js';
 import { MigrationError } from '../migration/manifest.js';
 import type { ImportMap } from '../migration/staged-records.js';
 import { accounts, defaultPreferences, getLocalAccount, type AccountRecord } from './accounts.js';
@@ -97,7 +97,8 @@ export async function issueMigrationAdminRecovery(db: Db, lease: WriterLease, ru
   const installed = await readInstallation(db, installationId);
   requireCurrentSchema(installed);
   const prior = coldMigrationAdminBinding(installed);
-  if (run.id !== input.runId || !run.verification || run.state !== 'verified' || run.checkpoint?.pass !== 'media' || installed.activeGenerationId !== null
+  if (run.id !== input.runId || !run.verification || run.state !== 'verified' || !run.stageCompletion
+    || run.checkpoint?.pass !== 'media' || run.checkpoint.table !== completedMigrationTable || installed.activeGenerationId !== null
     || installed.setup?.mode !== 'import' || installed.setup.pendingAction !== 'migration-preflight'
     || (prior ? !sameVerifiedMigration(run, prior) : installed.setup.enrollmentGenerationId !== null || installed.setup.migrationAdminRecovery !== undefined))
     throw refuse('Select the verified inactive import before designating its administrator.');
@@ -105,7 +106,9 @@ export async function issueMigrationAdminRecovery(db: Db, lease: WriterLease, ru
   if (!isDeepStrictEqual(current, run)) throw refuse('The verified migration changed.');
   const old = prior && await readMigrationAdminGrant(db, installationId, prior);
   if (prior && !old) throw refuse('The previous administrator recovery binding could not be verified.');
-  if (old?.claim) throw refuse('The previous recovery claim must finish before rotating the grant.');
+  const priorAccount = prior && await mfaAccounts(db).findOne(accountLookup(generationId, prior.userId));
+  if (old?.claim || priorAccount?.accountChange || priorAccount?.localAuth?.factorAudit)
+    throw refuse('The previous recovery or multifactor change must finish before rotating the grant.');
   if (prior && await readMigrationAdminActivationProof(db, run)) throw refuse('The selected administrator has already completed recovery.');
   if (!prior && input.rotate) throw refuse('There is no designated administrator recovery grant to rotate.');
 
@@ -131,10 +134,13 @@ export async function issueMigrationAdminRecovery(db: Db, lease: WriterLease, ru
     await audit(db, generationId, user.id, 'migration.admin-recovery-issued', old.id, old.issuedAt, 'operator');
     return { status: 'already-issued' as const, userId: user.id, expiresAt: old.expiresAt.toISOString() };
   }
+  if (await mfaAccounts(db).findOne({ ...accountLookup(generationId, user.id), 'localAuth.factor': { $exists: true } }))
+    throw refuse('The designated administrator already has authenticator state.');
   const grantId = newPublicId();
   const token = newToken();
   const binding: MigrationAdminBinding = { runId: run.id, generationId, fingerprintSha256: run.fingerprint.sha256,
-    reportSha256: run.verification.reportSha256, manifestSha256: run.manifestSha256, checkpointToken: run.checkpoint.token,
+    reportSha256: run.verification.reportSha256, manifestSha256: run.manifestSha256,
+    stageCompletion: run.stageCompletion, checkpointToken: run.checkpoint.token,
     userId: user.id, sourceUserId, grantId, accountRevision: user.revision,
     credentialsVersion: accountEpoch(user), requiresMfa: user.requiresMfaEnrollment === true || user.localAuth.mfa === 'enrollment-required' };
   const expiresAt = new Date(time.getTime() + recoveryLifetimeMs);
@@ -237,7 +243,7 @@ export async function readMigrationAdminActivationProof(db: Db, run: ImportRun) 
   const grant = await readMigrationAdminGrant(db, run.installationId, binding);
   if (!grant || grant.revokedAt !== null || !grant.consumedAt || grant.claim) return null;
   const account = await mfaAccounts(db).findOne(accountLookup(binding.generationId, binding.userId));
-  if (!account || !usableAdmin(account) || account.localAuth?.factorAudit) return null;
+  if (!account || !usableAdmin(account) || account.localAuth?.factorAudit || account.accountChange) return null;
   const accountRevision = binding.accountRevision + (binding.requiresMfa ? 2 : 1);
   const credentialsVersion = binding.credentialsVersion + (binding.requiresMfa ? 2 : 1);
   if (account.revision !== accountRevision || accountEpoch(account) !== credentialsVersion) return null;

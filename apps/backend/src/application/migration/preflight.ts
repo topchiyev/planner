@@ -132,14 +132,16 @@ export function trackSourceOperation<T>(snapshot: VerifiedSourceSnapshot, run: (
 
 export async function withMigrationSnapshot<T>(
   input: MigrationInput, owner: Owner, sourceConfig: string, objectConfig: string | undefined,
-  options: { expectedFingerprint?: string; batchSize?: number },
+  options: { expectedManifestSha256?: string; expectedFingerprint?: string; batchSize?: number },
   read: (snapshot: VerifiedSourceSnapshot) => Promise<T>,
 ) {
   try {
     const raw = await smallFile(input.manifest, owner, captureManifestLimit);
+    const manifestSha256 = sha256(raw);
+    if (options.expectedManifestSha256 !== undefined && options.expectedManifestSha256 !== manifestSha256)
+      throw new MigrationError('source-changed', 'The source capture manifest changed. Start a new import run.');
     const capture = readCaptureManifest(raw);
     const directory = dirname(input.manifest);
-    const manifestSha256 = sha256(raw);
     const dump = await verifyDump(directory, owner, capture.source.dumpSha256);
     const assets = readAssetManifest(await smallFile(join(directory, 'asset-manifest.json'), owner, assetManifestLimit), capture);
     const service = parseSourceService(sourceConfig, input.sourceService);
