@@ -12,8 +12,8 @@ import { assertVerifiedSourceSnapshot, trackSourceOperation, type VerifiedSource
 import type { SourceFingerprint } from './source-fingerprint.js';
 import { compareSourceKeys, projectedSourceTables, sourceKey, sourceProjectionVersion, type SourceTable } from './source-projections.js';
 
-const passes = ['reserve', 'base', 'edges', 'deferred', 'projections'] as const;
-export type MigrationPass = typeof passes[number];
+export const migrationPasses = ['reserve', 'base', 'edges', 'deferred', 'projections', 'media'] as const;
+export type MigrationPass = typeof migrationPasses[number];
 export type ImportIdentity = { installationId: string; runId: string; generationId: string; fingerprint: SourceFingerprint };
 type CursorScope = { runId: string; generationId: string; fingerprint: string; pass: MigrationPass; table: SourceTable };
 
@@ -33,7 +33,7 @@ function invalid() {
 
 function cursorMessage(scope: CursorScope, lastSourceId: string | null) {
   if (!publicIdSchema.safeParse(scope.runId).success || !generationIdSchema.safeParse(scope.generationId).success
-    || !migrationDigestSchema.safeParse(scope.fingerprint).success || !passes.includes(scope.pass)
+    || !migrationDigestSchema.safeParse(scope.fingerprint).success || !migrationPasses.includes(scope.pass)
     || !projectedSourceTables.includes(scope.table)) throw invalid();
   return Buffer.from(JSON.stringify([sourceProjectionVersion, scope.runId, scope.generationId, scope.fingerprint,
     scope.pass, scope.table, lastSourceId === null ? null : sourceKey(scope.table, lastSourceId)]));
@@ -70,7 +70,7 @@ export function importRunKey(identity: Pick<ImportIdentity, 'runId' | 'generatio
 }
 
 function comparePosition(a: MigrationPosition, b: MigrationPosition) {
-  const section = passes.indexOf(a.pass) - passes.indexOf(b.pass)
+  const section = migrationPasses.indexOf(a.pass) - migrationPasses.indexOf(b.pass)
     || projectedSourceTables.indexOf(a.table) - projectedSourceTables.indexOf(b.table);
   if (section) return section;
   if (a.lastSourceId === null || b.lastSourceId === null) return Number(b.lastSourceId === null) - Number(a.lastSourceId === null);

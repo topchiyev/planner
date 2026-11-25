@@ -12,6 +12,8 @@ import { createWorkspaceAuthorization, WorkspaceAccessError } from '../workspace
 import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecordName, type WorkspaceRow } from '../workspace/records.js';
 import type { ImportIdentity } from './checkpoint.js';
 import { MigrationError } from './manifest.js';
+import type { ImportMediaProvenance } from './media-stage.js';
+import type { StoredAvatar } from '../media/records.js';
 import type { SourceDiscussion } from './discussion-stage.js';
 import { sourceKey, type SourceTable } from './source-projections.js';
 
@@ -35,6 +37,7 @@ export type ImportProvenance = SourceTimes & {
   unrecognizedGradient?: true;
   unsupportedPreferences?: string[];
   discussion?: SourceDiscussion;
+  media?: ImportMediaProvenance;
   linkedTask?: { sourceCardId: string; name: string; completed: boolean; missingTarget: boolean };
 };
 
@@ -132,6 +135,31 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
         if (!(error instanceof WorkspaceAccessError) || error.statusCode !== 404) throw error;
         return false;
       }
+    },
+    async recordMediaProvenance(entity: ImportedEntity, sourceId: string, media: ImportMediaProvenance) {
+      const mapped = await mapping(entity, sourceId);
+      if (!mapped) throw new MigrationError('target-write', 'The staged source media mapping is unavailable.');
+      const previous = mapped.provenance.media;
+      if (isDeepStrictEqual(previous, media)) return;
+      if (previous !== undefined) throw new MigrationError('target-write', 'The staged source media provenance changed.');
+      lease.assertHeld();
+      const saved = await ids.updateOne({ ...key(mapped.id), entity, sourceId, sourceInstanceId,
+        'provenance.media': { $exists: false } }, { $set: { 'provenance.media': media } }, durable);
+      if (saved.matchedCount !== 1) throw new MigrationError('target-write', 'The staged source media provenance could not be recorded.');
+    },
+    async stageAvatar(id: string, digest: string | null, media: NonNullable<StoredAvatar['avatarMedia']>) {
+      lease.assertHeld();
+      const users = db.collection<StoredAvatar>('users');
+      const filter = { ...key(id), revision: 1 };
+      const current = await users.findOne(filter, { projection: { avatarBlobDigest: 1, avatarMedia: 1 } });
+      if (!current) throw new MigrationError('target-write', 'The staged avatar account is unavailable.');
+      if (current.avatarBlobDigest === digest && isDeepStrictEqual(current.avatarMedia, media)) return;
+      if (current.avatarMedia !== undefined || current.avatarBlobDigest !== undefined)
+        throw new MigrationError('target-write', 'The staged avatar association changed.');
+      lease.assertHeld();
+      const saved = await users.updateOne({ ...filter, avatarMedia: { $exists: false }, avatarBlobDigest: { $exists: false } },
+        { $set: { avatarBlobDigest: digest, avatarMedia: media } }, durable);
+      if (saved.matchedCount !== 1) throw new MigrationError('target-write', 'The staged avatar association could not be recorded.');
     },
     async hasProjectManager(projectSourceId: string) {
       lease.assertHeld();

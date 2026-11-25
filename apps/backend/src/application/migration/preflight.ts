@@ -3,11 +3,12 @@ import type { Client } from 'pg';
 import { dirname, join, isAbsolute, normalize } from 'node:path';
 import type { Owner } from '../backup/archive.js';
 import { BackupError, fileChunks } from '../backup/archive.js';
-import { inspectDirectory, inspectObjects, parseObjectService, reconcileAssets } from './assets.js';
+import { consumeVerifiedAsset, inspectDirectory, inspectObjects, parseObjectService, reconcileAssets, withDirectoryAsset, withObjectAsset,
+  type VerifiedSourceAsset } from './assets.js';
 import { assetManifestLimit, captureManifestLimit, MigrationError, readAssetManifest, readCaptureManifest, sha256 } from './manifest.js';
 import { openMigrationFile } from './prepare.js';
 import { finishSourceFingerprint, fingerprintRows, startAssetFingerprint, type SourceFingerprint } from './source-fingerprint.js';
-import { readSourceBatch, type SourceBatch, type SourceTable } from './source-projections.js';
+import { readSourceBatch, readSourceUpload, type SourceBatch, type SourceRow, type SourceTable } from './source-projections.js';
 import { sourcePreflightInSnapshot, withSourceSnapshot } from './source-reader.js';
 import { migrationServiceName, parseSourceService } from './source-service.js';
 
@@ -77,7 +78,7 @@ async function verifyDump(directory: string, owner: Owner, expected: string) {
   } finally { await Promise.allSettled(files.filter(opened).map(({ file }) => file.close())); }
 }
 
-async function whileReadingAssets<T>(client: Client, verify: () => Promise<T>) {
+async function whileSnapshotWork<T>(client: Client, verify: () => Promise<T>) {
   let heartbeat: Promise<unknown> | undefined;
   let failure: unknown;
   const timer = setInterval(() => {
@@ -103,6 +104,9 @@ export type VerifiedSourceSnapshot = {
   readonly fingerprint: SourceFingerprint;
   readonly capture: Readonly<{ capturedAt: string; sourceInstanceId: string }>;
   readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number): Promise<SourceBatch<T>>;
+  readUpload(id: string): Promise<SourceRow<'uploaded_file'> | null>;
+  asset(key: string): Readonly<VerifiedSourceAsset>;
+  readAsset<T>(key: string, signal: AbortSignal, consume: (bytes: AsyncIterable<Uint8Array>, signal: AbortSignal) => Promise<T>): Promise<T>;
 };
 
 export function assertVerifiedSourceSnapshot(snapshot: VerifiedSourceSnapshot, accepting = false) {
@@ -144,9 +148,13 @@ export async function withMigrationSnapshot<T>(
       const source = await sourcePreflightInSnapshot(client);
       const rowDigest = await fingerprintRows(client, source.rows, options.batchSize);
       const assetFingerprint = startAssetFingerprint();
-      const assetSummary = await whileReadingAssets(client, async () => {
+      const verifiedAssets = new Map<string, Readonly<VerifiedSourceAsset>>();
+      const assetSummary = await whileSnapshotWork(client, async () => {
         const reader = objectService ? inspectObjects(objectService) : await inspectDirectory(input.assetsRoot!, owner, assets);
-        return reconcileAssets(reader, assets, source.assets, assetFingerprint.observe);
+        return reconcileAssets(reader, assets, source.assets, (entry) => {
+          assetFingerprint.observe(entry);
+          verifiedAssets.set(entry.key, Object.freeze(entry));
+        });
       });
       const fingerprint = finishSourceFingerprint(capture, rowDigest, assetFingerprint.finish());
       if (options.expectedFingerprint !== undefined && options.expectedFingerprint !== fingerprint.sha256)
@@ -160,15 +168,40 @@ export async function withMigrationSnapshot<T>(
         readBatch<T extends SourceTable>(table: T, lastSourceId: string | null, limit: number) {
           return trackSourceOperation(snapshot, () => readSourceBatch(client, table, lastSourceId, limit));
         },
+        readUpload(id: string) {
+          return trackSourceOperation(snapshot, () => readSourceUpload(client, id));
+        },
+        asset(key: string) {
+          assertVerifiedSourceSnapshot(snapshot, true);
+          const verified = verifiedAssets.get(key);
+          if (!verified) throw new MigrationError('asset-integrity', 'The asset is outside the verified source inventory.');
+          return verified;
+        },
+        readAsset<T>(key: string, signal: AbortSignal,
+          receive: (bytes: AsyncIterable<Uint8Array>, signal: AbortSignal) => Promise<T>) {
+          return trackSourceOperation(snapshot, async () => {
+            const verified = snapshot.asset(key);
+            const declared = assets.get(key);
+            if (!declared || verified.sha256 === null || verified.byteLength === null)
+              throw new MigrationError('asset-integrity', 'The source asset was unavailable in the verified snapshot.');
+            const consume = async (bytes: AsyncIterable<Uint8Array>, reading: AbortSignal) =>
+              ({ value: await consumeVerifiedAsset(declared, bytes, reading, receive) });
+            const read = objectService ? await withObjectAsset(objectService, declared, consume, undefined, signal)
+              : await withDirectoryAsset(input.assetsRoot!, owner, declared, consume, signal);
+            if (!read) throw new MigrationError('asset-integrity', 'The source asset disappeared after verification.');
+            return read.value;
+          });
+        },
       });
       admittedSnapshots.set(snapshot, operations);
-      let value: T;
-      try { value = await read(snapshot); }
-      finally {
-        operations.accepting = false;
-        await Promise.allSettled(operations.pending);
-        admittedSnapshots.delete(snapshot);
-      }
+      const value = await whileSnapshotWork(client, async () => {
+        try { return await read(snapshot); }
+        finally {
+          operations.accepting = false;
+          await Promise.allSettled(operations.pending);
+          admittedSnapshots.delete(snapshot);
+        }
+      });
       if (operations.failure !== undefined) throw operations.failure;
       return {
         manifestSha256, capture, dump, fingerprint, rows: source.rows,
