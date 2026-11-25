@@ -279,6 +279,27 @@ export async function dismissNativeMigrationServiceResume(binding: ServiceBindin
   finally { await directory.close(); }
 }
 
+export async function withNativeVerificationScratch<T>(runId: string, operation: (store: PrivateMediaStore) => Promise<T>) {
+  const directory = join(stateDirectory, '.verify-' + publicIdSchema.parse(runId));
+  try { await mkdir(directory, { mode: 0o700 }); }
+  catch (error) {
+    if (!errno(error, 'EEXIST')) throw error;
+    const interrupted = await anchoredDirectory(directory, root, 0o700);
+    await interrupted.close();
+    await rm(directory, { recursive: true });
+    await mkdir(directory, { mode: 0o700 });
+  }
+  try {
+    const staging = join(directory, 'staging');
+    const blobs = join(directory, 'blobs');
+    await mkdir(staging, { mode: 0o700 });
+    await mkdir(blobs, { mode: 0o700 });
+    const store = await createPrivateMediaStore(staging, blobs);
+    try { return await operation(store); }
+    finally { await store.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
 export async function readProtectedMigrationRun(db: Db, installationId: string, directory: FileHandle, owner: Owner, runId: string) {
   try {
     const bytes = await readRecord(directory, publicIdSchema.parse(runId) + '.json', owner);
