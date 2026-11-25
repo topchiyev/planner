@@ -76,7 +76,7 @@ export function destinationRow(name: string, record: Document) {
   if (name !== 'oauthConnections') return record;
   // Provider grant IDs are historical identities. Any linked access credentials require fresh consent.
   const permitted = new Set(['_id', 'id', 'generationId', 'userId', 'clientId', 'providerGrantId', 'revision',
-    'createdAt', 'updatedAt', 'issuedAt', 'expiresAt', 'scope', 'scopes', 'revokedAt']);
+    'createdAt', 'updatedAt', 'issuedAt', 'expiresAt', 'scope', 'scopes', 'revokedAt', 'clientName', 'resource', 'offline']);
   const retained = Object.fromEntries(Object.entries(record).filter(([field]) => permitted.has(field)));
   return { ...retained, revokedAt: record.revokedAt instanceof Date ? record.revokedAt : new Date(0) };
 }

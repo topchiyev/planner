@@ -9,6 +9,7 @@ import { Secret, TOTP } from 'otpauth';
 import { defaultPreferences } from '../../apps/backend/dist/application/auth/accounts.js';
 import { createMfaManagement } from '../../apps/backend/dist/application/auth/mfa-management.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
+import { createOAuthClientRegistry } from '../../apps/backend/dist/application/oauth/clients.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { CommandGate } from '../../apps/backend/dist/application/command-gate/gate.js';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
@@ -28,6 +29,14 @@ const clientId = 'synthetic-oauth-client';
 const redirect = 'https://connector.example.test/callback';
 const client = { client_id: clientId, client_name: 'Synthetic connector', redirect_uris: [redirect] };
 const verifier = randomBytes(32).toString('base64url');
+const dynamic = [
+  { id: 'https://chatgpt.com/oauth/codex/client.json', redirects: ['http://127.0.0.1/callback', 'http://localhost/callback'],
+    callback: 'http://127.0.0.1:49152/callback' },
+  { id: 'https://claude.ai/oauth/claude-code-client-metadata', redirects: ['http://localhost/callback', 'http://127.0.0.1/callback'],
+    callback: 'http://localhost:49153/callback' },
+  { id: 'https://claude.ai/oauth/mcp-oauth-client-metadata', redirects: ['https://claude.ai/api/mcp/auth_callback'],
+    callback: 'https://claude.ai/api/mcp/auth_callback' },
+];
 const challenge = createHash('sha256').update(verifier).digest('base64url');
 const identifier = 'admin@example.test';
 const password = 'Synthetic MFA passphrase';
@@ -111,6 +120,11 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       name: 'Synthetic operator', email: identifier, normalizedEmail: identifier, username: null, normalizedUsername: null,
       role: 'admin', disabledAt: null, createdAt: time, preferences: defaultPreferences, requiresMfaEnrollment: false,
       localAuth: { passwordVerifier: await hasher.encode(password), credentialsVersion: 1, mfa: 'none' } });
+    const memberId = randomUUID();
+    const memberEmail = 'member@example.test';
+    const adminRecord = await db.collection('users').findOne({ _id: workspaceKey(generationId, actorId) });
+    await db.collection('users').insertOne({ ...adminRecord, _id: workspaceKey(generationId, memberId), id: memberId,
+      name: 'Synthetic member', email: memberEmail, normalizedEmail: memberEmail, role: 'boardUser' });
     await migrateStorageSchema(db, installationId);
     await gate.recover(() => {});
     const sessions = createBrowserSessions(db, installationId, gate, hasher, now, key);
@@ -122,9 +136,26 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
     const factor = await manage.confirm({ enrollmentId: enrolled.enrollmentId, sessionToken: first.token }, code());
     time = new Date(time.getTime() + 30_000);
     let access = { kind: 'ready' };
+    let privateAnswer = false;
+    const metadataReads = [];
+    const revoked = [];
+    const docs = new Map(dynamic.map(({ id, redirects }) => [id, { client_id: id, redirect_uris: redirects,
+      grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' }]));
+    const transport = {
+      async resolve(hostname) {
+        assert.ok(['chatgpt.com', 'claude.ai'].includes(hostname));
+        return [privateAnswer ? '127.0.0.1' : '93.184.215.14'];
+      },
+      async read(url, address) {
+        assert.equal(address, '93.184.215.14');
+        metadataReads.push(url.href);
+        return docs.get(url.href);
+      },
+    };
     const app = (clients = [client]) => buildApp({ native: { origin, proxyToken, readAccess: async () => access, auth: { ...sessions, confirm: async () => false,
       mfa: { manage, verify: (input) => sessions.verifyMfa(input) } },
-      oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients) } });
+      oauth: createNativeOAuthRuntime(origin, installationId, gate, key, (run) => run(db), clients,
+        createOAuthClientRegistry(clients, transport), (grant) => { revoked.push(grant); }) } });
     let server = await serve(app(), fixture);
     const call = (path, options) => server.call(path, options);
     const post = (path, body, jar, type = json, headers = { Origin: origin }) => call(path, { method: 'POST', body, type, jar, headers });
@@ -136,9 +167,12 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
     const consent = (path, input, jar, headers) => post(path, input, jar, form, headers);
     const token = (authorizationCode, overrides = {}) => post('/oauth/token', { grant_type: 'authorization_code', client_id: clientId,
       code: authorizationCode, code_verifier: verifier, redirect_uri: redirect, resource, ...overrides }, undefined, form, {});
+    const refresh = (refreshToken, overrides = {}) => post('/oauth/token', {
+      grant_type: 'refresh_token', client_id: clientId, refresh_token: refreshToken, ...overrides,
+    }, undefined, form, {});
     const jar = cookies();
-    async function interaction() {
-      const requested = await call(requestCode(), { jar });
+    async function interaction(overrides = {}) {
+      const requested = await call(requestCode(overrides), { jar });
       assert.equal(requested.status, 303, requested.text);
       assert.match(requested.headers.location, /^\/oauth\/interaction\/[A-Za-z0-9_-]+$/u);
       return requested.headers.location;
@@ -148,12 +182,14 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       return /name="csrf" value="([A-Za-z0-9_-]+)"/u.exec(response.text)?.[1];
     };
 
-    async function approve(path, write = true) {
+    async function approve(path, write = true, offline = false, callbackUrl = redirect) {
       const accepted = await consent(path, { csrf: csrfFrom(await call(path, { jar })), decision: 'allow',
-        ...(write && { write: 'yes' }) }, jar);
+        ...(write && { write: 'yes' }), ...(offline && { offline: 'yes' }) }, jar);
       assert.equal(accepted.status, 303, accepted.text);
       const callback = await follow(accepted, jar);
-      const code = new URL(callback.headers.location).searchParams.get('code');
+      const location = new URL(callback.headers.location);
+      assert.equal(location.origin + location.pathname, callbackUrl);
+      const code = location.searchParams.get('code');
       assert.ok(code);
       return code;
     }
@@ -161,12 +197,12 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
     try {
       const discovery = await call('/.well-known/oauth-protected-resource/mcp', { headers: { Forwarded: 'host=attacker.invalid' } });
       assert.equal(discovery.status, 200);
-      assert.deepEqual(discovery.json, { resource, authorization_servers: [origin], scopes_supported: ['planner:read'],
+      assert.deepEqual(discovery.json, { resource, authorization_servers: [origin], scopes_supported: ['planner:read', 'planner:write'],
         bearer_methods_supported: ['header'] });
       assert.equal((await call('/.well-known/oauth-protected-resource/mcp', { headers: { 'x-test-proxy': 'unmarked' } })).status, 403);
       const unauthorized = await call('/mcp');
       assert.equal(unauthorized.status, 401);
-      assert.equal(unauthorized.headers['www-authenticate'], `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`);
+      assert.equal(unauthorized.headers['www-authenticate'], `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="planner:read"`);
       const metadata = (await call('/.well-known/oauth-authorization-server')).json;
       assert.deepEqual([metadata.issuer, metadata.authorization_endpoint, metadata.token_endpoint, metadata.jwks_uri],
         [origin, origin + '/oauth/authorize', origin + '/oauth/token', origin + '/oauth/jwks']);
@@ -249,6 +285,109 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal((await call('/mcp', { headers: bearer })).status, 501);
       assert.equal((await call('/mcp?access_token=' + full.json.access_token)).status, 401);
 
+      const persistent = { scope: 'planner:read planner:write offline_access' };
+      const rejectedOffline = await token(await approve(await interaction(persistent), false));
+      assert.equal(rejectedOffline.status, 200);
+      assert.equal(rejectedOffline.json.refresh_token, undefined);
+      const family = await token(await approve(await interaction(persistent), true, true));
+      assert.equal(family.status, 200, family.text);
+      assert.match(family.json.refresh_token, /^[A-Za-z0-9_-]+$/u);
+      const rotated = await refresh(family.json.refresh_token, { scope: 'planner:read', resource });
+      assert.equal(rotated.status, 200, rotated.text);
+      assert.equal(rotated.json.scope, 'planner:read');
+      assert.notEqual(rotated.json.refresh_token, family.json.refresh_token);
+      const scoped = { Authorization: 'Bearer ' + rotated.json.access_token };
+      const insufficient = await post('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'card_update', arguments: { id: randomUUID() } } }, undefined, json, scoped);
+      assert.equal(insufficient.status, 403);
+      assert.match(insufficient.headers['www-authenticate'], /insufficient_scope/u);
+      const broadened = await refresh(rotated.json.refresh_token, { scope: 'planner:read planner:write' });
+      assert.equal(broadened.status, 400);
+      assert.equal(broadened.json.error, 'invalid_scope');
+      const wrongAudience = await refresh(family.json.refresh_token, { resource: origin + '/not-mcp' });
+      assert.equal(wrongAudience.status, 400);
+      assert.equal(wrongAudience.json.error, 'invalid_target');
+      assert.equal((await call('/mcp', { headers: scoped })).status, 501);
+      const replayed = await refresh(family.json.refresh_token);
+      assert.equal(replayed.status, 400);
+      assert.equal(replayed.json.error, 'invalid_grant');
+      assert.equal((await call('/mcp', { headers: scoped })).status, 401);
+      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+
+      privateAnswer = true;
+      assert.equal((await call(requestCode({ client_id: dynamic[0].id, redirect_uri: dynamic[0].callback }))).status, 400);
+      assert.deepEqual(metadataReads, []);
+      privateAnswer = false;
+      const expected = docs.get(dynamic[0].id);
+      docs.set(dynamic[0].id, { ...expected, redirect_uris: ['https://unrelated.example.test/callback'] });
+      assert.equal((await call(requestCode({ client_id: dynamic[0].id, redirect_uri: dynamic[0].callback }))).status, 400);
+      docs.set(dynamic[0].id, expected);
+      assert.equal((await call(requestCode({ client_id: dynamic[0].id, redirect_uri: 'http://localhost:49152/other' }))).status, 400);
+      for (const profile of dynamic) {
+        const input = { client_id: profile.id, redirect_uri: profile.callback };
+        const pinnedCode = await approve(await interaction(input), false, false, profile.callback);
+        const otherCallback = new URL(profile.callback);
+        if (otherCallback.protocol === 'http:') otherCallback.port = '49154';
+        else otherCallback.pathname += '-other';
+        assert.equal((await token(pinnedCode, { ...input, redirect_uri: otherCallback.href })).status, 400);
+        const admitted = await token(pinnedCode, input);
+        assert.equal(admitted.status, 200, admitted.text);
+        assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + admitted.json.access_token } })).status, 501);
+      }
+      assert.equal(metadataReads.length, dynamic.length + 1);
+      const own = await call('/api/v1/me/connections', { jar });
+      assert.equal(own.status, 200, own.text);
+      assert.ok(own.json.connections.some(({ name }) => name === 'Codex'));
+      const ownIds = own.json.connections.map(({ id }) => id);
+      for (const value of [...dynamic.map(({ id, callback }) => [id, callback]).flat(), full.json.access_token]) {
+        assert.equal(own.text.includes(value), false);
+      }
+      const memberCookies = cookies();
+      const memberLogin = await post('/api/v1/session/login', { identifier: memberEmail, password }, memberCookies);
+      assert.equal(memberLogin.status, 200);
+      const unauthorizedDelete = await call('/api/v1/me/connections/' + ownIds[0], { method: 'DELETE', jar: memberCookies,
+        headers: { Origin: origin, 'X-CSRF-Token': memberLogin.json.csrfToken } });
+      assert.equal(unauthorizedDelete.status, 404);
+      assert.deepEqual((await call('/api/v1/me/connections', { jar: memberCookies })).json, { connections: [], next: null });
+      const browser = await call('/api/v1/session', { jar });
+      const disconnect = (id, headers = { Origin: origin, 'X-CSRF-Token': browser.json.csrfToken }) =>
+        call('/api/v1/me/connections/' + id, { method: 'DELETE', jar, headers });
+      const codex = own.json.connections.find(({ name }) => name === 'Codex');
+      assert.equal((await disconnect(codex.id, { Origin: origin })).status, 403);
+      assert.equal((await disconnect(codex.id)).status, 204);
+      assert.equal((await disconnect(codex.id)).status, 204);
+      assert.ok(revoked.some(({ grantId }) => grantId === codex.id));
+      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+
+      const race = await token(await approve(await interaction(persistent), false, true));
+      assert.equal(race.status, 200);
+      const raceBearer = { Authorization: 'Bearer ' + race.json.access_token };
+      const wrongClient = await refresh(race.json.refresh_token, { client_id: dynamic[0].id });
+      assert.equal(wrongClient.status, 400);
+      assert.equal(wrongClient.json.error, 'invalid_grant');
+      assert.equal((await call('/mcp', { headers: raceBearer })).status, 501);
+      const [left, right] = await Promise.all([refresh(race.json.refresh_token), refresh(race.json.refresh_token)]);
+      assert.ok([left, right].every((item) => item.status === 200 || (item.status === 400 && item.json.error === 'invalid_grant')));
+      assert.ok([left, right].some((item) => item.status === 400));
+      for (const result of [left, right]) if (result.status === 200) {
+        assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + result.json.access_token } })).status, 401);
+      }
+      assert.equal((await call('/mcp', { headers: raceBearer })).status, 401);
+      assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+
+      const closingFamily = await token(await approve(await interaction(persistent), false, true));
+      assert.equal(closingFamily.status, 200);
+      const refreshedBeforeDeadline = await refresh(closingFamily.json.refresh_token);
+      assert.equal(refreshedBeforeDeadline.status, 200);
+      const latest = await connections.findOne({ generationId, userId: actorId, clientId, offline: true, revokedAt: null },
+        { sort: { issuedAt: -1 } });
+      const familyRows = await db.collection('oauthArtifacts').find({ generationId, kind: 'RefreshToken', providerGrantId: latest.providerGrantId }).toArray();
+      assert.equal(familyRows.length, 2);
+      assert.ok(familyRows.every((row) => row.expiresAt.getTime() <= latest.expiresAt.getTime()));
+      await connections.updateOne({ _id: latest._id }, { $set: { expiresAt: new Date(0) } });
+      assert.equal((await refresh(refreshedBeforeDeadline.json.refresh_token)).json.error, 'invalid_grant');
+      assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + refreshedBeforeDeadline.json.access_token } })).status, 401);
+
       const thirdCode = await approve(await interaction());
       const badResource = await token(thirdCode, { resource: origin + '/not-mcp' });
       assert.equal(badResource.status, 400);
@@ -273,12 +412,16 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
       assert.equal(ttl.expireAfterSeconds, 0);
       assert.equal(gate.ready, true);
 
+      const beforeRestart = await token(await approve(await interaction(persistent), false, true));
+      assert.equal(beforeRestart.status, 200);
       const pendingRestart = await interaction();
       await server.close();
       server = await serve(app(), fixture);
       assert.deepEqual((await call('/oauth/jwks')).json, publicKeys);
       assert.ok(csrfFrom(await call(pendingRestart, { jar })));
       assert.equal((await call('/mcp', { headers: bearer })).status, 501);
+      const afterRestart = await refresh(beforeRestart.json.refresh_token);
+      assert.equal(afterRestart.status, 200);
 
       const codeBeforeLogout = await approve(pendingRestart);
       const currentBrowser = await call('/api/v1/session', { jar });
@@ -287,6 +430,7 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
         headers: { Origin: origin, 'X-CSRF-Token': currentBrowser.json.csrfToken } });
       assert.equal(logout.status, 204);
       assert.equal((await call('/api/v1/session', { jar })).status, 401);
+      assert.equal((await refresh(afterRestart.json.refresh_token)).status, 200);
       const loggedOutSwap = await token(codeBeforeLogout);
       assert.equal(loggedOutSwap.status, 400);
       assert.equal(loggedOutSwap.json.error, 'invalid_grant');

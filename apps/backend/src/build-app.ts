@@ -7,7 +7,7 @@ import { registerAccountRoutes } from './native/account-routes.js';
 import { registerBoardEventRoutes } from './native/board-event-routes.js';
 import { registerNativeBrowserAuth, type BrowserAuth } from './native/browser-auth.js';
 import { registerMediaRoutes, type MediaAccess } from './native/media-routes.js';
-import { registerNativeOAuthRoutes, type NativeOAuthRuntime } from './native/oauth-routes.js';
+import { registerOAuthConnectionRoutes, registerNativeOAuthRoutes, type NativeOAuthRuntime } from './native/oauth-routes.js';
 import { registerNativeMfaRoutes } from './native/mfa-routes.js';
 import { registerNativeHttpBoundary, type NativeHttpBoundary } from './native/http-boundary.js';
 import { registerRelationshipRoutes, type WorkspaceRelationships } from './native/relationship-routes.js';
@@ -38,6 +38,7 @@ export function buildApp({ isReady, frontendRoot, native, transportFixture }: Ap
   if (native) {
     registerNativeBrowserAuth(app, native.auth);
     if (native.oauth) registerNativeOAuthRoutes(app, native.oauth);
+    if (native.auth) registerOAuthConnectionRoutes(app, native.oauth);
     if (native.auth.mfa) registerNativeMfaRoutes(app, native.auth.mfa);
     if (native.auth.accountManagement) registerAccountRoutes(app, native.auth.accountManagement);
     if (native.media) registerMediaRoutes(app, native.media);

@@ -224,6 +224,30 @@ sudo systemctl reload nginx
 
 Planner accepts a single address from authenticated requests on the proxy socket. It uses its configured origin for security decisions and strips forwarding headers before dispatch. Direct loopback requests have no asserted public client address. Keep the nginx credential include root-only and exclude the token from proxy logs. Restart Planner and reload nginx when rotating it.
 
+## MCP OAuth clients
+
+Use the public HTTPS Planner origin as the OAuth issuer and append `/mcp` for the protected resource. Configure clients with the same origin all the way through TLS and the native proxy. Authorization uses PKCE S256 and public form-encoded token requests.
+
+Planner can retrieve the published Codex, Claude Code and Claude connector client documents. Native clients can choose a local callback port on the documented `localhost` and `127.0.0.1` callbacks. The hosted connector uses the published HTTPS callback. The selected callback must be identical at authorization and code exchange. [Codex OAuth registration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#oauth-client-registration-and-callbacks) · [Published client IDs](https://docs.databricks.com/aws/en/partner-connect/ai-agents) · [Claude connector callback](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+
+To register a public client locally, create `/etc/planner/oauth-clients.json` as `root:planner` with mode `0640` and restart Planner. Use a distinct client ID and display name. Register only callback addresses controlled by that client. Set `loopbackPorts` when an explicitly registered literal HTTP loopback callback needs to select a port. These client registrations use `none` token authentication and need no secret.
+
+```json
+{
+  "version": 1,
+  "clients": [
+    {
+      "client_id": "workspace-cli",
+      "client_name": "Workspace CLI",
+      "redirect_uris": ["http://127.0.0.1/callback"],
+      "loopbackPorts": true
+    }
+  ]
+}
+```
+
+The account holder must grant workspace read access. Write and continued access each require their own approval. Access tokens last up to 15 minutes. A refreshed connection cannot outlive its original 30-day deadline. Reusing an already used refresh credential closes that connection and requires a new sign-in and consent. The account Security page lists the signed-in account’s connections and lets the user disconnect one client without signing out other browsers or closing other connections.
+
 ## Runtime status and setup access
 
 `GET /health/live` tracks the HTTP process. `GET /health/ready` returns 503 during pending setup, migration, database downtime, staging errors, schema verification or recovery. Both responses carry `status`, `version` and a generated `requestId`, with `Cache-Control: no-store`.

@@ -3,7 +3,7 @@ import type { Adapter, AdapterPayload } from 'oidc-provider';
 import { errors } from 'oidc-provider';
 import type { Db, Filter } from 'mongodb';
 import { publicIdSchema } from '@planner/contracts/storage';
-import { workspaceKey } from '../../storage/identity.js';
+import { isStoredDate, workspaceKey } from '../../storage/identity.js';
 import { provisionOAuthCatalog, readInstallation, requireCurrentSchema } from '../../storage/schema.js';
 import { accounts, getLocalAccount } from '../auth/accounts.js';
 import { getFactor, hasPasswordOnlyAuth } from '../auth/mfa-account.js';
@@ -15,8 +15,9 @@ import { oauthSigningKeys, type OAuthEnvelope, type OAuthSecrets } from './keys.
 
 export const interactionLifetime = 300;
 const freshAuthorizationMs = 5 * 60_000;
-const connectionLifetimeMs = 30 * 24 * 60 * 60_000;
-const maximumArtifactSeconds = 30 * 24 * 60 * 60;
+export const connectionLifetimeSeconds = 30 * 24 * 60 * 60;
+const connectionLifetimeMs = connectionLifetimeSeconds * 1000;
+const maximumArtifactSeconds = connectionLifetimeSeconds;
 
 type Scope = { db: Db; generationId: string };
 interface Artifact {
@@ -42,6 +43,9 @@ interface Connection {
   clientId: string;
   providerGrantId: string;
   browserSessionId: string;
+  clientName?: string;
+  resource?: string;
+  offline?: boolean;
   credentialsVersion: number;
   factorId: string | null;
   scope: string;
@@ -122,6 +126,17 @@ export function createOAuthStorage(
     return session && session.account.actor.id === grant.userId ? grant : null;
   }
 
+  function refreshMatches(grant: Connection, value: AdapterPayload) {
+    return grant.offline === true && typeof grant.resource === 'string' && value.resource === grant.resource
+      && value.accountId === grant.userId && value.clientId === grant.clientId && typeof value.scope === 'string'
+      && value.scope.split(' ').includes('offline_access') && value.scope.split(' ').includes('planner:read')
+      && value.scope.split(' ').every((entry) => entry === 'offline_access' || grant.scope.split(' ').includes(entry));
+  }
+
+  async function revokeGrant(db: Db, generationId: string, providerGrantId: string, revokedAt: Date) {
+    await connections(db).updateOne({ generationId, providerGrantId, revokedAt: { $type: 'null' } }, { $set: { revokedAt } }, durable);
+  }
+
   function adapter(kind: string): Adapter {
     const digest = (generationId: string, field: string, id: string) => secrets.identity(generationId, kind, field, id);
     function find(query: (generationId: string) => Filter<Artifact>) {
@@ -129,21 +144,27 @@ export function createOAuthStorage(
         const time = now();
         const row = await artifacts(db).findOne({ generationId, kind, expiresAt: { $gt: time }, ...query(generationId) });
         if (!row) return undefined;
-        if (row.providerGrantId && !await currentArtifactGrant({ db, generationId }, kind, row.providerGrantId, time)) return undefined;
-        return decode(row);
+        const payload = decode(row);
+        if (row.providerGrantId) {
+          const grant = await currentArtifactGrant({ db, generationId }, kind, row.providerGrantId, time);
+          if (!grant || (kind === 'RefreshToken' && !refreshMatches(grant, payload))) return undefined;
+        }
+        return payload;
       });
     }
     return {
       async upsert(rawId, payload, expiresIn) {
-        await run(true, async ({ db, generationId }) => {
+        const saved = await run(true, async ({ db, generationId }) => {
           const time = now();
           const expiry = expiresIn ?? maximumArtifactSeconds;
           if (!Number.isSafeInteger(expiry) || expiry < 1 || expiry > maximumArtifactSeconds) throw new OAuthUnavailable();
           const { _id, ...identity } = artifactIdentity(generationId, kind, rawId);
           const rawGrant = kind === 'Grant' ? rawId : payload.grantId;
           const providerGrantId = rawGrant ? grantKey(generationId, rawGrant) : undefined;
-          if (providerGrantId && !await currentArtifactGrant({ db, generationId }, kind, providerGrantId, time)) throw new OAuthUnavailable();
+          const grant = providerGrantId && await currentArtifactGrant({ db, generationId }, kind, providerGrantId, time);
+          if ((providerGrantId && !grant) || (kind === 'RefreshToken' && (!grant || !refreshMatches(grant, payload)))) return false;
           const { consumed: _consumed, ...unconsumed } = payload;
+          const expiresAt = new Date(Math.min(time.getTime() + expiry * 1000, grant ? grant.expiresAt.getTime() : Infinity));
           const fields = {
             ...identity, ...(payload.accountId && { userId: payload.accountId }),
             ...(payload.clientId && { clientId: payload.clientId }),
@@ -151,11 +172,13 @@ export function createOAuthStorage(
             ...(payload.uid && { providerUid: digest(generationId, 'uid', payload.uid) }),
             ...(payload.userCode && { providerUserCode: digest(generationId, 'user-code', payload.userCode) }),
             payload: secrets.artifacts.seal(unconsumed, [generationId, kind, identity.artifactId]),
-            expiresAt: new Date(time.getTime() + expiry * 1000),
+            expiresAt,
           };
           await artifacts(db).updateOne({ _id, ...identity }, { $set: fields, $setOnInsert: { consumedAt: null } },
             { ...durable, upsert: true });
+          return true;
         });
+        if (!saved) throw new errors.InvalidGrant('The Planner authorization has expired or been revoked.');
       },
       find: (id) => find((generationId) => artifactIdentity(generationId, kind, id)),
       findByUserCode: (code) => find((generationId) => ({ providerUserCode: digest(generationId, 'user-code', code) })),
@@ -164,8 +187,14 @@ export function createOAuthStorage(
         const consumed = await run(true, async ({ db, generationId }) => {
           const time = now();
           const identity = artifactIdentity(generationId, kind, rawId);
-          const row = await artifacts(db).findOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } });
-          if (!row || (row.providerGrantId && !await currentArtifactGrant({ db, generationId }, kind, row.providerGrantId, time))) return false;
+          const row = await artifacts(db).findOne({ ...identity, expiresAt: { $gt: time } });
+          if (!row) return false;
+          const grant = row.providerGrantId && await currentArtifactGrant({ db, generationId }, kind, row.providerGrantId, time);
+          if ((row.providerGrantId && !grant) || (kind === 'RefreshToken' && (!grant || !refreshMatches(grant, decode(row))))) return false;
+          if (row.consumedAt !== null) {
+            if (kind === 'RefreshToken' && grant) await revokeGrant(db, generationId, grant.providerGrantId, time);
+            return false;
+          }
           const saved = await artifacts(db).updateOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } },
             { $set: { consumedAt: time } }, durable);
           return saved.modifiedCount === 1;
@@ -174,19 +203,17 @@ export function createOAuthStorage(
       },
       async destroy(rawId) {
         await run(true, async ({ db, generationId }) => {
-          if (kind === 'Grant') {
-            await connections(db).updateOne({ generationId, providerGrantId: grantKey(generationId, rawId), revokedAt: { $type: 'null' } },
-              { $set: { revokedAt: now() } }, durable);
-          }
-          await artifacts(db).deleteOne(artifactIdentity(generationId, kind, rawId), durable);
+          if (kind === 'Grant') await revokeGrant(db, generationId, grantKey(generationId, rawId), now());
+          await artifacts(db).deleteOne({ ...artifactIdentity(generationId, kind, rawId),
+            ...(kind === 'RefreshToken' && { consumedAt: { $type: 'null' } }) }, durable);
         });
       },
       async revokeByGrantId(rawId) {
         await run(true, async ({ db, generationId }) => {
           const providerGrantId = grantKey(generationId, rawId);
-          await connections(db).updateOne({ generationId, providerGrantId, revokedAt: { $type: 'null' } },
-            { $set: { revokedAt: now() } }, durable);
-          await artifacts(db).deleteMany({ generationId, kind, providerGrantId }, durable);
+          await revokeGrant(db, generationId, providerGrantId, now());
+          await artifacts(db).deleteMany({ generationId, kind, providerGrantId,
+            ...(kind === 'RefreshToken' && { consumedAt: { $type: 'null' } }) }, durable);
         });
       },
     };
@@ -199,6 +226,11 @@ export function createOAuthStorage(
     if (session.account.auth.mfa !== 'none'
       && (!session.factorVerifiedAt || time.getTime() - session.factorVerifiedAt.getTime() >= freshAuthorizationMs)) return null;
     return session;
+  }
+
+  async function ownConnectionScope(db: Db, token: string) {
+    const session = await loadCurrentBrowserSession(db, installationId, token, now());
+    return session && { generationId: session.generationId, userId: session.account.actor.id };
   }
 
   return {
@@ -220,7 +252,7 @@ export function createOAuthStorage(
     accountExists: (id: string) => run(false, async ({ db, generationId }) =>
       publicIdSchema.safeParse(id).success && !!getLocalAccount(await accounts(db).findOne({ _id: workspaceKey(generationId, id), generationId, id }))),
     browserSession: (token: string) => run(false, ({ db, generationId }) => freshBrowserSession(db, generationId, token)),
-    acceptConsent(input: { interactionId: string; token: string; sessionId: string; grantId?: string; clientId: string; scope: string }) {
+    acceptConsent(input: { interactionId: string; token: string; sessionId: string; grantId?: string; clientId: string; clientName: string; scope: string; resource: string; offline: boolean }) {
       return run(true, async ({ db, generationId }) => {
         const session = await freshBrowserSession(db, generationId, input.token);
         if (!session || session.sessionId !== input.sessionId) return null;
@@ -236,12 +268,46 @@ export function createOAuthStorage(
           const providerGrantId = grantKey(generationId, input.grantId);
           const id = deterministicId(Buffer.from(providerGrantId, 'base64url'));
           await connections(db).insertOne({ _id: workspaceKey(generationId, id), generationId, id, userId: session.account.actor.id,
-            clientId: input.clientId, providerGrantId, browserSessionId: session.sessionId,
-            credentialsVersion: session.account.auth.credentialsVersion, factorId: session.factorId ?? null, scope: input.scope,
-            issuedAt: time, expiresAt: new Date(time.getTime() + connectionLifetimeMs), revokedAt: null,
+            clientId: input.clientId, clientName: input.clientName, providerGrantId, browserSessionId: session.sessionId,
+            credentialsVersion: session.account.auth.credentialsVersion, factorId: session.factorId ?? null,
+            scope: input.scope, resource: input.resource, offline: input.offline, issuedAt: time, expiresAt: new Date(time.getTime() + connectionLifetimeMs), revokedAt: null,
           }, durable);
         }
         return session.account.actor.id;
+      });
+    },
+    listConnections(db: Db, token: string, after?: string) {
+      return gate.readSnapshot(async () => {
+        const scope = await ownConnectionScope(db, token);
+        if (!scope) return null;
+        const time = now();
+        const size = 50;
+        const records = await connections(db).find({ ...scope, ...(after && { id: { $gt: after } }) }).sort({ id: 1 }).limit(size + 1).toArray();
+        const rows = records.slice(0, size);
+        return {
+          connections: rows.filter((row) => publicIdSchema.safeParse(row.id).success && isStoredDate(row.issuedAt)
+            && isStoredDate(row.expiresAt) && typeof row.scope === 'string' && row.scope.split(' ').includes('planner:read')).map((row) => ({
+            id: row.id, name: typeof row.clientName === 'string' && row.clientName.trim().length > 0 && row.clientName.length <= 80
+              && !/[\p{Cc}\p{Cf}]/u.test(row.clientName) ? row.clientName : 'Connected client',
+            scopes: (['planner:read', 'planner:write'] as const).filter((entry) => row.scope.split(' ').includes(entry)),
+            issuedAt: row.issuedAt.toISOString(), offline: row.offline === true,
+            status: row.revokedAt !== null ? 'revoked' as const : row.expiresAt <= time ? 'expired' as const : 'active' as const,
+          })),
+          next: records.length > size ? rows[size - 1].id : null,
+        };
+      });
+    },
+    revokeConnection(db: Db, token: string, id: string) {
+      return gate.runCommand(async () => {
+        const scope = await ownConnectionScope(db, token);
+        if (!scope) return null;
+        const grant = await connections(db).findOne({ ...scope, id, _id: workspaceKey(scope.generationId, id) });
+        if (!grant) return false;
+        // The connection stops authorizing immediately, even if cleanup has to be retried.
+        await revokeGrant(db, scope.generationId, grant.providerGrantId, now());
+        await artifacts(db).deleteMany({ ...scope, providerGrantId: grant.providerGrantId,
+          $or: [{ kind: { $ne: 'RefreshToken' } }, { consumedAt: { $type: 'null' } }] }, durable);
+        return { generationId: scope.generationId, grantId: id };
       });
     },
     async accessToken(token: string) {
@@ -254,7 +320,7 @@ export function createOAuthStorage(
         const grant = await currentGrant({ db, generationId }, row.providerGrantId, time);
         const payload = decode(row);
         if (!grant || grant.userId !== row.userId || grant.clientId !== row.clientId || typeof payload.scope !== 'string'
-            || payload.accountId !== grant.userId || payload.clientId !== grant.clientId
+            || (grant.resource !== undefined && payload.aud !== grant.resource) || payload.accountId !== grant.userId || payload.clientId !== grant.clientId
             || !payload.scope.split(' ').every((scope) => grant.scope.split(' ').includes(scope))) return null;
         return { generationId, userId: grant.userId, clientId: grant.clientId,
           audience: payload.aud, scope: payload.scope, grantId: grant.id };

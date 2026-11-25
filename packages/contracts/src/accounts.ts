@@ -108,3 +108,15 @@ export type ProfileUpdate = z.infer<typeof profileUpdateSchema>;
 export type PreferencesUpdate = z.infer<typeof preferencesUpdateSchema>;
 export type PasswordChange = z.infer<typeof passwordChangeSchema>;
 export type AccountRecoveryInput = z.infer<typeof accountRecoveryInputSchema>;
+
+export const oauthConnectionPageSchema = z.strictObject({
+  connections: z.array(z.strictObject({
+    id: publicIdSchema,
+    name: z.string().min(1).max(80),
+    scopes: z.array(z.enum(['planner:read', 'planner:write'])).min(1).max(2),
+    offline: z.boolean(),
+    status: z.enum(['active', 'expired', 'revoked']),
+    issuedAt: utcInstantSchema,
+  })).max(50),
+  next: publicIdSchema.nullable(),
+});
