@@ -3,9 +3,12 @@ import { readFileSync } from 'node:fs';
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const { releases } = JSON.parse(read('source-pins.json'));
 
-export function assembleSnapshot(release) {
+export function assembleSnapshot(release, scenario) {
   if (!Object.hasOwn(releases, release)) {
     throw new Error(`Unsupported PLANKA fixture release: ${release}`);
+  }
+  if (scenario !== undefined && !['clean', 'inconsistent', 'ambiguous'].includes(scenario)) {
+    throw new Error('Unsupported PLANKA fixture scenario.');
   }
   return [
     'BEGIN;\n',
@@ -17,10 +20,12 @@ export function assembleSnapshot(release) {
     'INSERT INTO migration_lock (is_locked) VALUES (0);\n',
     read(`${release}/identity.sql`),
     read('data.sql'),
+    ...(scenario ? [read('matrix.sql')] : []),
+    ...(scenario && scenario !== 'inconsistent' ? [read(`matrix-${scenario}.sql`)] : []),
     'COMMIT;\n',
   ].join('');
 }
 
 if (import.meta.main) {
-  process.stdout.write(assembleSnapshot(process.argv[2]));
+  process.stdout.write(assembleSnapshot(process.argv[2], process.argv[3]));
 }

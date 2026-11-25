@@ -111,6 +111,8 @@ try {
 JS
 printf 'NATIVE MIGRATION ADMINISTRATOR RECOVERY ACCEPTANCE PASSED\n'
 
-if [ -n "$cutover" ]; then
+if [ "$cutover" = matrix ]; then
+    "$node" "$media/native-migration-matrix-check.mjs" "$run_id" "$cert" "$work/recovery-code" "${@:4}"
+elif [ -n "$cutover" ]; then
     "$node" "$media/native-migration-cutover.mjs" "$run_id" "$cert" "$work/recovery-code" "$cutover"
 fi

@@ -44,6 +44,7 @@ import { createPrivateMediaStore } from '../../apps/backend/dist/storage/blobs/p
 import { legacyPublicId, workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace } from '../../apps/backend/dist/storage/scoped.js';
+import { assertReport, sharedImageKey } from '../fixtures/planka/matrix-oracle.mjs';
 import { assembleSnapshot } from '../fixtures/planka/snapshot.mjs';
 import { startFixturePostgres } from '../fixtures/planka/private-postgres.mjs';
 import { withFixtureMongo } from '../support/fixture-mongo.ts';
@@ -61,8 +62,8 @@ async function privateAssets(directory) {
   }
 }
 
-async function configureSource(root, postgres, tag) {
-  const suffix = tag.replaceAll('.', '');
+async function configureSource(root, postgres, tag, scenario) {
+  const suffix = tag.replaceAll('.', '') + (scenario ? '_' + scenario : '');
   const database = 'planka_base_' + suffix;
   const directory = join(root, suffix);
   await mkdir(directory, { mode: 0o700 });
@@ -73,8 +74,14 @@ async function configureSource(root, postgres, tag) {
   const assets = join(directory, 'assets');
   await cp(new URL('../fixtures/planka/' + tag + '/assets/', import.meta.url), assets, { recursive: true });
   await privateAssets(assets);
-  const dump = assembleSnapshot(tag);
+  const dump = assembleSnapshot(tag, scenario);
   await writeFile(join(directory, 'source.sql'), dump, { mode: 0o600 });
+  if (scenario) {
+    const path = join(directory, 'manifest.json');
+    const capture = JSON.parse(await readFile(path, 'utf8'));
+    capture.source.dumpSha256 = sha256(Buffer.from(dump));
+    await writeFile(path, JSON.stringify(capture));
+  }
   postgres.createDatabase(database);
   const update = (sql) => postgres.write(database, sql);
   update(dump);
@@ -1377,5 +1384,50 @@ test('native migration replay survives SIGKILL before the stage checkpoint and a
         assert.equal(await db.collection('events').countDocuments(scoped), 0);
         assert.deepEqual(await readFile(source.input.manifest), raw);
       } finally { owned.release(); await store.close(); await directory.close(); }
+    }));
+  });
+
+
+test('both frozen PLANKA pins reconcile independently counted clean, inconsistent and ambiguous fixtures',
+  { timeout: 150_000, skip: !mediaDecoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required' }, async (t) => {
+    const root = await mkdtemp(join(homedir(), '.planner-migration-matrix-'));
+    t.after(() => rm(root, { force: true, recursive: true }));
+    const postgres = await startFixturePostgres(t, root);
+    postgres.write('postgres', 'ALTER ROLE fixture_reader NOINHERIT');
+    const decode = createMediaDecoder(fileURLToPath(new URL('../../ops/package/decode-media.py', import.meta.url)), mediaPython);
+    await withFixtureMongo((fixture) => loadTarget(fixture, async ({ db, lease, cursors, installationId }) => {
+      const staging = join(fixture.directory, 'staging');
+      const blobs = join(fixture.directory, 'blobs');
+      await mkdir(staging, { mode: 0o700 });
+      await mkdir(blobs, { mode: 0o700 });
+      const store = await createPrivateMediaStore(staging, blobs);
+      try {
+        for (const release of ['2.3.0', '2.3.1']) {
+          for (const scenario of ['clean', 'inconsistent', 'ambiguous']) {
+            const files = await configureSource(root, postgres, release, scenario);
+            const object = (release === '2.3.1' && scenario === 'clean')
+              || (release === '2.3.0' && scenario === 'inconsistent');
+            const source = object ? await frozenObjects(t, files, root) : files;
+            if (scenario === 'inconsistent') {
+              if (object) source.missing.add(sharedImageKey);
+              else await unlink(join(files.input.assetsRoot, sharedImageKey));
+            }
+            const receipt = await inspect(source);
+            const identity = await createRun(db, installationId, receipt);
+            await withMigrationSnapshot(source.input, owner, source.config, source.objectConfig,
+              { expectedFingerprint: identity.fingerprint.sha256 }, (snapshot) =>
+                stageMigrationWorkspace(db, lease, identity, snapshot, cursors, { store, decode }, 4));
+            const run = await db.collection('importRuns').findOne(importRunKey(identity));
+            const { value: report } = await withMigrationSnapshot(source.input, owner, source.config, source.objectConfig,
+              { expectedFingerprint: identity.fingerprint.sha256 }, async (snapshot) => {
+                await beginMigrationVerification(lease, db, run, snapshot, cursors);
+                return collectMigrationVerification(db, lease, identity, snapshot, cursors,
+                  { verifyBlob: store.verifyBlob, scratch: store, decode }, new AbortController().signal);
+              });
+            assertReport(publicMigrationVerification(report), report.details, scenario);
+            assert.equal(report.missing.length, Number(scenario === 'inconsistent'));
+          }
+        }
+      } finally { await store.close(); }
     }));
   });
