@@ -19,6 +19,7 @@ import { proxyTokenPattern } from './native/http-boundary.js';
 import { createNativeMedia, withNativeMediaDatabase } from './native/media-routes.js';
 import { assertNativeMfaKey, readNativeMfaKey } from './native/mfa-key.js';
 import { readProtectedFile } from './native/mongo-host.js';
+import { createNativeOAuth } from './native/oauth-routes.js';
 import { proxyRuntimeDirectory, startProxySocket } from './native/proxy-socket.js';
 import { createNativeWorkspaceRelationships } from './native/relationship-routes.js';
 import { boundedRuntimeProbe, inspectRuntimeAccess } from './native/runtime-access.js';
@@ -73,6 +74,7 @@ try {
     closeAdmin = await startAdminSocket(adminRuntimeDirectory, readAccess, auth.accountManagement, createNativeBackup(config, gate, mfaKey, mediaStore));
     dependencies = { frontendRoot, native: {
       origin: config.publicUrl, proxyToken, readAccess, auth,
+      oauth: createNativeOAuth(config, gate, mfaKey.key),
       workspace: createNativeWorkspaceReader(config, gate, events.cursors),
       relationships: createNativeWorkspaceRelationships(config, gate, events.wake, events.streams.revalidateBoards),
       boardEvents: events.streams,

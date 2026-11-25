@@ -148,7 +148,7 @@ export function registerNativeBrowserAuth(app: FastifyInstance, auth: BrowserAut
     // The transport boundary alone handles health, immutable assets, and the exact staged enrollment paths.
     if (request.plannerAccess?.kind !== 'ready') return;
     const pathname = requestPath(request);
-    if (isPublicBrowserRoute(request.method, pathname, !!auth.mfa)) return;
+    if (isPublicBrowserRoute(request.method, pathname, !!auth.mfa) || request.routeOptions.config.plannerOAuth === true) return;
     // The exact SSE handler validates a passive session under its own read lease.
     if (request.method === 'GET' && request.routeOptions.url === boardEventsPath
         && request.routeOptions.config.plannerPassiveSession) return;

@@ -2,12 +2,14 @@ export interface OwnedIndex {
   name: string;
   keys: [string, 1 | -1][];
   unique?: true;
+  expireAfterSeconds?: number;
+  installOnUse?: true;
   partialFilterExpression?: Record<string, unknown>;
 }
 
 function index(
   name: string, fields: readonly (string | [string, -1])[],
-  options: Pick<OwnedIndex, 'unique' | 'partialFilterExpression'> = {},
+  options: Pick<OwnedIndex, 'unique' | 'partialFilterExpression' | 'installOnUse'> = {},
 ): OwnedIndex {
   return {
     name,
@@ -108,6 +110,10 @@ export const collectionIndexes = {
     index('provider_artifact', ['kind', 'artifactId'], unique),
     index('user_client', ['userId', 'clientId']),
     index('expiry_consumption', ['expiresAt', 'consumedAt']),
+    index('provider_uid', ['kind', 'providerUid'], { installOnUse: true }),
+    index('provider_user_code', ['kind', 'providerUserCode'], { installOnUse: true }),
+    index('provider_grant_artifacts', ['providerGrantId'], { installOnUse: true }),
+    { name: 'provider_expiry', keys: [['expiresAt', 1]], expireAfterSeconds: 0, installOnUse: true },
   ],
   oauthConnections: [
     index('provider_grant', ['providerGrantId'], {

@@ -23,6 +23,10 @@ const boardParameters = {
   cursor: (value: string) => cursor.test(value),
 };
 
+export function isOAuthInteractionPath(path: string) {
+  return /^\/oauth\/interaction\/[a-zA-Z0-9_-]{16,64}$/u.test(path);
+}
+
 export function workspaceReturnPath(value: unknown) {
   if (typeof value !== 'string' || value.length > 15_000 || !value.startsWith('/') || value.startsWith('//')
       || /[\\\u0000-\u0020\u007f]/u.test(value)) return null;
@@ -30,6 +34,7 @@ export function workspaceReturnPath(value: unknown) {
     const base = 'https://planner.invalid';
     const url = new URL(value, base);
     if (url.origin !== base) return null;
+    if (isOAuthInteractionPath(value)) return value;
     const pathname = url.pathname.replace(/\/$/u, '');
     const boardPath = board.test(pathname);
     if (!boardPath && value.length > 6_000) return null;

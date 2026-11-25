@@ -20,6 +20,7 @@ export const firstAdminInputSchema = z.strictObject({
 export const loginInputSchema = z.strictObject({
   identifier: z.string().max(254),
   password: z.string().max(256),
+  requireMfaChallenge: z.literal(true).optional(),
 });
 export const sessionActorSchema = z.strictObject({
   id: publicIdSchema,
