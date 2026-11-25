@@ -10,6 +10,7 @@ const devicesPath = '/me/trusted-devices';
 const connectionsPath = '/me/connections';
 const readConnections = (after?: string) => factorRequest(connectionsPath + (after ? '?after=' + after : ''), 'GET', oauthConnectionPageSchema);
 const noContent = { parse: () => undefined };
+const linkedDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 export async function loadMfaSettings() {
   const [mfa, connections] = await Promise.all([factorRequest(devicesPath, 'GET', trustedDevicesOutputSchema), readConnections()]);
   return { ...mfa, connections };
@@ -119,6 +120,8 @@ export function MfaSettingsPage() {
             <ul className="mfa-devices">{connections.connections.map((item) => (
               <li key={item.id}>
                 <span>{item.name} · {item.scopes.includes('planner:write') ? 'Read and write' : 'Read only'}
+                  {' · '}{item.offline ? 'Continued access' : 'Short-lived access'}{' · Linked '}
+                  <time dateTime={item.issuedAt}>{linkedDate.format(new Date(item.issuedAt))}</time>
                   {item.status !== 'active' ? ` · ${item.status === 'expired' ? 'Expired' : 'Disconnected'}` : ''}</span>
                 {item.status === 'active' && <button className="account-link" disabled={busy}
                   onClick={() => void disconnect(item.id)} type="button">Disconnect</button>}

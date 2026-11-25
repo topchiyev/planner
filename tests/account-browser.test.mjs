@@ -181,14 +181,14 @@ test('Chromium shows and disconnects only the signed-in account’s OAuth connec
       const other = await f.seed('other@example.test');
       const now = new Date();
       const grants = mongo.db.collection('oauthConnections');
-      async function seedConnection(userId, clientName) {
+      async function seedConnection(userId, clientName, offline = false) {
         const id = randomUUID();
         await grants.insertOne({ _id: workspaceKey(f.generationId, id), generationId: f.generationId, id,
           userId, clientName, clientId: clientName, providerGrantId: randomUUID(), credentialsVersion: 1, factorId: null,
-          scope: 'planner:read', issuedAt: now, expiresAt: new Date(now.getTime() + 60_000), revokedAt: null });
+          scope: 'planner:read', offline, issuedAt: now, expiresAt: new Date(now.getTime() + 60_000), revokedAt: null });
         return id;
       }
-      const selected = await seedConnection(account.id, 'Synthetic Codex');
+      const selected = await seedConnection(account.id, 'Synthetic Codex', true);
       const kept = await seedConnection(account.id, 'Synthetic editor');
       const hidden = await seedConnection(other.id, 'Someone else’s client');
       web = await tlsBridge(mongo.directory, (origin) => f.startBrowser(origin, { oauth: true }));
@@ -200,6 +200,9 @@ test('Chromium shows and disconnects only the signed-in account’s OAuth connec
       await expect(page.getByRole('heading', { name: 'Connected clients' })).toBeVisible();
       const item = page.getByRole('listitem').filter({ hasText: 'Synthetic Codex' });
       await expect(item).toContainText('Read only');
+      await expect(item).toContainText('Continued access');
+      await expect(item.locator('time')).toHaveAttribute('datetime', now.toISOString());
+      await expect(page.getByRole('listitem').filter({ hasText: 'Synthetic editor' })).toContainText('Short-lived access');
       await expect(page.getByText('Someone else’s client')).toHaveCount(0);
       await item.getByRole('button', { name: 'Disconnect' }).click();
       await expect(item).toContainText('Disconnected');
