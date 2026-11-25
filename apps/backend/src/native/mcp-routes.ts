@@ -37,19 +37,29 @@ export function registerNativeMcpRoutes(app: FastifyInstance, oauth: NativeOAuth
           generationId: current.generationId, clientId: current.clientId, grantId: current.grantId, actor: current.actor,
         });
       })),
-      ...(writes && clientId && { write: (name: string, input: unknown) => oauth.withCommandDatabase((database, gate, installationId) =>
-        executeMcpMutation({
-          database, gate, installationId, actorId: access.userId,
-          attribution: { origin: 'mcp', clientId },
-          media: createMediaService(database, installationId, gate, writes.store, writes.decode, { afterCommit: writes.afterCommit }),
-          afterCommit: writes.afterCommit, onCommitted: writes.onCommitted,
-          async resolve({ actorId, generationId }) {
-            if (actorId !== access.userId || generationId !== access.generationId) throw new WorkspaceAccessError('session');
-            const current = await storage.currentAccessTokenForCommand(database, generationId, token);
-            if (!current || !matches(current) || registry.auditId(current.clientId) !== clientId) throw new WorkspaceAccessError('session');
-            return createWorkspaceAuthorization(database, generationId, current.actor);
-          },
-        }, name, input)) }),
+      ...(writes && clientId && { write: (name: string, input: unknown) =>
+        oauth.withCommandDatabase(async (database, gate, installationId) => {
+          let expiresAtMs = Infinity;
+          try {
+            return await executeMcpMutation({
+              database, gate, installationId, actorId: access.userId,
+              attribution: { origin: 'mcp', clientId },
+              media: createMediaService(database, installationId, gate, writes.store, writes.decode, { afterCommit: writes.afterCommit }),
+              afterCommit: writes.afterCommit, onCommitted: writes.onCommitted,
+              async resolve({ actorId, generationId }) {
+                if (actorId !== access.userId || generationId !== access.generationId) throw new WorkspaceAccessError('session');
+                const current = await storage.currentAccessTokenForCommand(database, generationId, token);
+                if (!current || !matches(current) || registry.auditId(current.clientId) !== clientId) throw new WorkspaceAccessError('session');
+                expiresAtMs = Math.min(expiresAtMs, current.expiresAtMs);
+                return createWorkspaceAuthorization(database, generationId, current.actor);
+              },
+            }, name, input);
+          } finally {
+            // Check both committed receipts and data attached to typed rejections (such as stale placement).
+            // A response deadline never rolls back the durable command or alters its same-key receipt.
+            if (!storage.accessTokenProofCurrent(expiresAtMs)) throw new WorkspaceAccessError('session');
+          }
+        }) }),
     };
   }, surface);
   const nodeHandler = toNodeHandler(handler, { maxRequestBodySize: mcpBodyLimit });
