@@ -1,17 +1,24 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createSecretKey, randomBytes, randomUUID } from 'node:crypto';
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { once } from 'node:events';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:https';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { getCACertificates, setDefaultCACertificates } from 'node:tls';
+import { fileURLToPath } from 'node:url';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { getLocalAccount } from '../../apps/backend/dist/application/auth/accounts.js';
 import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
 import { importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
-import { MigrationError } from '../../apps/backend/dist/application/migration/manifest.js';
+import { createMediaDecoder } from '../../apps/backend/dist/application/media/decoder.js';
+import { catalogVariants, mediaRecords } from '../../apps/backend/dist/application/media/records.js';
+import { MigrationError, sha256 } from '../../apps/backend/dist/application/migration/manifest.js';
 import { inspectMigration, withMigrationSnapshot } from '../../apps/backend/dist/application/migration/preflight.js';
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
-import { stageBaseWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
+import { stageBaseWorkspace, stageMigrationWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
 import { createWorkspaceReads } from '../../apps/backend/dist/application/workspace/reads.js';
 import { rewriteImportedMentions } from '../../apps/backend/dist/application/migration/historical-mentions.js';
@@ -19,6 +26,7 @@ import { createChecklistReads } from '../../apps/backend/dist/application/worksp
 import { eligibleBoardPeople } from '../../apps/backend/dist/application/workspace/eligible-members.js';
 import { projectFieldGroup } from '../../apps/backend/dist/application/workspace/field-state.js';
 import { createWorkspaceRecords } from '../../apps/backend/dist/application/workspace/records.js';
+import { createPrivateMediaStore } from '../../apps/backend/dist/storage/blobs/private-store.js';
 import { legacyPublicId, workspaceKey } from '../../apps/backend/dist/storage/identity.js';
 import { migrateStorageSchema } from '../../apps/backend/dist/storage/schema.js';
 import { openActiveWorkspace, openTrustedStagedWorkspace } from '../../apps/backend/dist/storage/scoped.js';
@@ -318,7 +326,7 @@ async function assertDiscussionGraph(db, receipt, generationId, id) {
 }
 
 async function inspect(source) {
-  return inspectMigration(source.input, owner, source.config);
+  return inspectMigration(source.input, owner, source.config, source.objectConfig);
 }
 
 test('both verified Community captures stage the exact inactive core graph with replay-safe ranks and credentials excluded', async (t) => {
@@ -796,3 +804,210 @@ test('staged discussions validate every kind, retain private snapshots and admit
     assert.equal(await db.collection('events').countDocuments(failed), 0);
   }));
 });
+
+async function frozenObjects(t, source, directory) {
+  const capture = JSON.parse(await readFile(source.input.manifest, 'utf8'));
+  const assetManifestPath = join(dirname(source.input.manifest), 'asset-manifest.json');
+  const manifest = JSON.parse(await readFile(assetManifestPath, 'utf8'));
+  const versions = new Map(manifest.files.map((file, index) => {
+    file.versionId = `version_${index + 1}`;
+    return [file.key, file.versionId];
+  }));
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  capture.asset.kind = 'object';
+  capture.asset.manifestSha256 = sha256(manifestBytes);
+  await writeFile(assetManifestPath, manifestBytes);
+  await writeFile(source.input.manifest, JSON.stringify(capture));
+  const keyPath = join(directory, 'fixture-tls-key');
+  const certPath = join(directory, 'fixture-tls-cert');
+  assert.equal(spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', keyPath, '-out', certPath],
+  { stdio: 'ignore' }).status, 0);
+  const cert = await readFile(certPath, 'utf8');
+  const defaults = getCACertificates('default');
+  setDefaultCACertificates([...defaults, cert]);
+  const requests = [];
+  const missing = new Set();
+  const mismatched = new Set();
+  const server = createServer({ cert, key: await readFile(keyPath) }, async (request, response) => {
+    try {
+      const url = new URL(request.url, 'https://127.0.0.1');
+      const key = decodeURIComponent(url.pathname.slice('/frozen/'.length));
+      const version = versions.get(key);
+      requests.push({ path: url.pathname, version: url.searchParams.get('versionId') });
+      if (request.method !== 'GET' || !url.pathname.startsWith('/frozen/') || !version
+        || url.searchParams.get('versionId') !== version || missing.has(key)) return response.writeHead(404).end();
+      const bytes = await readFile(join(source.input.assetsRoot, key));
+      response.writeHead(200, { 'Content-Length': bytes.length,
+        'X-Amz-Version-Id': mismatched.has(key) ? 'wrong-version' : version }).end(bytes);
+    } catch { response.writeHead(500).end(); }
+  });
+  t.after(async () => {
+    setDefaultCACertificates(defaults);
+    await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `https://127.0.0.1:${server.address().port}/frozen/`;
+  const { assetsRoot: _assetsRoot, ...input } = source.input;
+  return { ...source, input: { ...input, assetService: 'fixture' },
+    objectConfig: JSON.stringify({ fixture: { base, snapshotId: capture.asset.snapshotId } }), requests, versions, missing, mismatched };
+}
+
+function interruptMediaStore(store, point) {
+  return { ...store, async stage() {
+    const stage = await store.stage();
+    return { ...stage, async publish(items) {
+      if (point === 'published') (await stage.publish(items.slice(0, 1)))();
+      throw new MigrationError('target-write', 'Interrupted at media publication.');
+    }, async dispose() { /* Simulate scratch left by a dead writer. */ } };
+  } };
+}
+
+const mediaPython = process.env.PLANNER_TEST_MEDIA_PYTHON ?? undefined;
+const mediaDecoderAvailable = mediaPython || spawnSync('/usr/bin/python3', ['-I', '-B', '-c', 'import PIL'], { stdio: 'ignore' }).status === 0;
+
+test('verified PLANKA directory and object media stage exact bytes and independent references behind the generation fence',
+  { timeout: 100_000, skip: !mediaDecoderAvailable && 'Ubuntu python3-pil or PLANNER_TEST_MEDIA_PYTHON is required' }, async (t) => {
+    const root = await mkdtemp(join(homedir(), '.planner-migration-media-'));
+    t.after(() => rm(root, { force: true, recursive: true }));
+    const postgres = await startFixturePostgres(t, root);
+    postgres.write('postgres', 'ALTER ROLE fixture_reader NOINHERIT');
+    const local = await configureSource(root, postgres, '2.3.0');
+    const objectFiles = await configureSource(root, postgres, '2.3.1');
+    const objects = await frozenObjects(t, objectFiles, root);
+    local.update(await readFile(new URL('../fixtures/planka/unsupported-link.sql', import.meta.url), 'utf8'));
+    const originalKey = 'private/attachments/9007199254741220/Re\u0301seau Tile.png';
+    const derivativeKey = 'private/attachments/9007199254741220/thumbnails/outside-720.png';
+    const wrongKey = join(local.input.assetsRoot, originalKey.replace('Re\u0301seau', 're\u0301seau'));
+    const originalFile = join(local.input.assetsRoot, originalKey);
+    const bytes = await readFile(originalFile);
+    const digest = sha256(bytes);
+    await rename(originalFile, wrongKey);
+    await assert.rejects(inspect(local), refuses('asset-key'));
+    await rename(wrongKey, originalFile);
+    await assert.rejects(withMigrationSnapshot(local.input, owner, local.config, undefined, {}, async (snapshot) => {
+      const corrupt = Buffer.from(bytes);
+      corrupt[corrupt.length - 1] ^= 0xff;
+      await writeFile(originalFile, corrupt);
+      try {
+        await snapshot.readAsset(originalKey, new AbortController().signal, async (input) => {
+          for await (const _chunk of input) { /* The same-length mutation must fail the streaming checksum. */ }
+        });
+      } finally { await writeFile(originalFile, bytes); }
+    }), refuses('asset-integrity'));
+    objects.missing.add(derivativeKey);
+    const localReceipt = await inspect(local);
+    const objectReceipt = await inspect(objects);
+    assert.deepEqual(objectReceipt.assets, { present: 8, missingOriginals: 0, missingDerivatives: 1 });
+    const decode = createMediaDecoder(fileURLToPath(new URL('../../ops/package/decode-media.py', import.meta.url)), mediaPython);
+    await withFixtureMongo((fixture) => loadTarget(fixture, async (target) => {
+      const { db, lease, cursors, installationId, activeGenerationId } = target;
+      const staging = join(fixture.directory, 'staging');
+      const blobs = join(fixture.directory, 'blobs');
+      await mkdir(staging, { mode: 0o700 });
+      await mkdir(blobs, { mode: 0o700 });
+      let store = await createPrivateMediaStore(staging, blobs);
+      t.after(() => store.close());
+      const stage = (source, identity, mediaStore = store, database = db) => withMigrationSnapshot(source.input, owner,
+        source.config, source.objectConfig, { expectedFingerprint: identity.fingerprint.sha256 }, (snapshot) =>
+          stageMigrationWorkspace(database, lease, identity, snapshot, cursors, { store: mediaStore, decode }, 1)).then(({ value }) => value);
+      const localRun = await createRun(db, installationId, localReceipt);
+      const localId = publicIds(localReceipt.capture.source.instanceId);
+      const scoped = { generationId: localRun.generationId };
+      const saved = () => db.collection('importRuns').findOne(importRunKey(localRun));
+      await assert.rejects(stage(local, localRun, interruptMediaStore(store, 'staged')), refuses('target-write'));
+      const beforeMedia = (await saved()).checkpoint;
+      assert.equal(beforeMedia.pass, 'projections');
+      assert.equal((await readdir(staging)).length, 1);
+      assert.deepEqual(await readdir(blobs), []);
+      await store.close();
+      store = await createPrivateMediaStore(staging, blobs);
+      await assert.rejects(stage(local, localRun, interruptMediaStore(store, 'published')), refuses('target-write'));
+      assert.deepEqual((await saved()).checkpoint, beforeMedia);
+      assert.equal((await readdir(staging)).length, 2);
+      assert.deepEqual(await readdir(blobs), [digest]);
+      assert.deepEqual(await readFile(join(blobs, digest)), bytes);
+      assert.equal(await db.collection('attachments').countDocuments(scoped), 0);
+      await store.close();
+      store = await createPrivateMediaStore(staging, blobs);
+      await assert.rejects(stage(local, localRun, store, interruptCheckpoint(db, 'media', 'attachment')), refuses('target-write'));
+      assert.deepEqual((await saved()).checkpoint, beforeMedia);
+      assert.equal(await db.collection('attachments').countDocuments(scoped), 1);
+      const checkpoint = await stage(local, localRun);
+      assert.equal(checkpoint.pass, 'media');
+      assert.equal(checkpoint.table, 'user_account');
+      assert.deepEqual(await stage(local, localRun), checkpoint);
+      await store.sweepStages(128, Date.now() + 1000);
+      assert.deepEqual(await readdir(staging), []);
+      const counts = { attachments: 7, projectBackgrounds: 1, blobs: 4, events: 0, commands: 0, sessions: 0 };
+      for (const [collection, count] of Object.entries(counts)) assert.equal(await db.collection(collection).countDocuments(scoped), count, collection);
+      const files = mediaRecords(db, localRun.generationId);
+      const image = await files.attachment(localId('attachment', '601'));
+      const shared = await files.attachment(localId('attachment', '602'));
+      assert.notEqual(image.id, shared.id);
+      assert.notEqual(image.cardId, shared.cardId);
+      assert.deepEqual([image.name, shared.name], ['Cover study', 'Same stored study']);
+      assert.deepEqual([image.blobDigest, shared.blobDigest, image.byteLength], [digest, digest, bytes.length]);
+      assert.equal((await files.attachment(localId('attachment', '603'))).blobDigest,
+        (await files.attachment(localId('attachment', '604'))).blobDigest);
+      const variants = catalogVariants(await files.catalog(digest));
+      await Promise.all(Object.values(variants).map((variant) => store.verifyBlob(variant)));
+      const cover = await readsFor(db, localRun.generationId, localId, '103', 'boardUser').cardGet({ id: image.cardId });
+      assert.equal(cover.data.coverAttachmentId, image.id);
+      assert.equal(cover.data.attachments.find(({ id }) => id === image.id).hasThumbnail, true);
+      const secondCard = await readsFor(db, localRun.generationId, localId, '103', 'boardUser').cardGet({ id: shared.cardId });
+      const inert = secondCard.data.attachments.find(({ id }) => id === localId('attachment', '607'));
+      assert.deepEqual([inert.kind, inert.url, inert.available], ['link', null, false]);
+      assert.equal((await files.attachment(localId('attachment', '606'))).url, 'http://127.0.0.1/fixture-only');
+      for (const [entity, sourceId, expectedLength] of [['user_account', '102', '311'], ['background_image', '211', '419']]) {
+        const { provenance: { media } } = await db.collection('importIds').findOne({ ...scoped, entity, sourceId });
+        assert.equal(media.sourceSize, expectedLength);
+        assert.notEqual(String(media.original.byteLength), expectedLength);
+        const blob = await files.catalog(media.original.sha256);
+        assert.equal(blob.byteLength, media.original.byteLength);
+        const identity = entity === 'user_account' ? (await files.avatar(localId(entity, sourceId))).avatarMedia
+          : await files.background(localId(entity, sourceId));
+        assert.equal(identity.byteLength, media.original.byteLength);
+      }
+      const userView = await openActiveWorkspace(db, installationId);
+      assert.equal(userView.generationId, activeGenerationId);
+      assert.equal(await userView.read('attachments', image.id), null);
+      assert.deepEqual(await readFile(originalFile), bytes);
+
+      const objectRun = await createRun(db, installationId, objectReceipt);
+      const objectId = publicIds(objectReceipt.capture.source.instanceId);
+      await assert.rejects(withMigrationSnapshot(objects.input, owner, objects.config, objects.objectConfig, {}, async (snapshot) => {
+        objects.mismatched.add(originalKey);
+        try { await snapshot.readAsset(originalKey, new AbortController().signal, async () => {}); }
+        finally { objects.mismatched.delete(originalKey); }
+      }), refuses('asset-integrity'));
+      const requestStart = objects.requests.length;
+      await stage(objects, objectRun);
+      const encoded = '/frozen/' + originalKey.split('/').map(encodeURIComponent).join('/');
+      assert.equal(objects.requests.slice(requestStart).filter(({ path, version }) =>
+        path === encoded && version === objects.versions.get(originalKey)).length, 3);
+      const objectMedia = mediaRecords(db, objectRun.generationId);
+      const objectImage = await objectMedia.attachment(objectId('attachment', '601'));
+      assert.equal(objectImage.blobDigest, sha256(await readFile(join(objectFiles.input.assetsRoot, originalKey))));
+      const generated = catalogVariants(await objectMedia.catalog(objectImage.blobDigest));
+      await Promise.all(Object.values(generated).map((variant) => store.verifyBlob(variant)));
+
+      const absentRun = await (async () => {
+        objects.missing.add(originalKey);
+        const receipt = await inspect(objects);
+        assert.equal(receipt.assets.missingOriginals, 1);
+        return createRun(db, installationId, receipt);
+      })();
+      await stage(objects, absentRun);
+      const absent = mediaRecords(db, absentRun.generationId);
+      for (const sourceId of ['601', '602']) {
+        const row = await absent.attachment(objectId('attachment', sourceId));
+        assert.deepEqual([row.availability, row.blobDigest, row.byteLength], ['unavailable', null, undefined]);
+      }
+      const unavailable = await readsFor(db, absentRun.generationId, objectId, '103', 'boardUser').cardGet({ id: objectImage.cardId });
+      assert.equal(unavailable.data.coverAttachmentId, objectImage.id);
+      assert.equal(unavailable.data.attachments.find(({ id }) => id === objectImage.id).available, false);
+      assert.equal(await absent.catalog(objectImage.blobDigest), null);
+    }));
+  });

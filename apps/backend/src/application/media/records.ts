@@ -42,7 +42,7 @@ export interface StoredAvatar {
   revision: number;
   disabledAt: Date | null;
   avatarBlobDigest?: string | null;
-  avatarMedia?: { id: string; name: string; availability: string; byteLength: number } | null;
+  avatarMedia?: { id: string; name: string; availability: string; byteLength: number | null } | null;
 }
 
 export function mediaByteLength(value: unknown) {

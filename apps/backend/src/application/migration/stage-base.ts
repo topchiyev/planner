@@ -4,10 +4,11 @@ import type { WriterLease } from '../command-gate/writer-lease.js';
 import { assertBoardSystemLists, boardHistoryHighWater, openBaseOrder } from './base-order.js';
 import { invalidBaseRow } from './base-fields.js';
 import { baseRelationshipTables, baseWorkspaceTables, reserveSourceRecord, writeBaseRelationship, writeBaseRow } from './base-workspace.js';
-import { importRunKey, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint,
+import { importRunKey, migrationPasses, writeMigrationBatch, type ImportIdentity, type ImportRun, type MigrationCheckpoint,
   type migrationCursors } from './checkpoint.js';
 import { discussionTables, writeImportedDiscussion } from './discussion-stage.js';
 import { MigrationError } from './manifest.js';
+import { createMigrationMediaStage, migrationMediaTables, type MigrationMediaRow, type MigrationMediaTarget } from './media-stage.js';
 import { assertVerifiedSourceSnapshot, type VerifiedSourceSnapshot } from './preflight.js';
 import { maximumSourceBatch, projectedSourceTables } from './source-projections.js';
 import { openImportRecords, type ImportedEntity } from './staged-records.js';
@@ -20,13 +21,24 @@ const stageTables = [
   { pass: 'edges', tables: baseRelationshipTables },
   { pass: 'deferred', tables: workspaceRelationshipTables },
   { pass: 'projections', tables: discussionTables },
+  { pass: 'media', tables: migrationMediaTables },
 ] as const;
 const rankTables = new Set(['project', 'board', 'list', 'card', ...relationshipRankTables]);
-const passOrdinal = ['reserve', 'base', 'edges', 'deferred', 'projections'];
 
 /** Stage the account and core workspace graph without enabling access or producing domain events. */
 export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,
-  cursors: ReturnType<typeof migrationCursors>, batchSize = maximumSourceBatch): Promise<MigrationCheckpoint | null> {
+  cursors: ReturnType<typeof migrationCursors>, batchSize = maximumSourceBatch) {
+  return stageWorkspace(db, lease, identity, snapshot, cursors, batchSize);
+}
+
+/** Stage the complete inactive graph and its verified private media. */
+export function stageMigrationWorkspace(db: Db, lease: WriterLease, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,
+  cursors: ReturnType<typeof migrationCursors>, mediaTarget: MigrationMediaTarget, batchSize = maximumSourceBatch) {
+  return stageWorkspace(db, lease, identity, snapshot, cursors, batchSize, mediaTarget);
+}
+
+async function stageWorkspace(db: Db, lease: WriterLease, identity: ImportIdentity, snapshot: VerifiedSourceSnapshot,
+  cursors: ReturnType<typeof migrationCursors>, batchSize: number, mediaTarget?: MigrationMediaTarget): Promise<MigrationCheckpoint | null> {
   lease.assertHeld();
   assertVerifiedSourceSnapshot(snapshot);
   if (!isDeepStrictEqual(snapshot.fingerprint, identity.fingerprint))
@@ -38,6 +50,7 @@ export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: I
   }
   const { generationId } = identity;
   const records = await openImportRecords(db, lease, identity, run.source.instanceId);
+  const stageMedia = mediaTarget && createMigrationMediaStage(records, snapshot, lease, mediaTarget);
   const { capturedAt } = snapshot.capture;
   let checkpoint = run.checkpoint;
   if (checkpoint && cursors.open({ runId: run.id, generationId, fingerprint: identity.fingerprint.sha256,
@@ -46,8 +59,9 @@ export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: I
   }
 
   for (const { pass, tables } of stageTables) {
+    if (pass === 'media' && !stageMedia) break;
     for (const table of tables) {
-      const previous = checkpoint && (passOrdinal.indexOf(checkpoint.pass) - passOrdinal.indexOf(pass)
+      const previous = checkpoint && (migrationPasses.indexOf(checkpoint.pass) - migrationPasses.indexOf(pass)
         || projectedSourceTables.indexOf(checkpoint.table) - projectedSourceTables.indexOf(table));
       if (previous !== null && (previous > 0 || (previous === 0 && checkpoint?.lastSourceId === null))) continue;
       let after = previous === 0 ? checkpoint?.lastSourceId ?? null : null;
@@ -71,6 +85,9 @@ export async function stageBaseWorkspace(db: Db, lease: WriterLease, identity: I
                 } else if (pass === 'deferred') {
                   await writeWorkspaceRelationship(records, capturedAt, { table, row } as Parameters<typeof writeWorkspaceRelationship>[2],
                     await rank?.take(row.id) ?? null);
+                } else if (pass === 'media') {
+                  if (!stageMedia) throw new MigrationError('target-write', 'The private migration media target is unavailable.');
+                  await stageMedia({ table, row } as MigrationMediaRow);
                 } else if (pass === 'projections') {
                   await writeImportedDiscussion(records, identity.runId, capturedAt, { table, row } as Parameters<typeof writeImportedDiscussion>[3]);
                 } else {

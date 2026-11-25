@@ -113,33 +113,98 @@ export async function inspectDirectory(root: string, owner: Owner, manifest: Rea
   }
 }
 
+type ConsumeAsset<T> = (bytes: AsyncIterable<Uint8Array>, signal: AbortSignal) => Promise<T>;
+
+export async function withDirectoryAsset<T>(
+  root: string, owner: Owner, asset: MigrationAsset, use: ConsumeAsset<T>, signal: AbortSignal,
+) {
+  const handles: FileHandle[] = [];
+  let file: FileHandle;
+  try {
+    try {
+      handles.push(await anchoredDirectory(root, owner, 0o700));
+      const components = keyComponents(asset.key);
+      const leaf = components.pop()!;
+      for (const component of components) {
+        const child = await open(join(fdPath(handles.at(-1)!), component), O_RDONLY | O_NOFOLLOW | O_DIRECTORY);
+        handles.push(child);
+        const info = await child.stat();
+        if (!info.isDirectory() || info.uid !== owner.uid || info.gid !== owner.gid || (info.mode & 0o077) !== 0) throw invalid();
+      }
+      file = await open(join(fdPath(handles.at(-1)!), leaf), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+      handles.push(file);
+    } catch { throw invalid(); }
+    const before = await file.stat();
+    if (!before.isFile() || before.uid !== owner.uid || before.gid !== owner.gid || (before.mode & 0o077) !== 0
+      || before.nlink !== 1 || before.size !== asset.size) throw invalid();
+    const result = await use(fileChunks(file, asset.size), signal);
+    const after = await file.stat();
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw invalid();
+    return result;
+  } finally { await Promise.allSettled(handles.reverse().map((handle) => handle.close())); }
+}
+
+export async function withObjectAsset<T>(
+  service: ObjectService, asset: MigrationAsset, use: ConsumeAsset<T>, request = fetch, signal?: AbortSignal,
+): Promise<T | null> {
+  if (!asset.versionId || asset.versionId === 'null') throw invalid();
+  const item = new URL(keyComponents(asset.key).map(encodeURIComponent).join('/'), service.base);
+  item.searchParams.set('versionId', asset.versionId);
+  const deadline = AbortSignal.timeout(35_000);
+  const connection = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  let response: Response;
+  try {
+    response = await request(item, {
+      redirect: 'error', signal: connection,
+      headers: { 'Accept-Encoding': 'identity', ...(service.token && { Authorization: 'Bearer ' + service.token }) },
+    });
+  } catch { throw invalid(); }
+  try {
+    if (response.status === 404) return null;
+    const contentLength = response.headers.get('content-length');
+    const encoding = response.headers.get('content-encoding');
+    if (response.status !== 200 || !response.body || response.headers.get('x-amz-version-id') !== asset.versionId
+      || (encoding && encoding !== 'identity') || (contentLength !== null && contentLength !== String(asset.size))) throw invalid();
+    // Node's Fetch body supports asynchronous iteration, which streams the immutable response without buffering it.
+    return await use(response.body as unknown as AsyncIterable<Uint8Array>, connection);
+  } finally { await response.body?.cancel().catch(() => undefined); }
+}
+
 export function inspectObjects(service: ObjectService, request = fetch): Reader {
   return {
     async inspect(asset) {
-      if (!asset.versionId || asset.versionId === 'null') throw invalid();
-      const item = new URL(asset.key.split('/').map(encodeURIComponent).join('/'), service.base);
-      item.searchParams.set('versionId', asset.versionId);
-      try {
-        const response = await request(item, {
-          redirect: 'error', signal: AbortSignal.timeout(35_000),
-          headers: { 'Accept-Encoding': 'identity', ...(service.token && { Authorization: 'Bearer ' + service.token }) },
-        });
-        if (response.status === 404) { await response.body?.cancel(); return null; }
-        const contentLength = response.headers.get('content-length');
-        const encoding = response.headers.get('content-encoding');
-        if (response.status !== 200 || !response.body || response.headers.get('x-amz-version-id') !== asset.versionId
-          || (encoding && encoding !== 'identity') || (contentLength !== null && contentLength !== String(asset.size))) {
-          await response.body?.cancel();
-          throw invalid();
-        }
-        // Node's Fetch body supports asynchronous iteration, which streams the immutable response without buffering it.
-        return await hash(response.body as unknown as AsyncIterable<Uint8Array>, asset.size);
-      } catch {
-        throw invalid();
-      }
+      try { return await withObjectAsset(service, asset, (bytes) => hash(bytes, asset.size), request); }
+      catch { throw invalid(); }
     },
     close: async () => {},
   };
+}
+
+export async function consumeVerifiedAsset<T>(
+  asset: MigrationAsset, input: AsyncIterable<Uint8Array>, signal: AbortSignal, consume: ConsumeAsset<T>,
+) {
+  let complete = false;
+  async function* verify() {
+    const digest = createHash('sha256');
+    let byteLength = 0;
+    try {
+      for await (const chunk of input) {
+        signal.throwIfAborted();
+        byteLength += chunk.byteLength;
+        if (byteLength > asset.size) throw invalid();
+        digest.update(chunk);
+        yield chunk;
+      }
+    } catch { throw invalid(); }
+    if (byteLength !== asset.size || digest.digest('hex') !== asset.sha256) throw invalid();
+    complete = true;
+  }
+  const bytes = verify();
+  try {
+    const result = await consume(bytes, signal);
+    if (!complete) throw invalid();
+    return result;
+  } finally { await bytes.return(undefined); }
 }
 
 export type VerifiedSourceAsset = { key: string; kind: SourceAsset['kind']; sourceLength: string | null;

@@ -170,14 +170,24 @@ function fieldSql(column: string, field: Field) {
     WHEN ${name} IS NOT NULL THEN 'invalid' END`;
 }
 
-export async function readSourceBatch<T extends SourceTable>(client: Client, table: T, lastSourceId: string | null,
-  limit: number): Promise<SourceBatch<T>> {
+export function readSourceBatch<T extends SourceTable>(client: Client, table: T, lastSourceId: string | null, limit: number) {
+  return readProjectedRows(client, table, lastSourceId, limit, false);
+}
+
+export async function readSourceUpload(client: Client, id: string) {
+  const { rows } = await readProjectedRows(client, 'uploaded_file', id, 1, true);
+  return rows[0] ?? null;
+}
+
+async function readProjectedRows<T extends SourceTable>(client: Client, table: T, sourceId: string | null,
+  limit: number, exact: boolean): Promise<SourceBatch<T>> {
   if (!Object.hasOwn(columns, table) || !Number.isSafeInteger(limit) || limit < 1 || limit > maximumSourceBatch) throw invalid();
   const fields = Object.entries(columns[table]) as [string, Field][];
   const parameters: (number | string)[] = [limit, maximumBatchBytes, maximumRowBytes];
   const collation = table === 'uploaded_file' ? ' COLLATE "C"' : '';
-  const where = lastSourceId === null ? '' : `WHERE src.id${collation} > $4::${table === 'uploaded_file' ? 'text' : 'bigint'}${collation}`;
-  if (lastSourceId !== null) parameters.push(sourceKey(table, lastSourceId));
+  const comparator = exact ? '=' : '>';
+  const where = sourceId === null ? '' : `WHERE src.id${collation} ${comparator} $4::${table === 'uploaded_file' ? 'text' : 'bigint'}${collation}`;
+  if (sourceId !== null) parameters.push(sourceKey(table, sourceId));
   const result = await client.query<{ key: string; payload: string | null; bytes: number; has_more: boolean }>(`
     WITH candidates AS MATERIALIZED (
       SELECT src.id AS key FROM public."${table}" AS src
@@ -198,7 +208,7 @@ export async function readSourceBatch<T extends SourceTable>(client: Client, tab
     FROM sized ORDER BY sized.key${collation}
   `, parameters);
   const rows: SourceRow<T>[] = [];
-  let after = lastSourceId;
+  let after = exact ? null : sourceId;
   let hasMore = result.rows[0]?.has_more ?? false;
   for (const { key, payload, bytes } of result.rows) {
     if (!Number.isInteger(bytes) || bytes > maximumRowBytes) throw invalid();
@@ -206,10 +216,11 @@ export async function readSourceBatch<T extends SourceTable>(client: Client, tab
     const value = JSON.parse(payload) as unknown;
     if (!Array.isArray(value) || value.length !== fields.length) throw invalid();
     const row = Object.fromEntries(fields.map(([name, field], index) => [name, decode(field, value[index])]));
-    const exact = sourceKey(table, key);
-    if (exact !== row.id || (after !== null && compareSourceKeys(table, exact, after) <= 0)) throw invalid();
+    const exactKey = sourceKey(table, key);
+    if (exactKey !== row.id || (exact && exactKey !== sourceId)
+      || (after !== null && compareSourceKeys(table, exactKey, after) <= 0)) throw invalid();
     rows.push(row as SourceRow<T>);
-    after = exact;
+    after = exactKey;
   }
   return { rows, lastSourceId: after, hasMore };
 }
