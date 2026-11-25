@@ -114,7 +114,7 @@ export function createOAuthStorage(
     if (!stored || !account || account.auth.credentialsVersion !== saved.credentialsVersion) return null;
     const factorMatches = saved.factorId === null ? hasPasswordOnlyAuth(stored)
       : publicIdSchema.safeParse(saved.factorId).success && getFactor(stored)?.id === saved.factorId;
-    return factorMatches ? saved : null;
+    return factorMatches ? { ...saved, actor: account.actor } : null;
   }
 
   async function currentArtifactGrant(scope: Scope, kind: string, providerGrantId: string, time: Date) {
@@ -233,6 +233,21 @@ export function createOAuthStorage(
     return session && { generationId: session.generationId, userId: session.account.actor.id };
   }
 
+  async function currentAccessToken({ db, generationId }: Scope, token: string) {
+    if (!/^[A-Za-z0-9_-]{20,300}$/u.test(token)) return null;
+    const identity = artifactIdentity(generationId, 'AccessToken', token);
+    const time = now();
+    const row = await artifacts(db).findOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } });
+    if (!row?.providerGrantId || !publicIdSchema.safeParse(row.userId).success) return null;
+    const grant = await currentGrant({ db, generationId }, row.providerGrantId, time);
+    const payload = decode(row);
+    if (!grant || grant.userId !== row.userId || grant.clientId !== row.clientId || typeof payload.scope !== 'string'
+        || (grant.resource !== undefined && payload.aud !== grant.resource) || payload.accountId !== grant.userId || payload.clientId !== grant.clientId
+        || !payload.scope.split(' ').every((scope) => grant.scope.split(' ').includes(scope))) return null;
+    return { generationId, userId: grant.userId, clientId: grant.clientId,
+      audience: payload.aud, scope: payload.scope, grantId: grant.id, actor: grant.actor };
+  }
+
   return {
     adapter,
     async withRequest<T>(db: Db, operation: () => Promise<T>) {
@@ -310,20 +325,18 @@ export function createOAuthStorage(
         return { generationId: scope.generationId, grantId: id };
       });
     },
-    async accessToken(token: string) {
-      if (!/^[A-Za-z0-9_-]{20,300}$/u.test(token)) return null;
-      return run(false, async ({ db, generationId }) => {
-        const identity = artifactIdentity(generationId, 'AccessToken', token);
-        const time = now();
-        const row = await artifacts(db).findOne({ ...identity, expiresAt: { $gt: time }, consumedAt: { $type: 'null' } });
-        if (!row?.providerGrantId || !publicIdSchema.safeParse(row.userId).success) return null;
-        const grant = await currentGrant({ db, generationId }, row.providerGrantId, time);
-        const payload = decode(row);
-        if (!grant || grant.userId !== row.userId || grant.clientId !== row.clientId || typeof payload.scope !== 'string'
-            || (grant.resource !== undefined && payload.aud !== grant.resource) || payload.accountId !== grant.userId || payload.clientId !== grant.clientId
-            || !payload.scope.split(' ').every((scope) => grant.scope.split(' ').includes(scope))) return null;
-        return { generationId, userId: grant.userId, clientId: grant.clientId,
-          audience: payload.aud, scope: payload.scope, grantId: grant.id };
+    accessToken(token: string) {
+      return run(false, async (scope) => {
+        const access = await currentAccessToken(scope, token);
+        if (!access) return null;
+        const { actor: _actor, ...binding } = access;
+        return binding;
+      });
+    },
+    withAccessTokenRead<T>(token: string, operation: (database: Db, access: NonNullable<Awaited<ReturnType<typeof currentAccessToken>>>) => Promise<T>) {
+      return run(false, async (scope) => {
+        const access = await currentAccessToken(scope, token);
+        return access ? operation(scope.db, access) : null;
       });
     },
   };
