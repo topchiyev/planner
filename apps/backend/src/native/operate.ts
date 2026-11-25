@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { BackupError, digestPattern } from '../application/backup/archive.js';
 import { activateRestore, inspectBackup, readActivatedRestore, stageRestore } from '../application/backup/restore.js';
 import { openPrivateBlobVerifier, openRestoreMedia } from '../application/backup/restore-media.js';
+import { createMediaDecoder } from '../application/media/decoder.js';
 import { MigrationError } from '../application/migration/manifest.js';
 import { inspectMigration, migrationPath, parseMigrationInput, withMigrationSnapshot, type MigrationInput } from '../application/migration/preflight.js';
 import { prepareMigration } from '../application/migration/prepare.js';
@@ -32,9 +33,9 @@ import { adminRuntimeDirectory } from './admin-socket.js';
 import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRestoreCapacity, createRestoreIntent,
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
 import { nativeMigrationMediaPublisher } from './migration-media.js';
-import { assertMigrationTarget, checkMigrationCapacity, migrationVerificationPage, openNativeMigrationDirectory,
-  persistMigrationVerification, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
-  publicMigrationStatus, readProtectedMigrationRun, stageProtectedMigrationRun } from './migration-state.js';
+import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, migrationVerificationPage, openNativeMigrationDirectory,
+  persistMigrationVerification, publicMigrationStatus, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
+  readProtectedMigrationRun, stageProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
 import { databaseName, NativeMongoError, parseMongoCredentials } from './mongo-identity.js';
 import { connectVerifiedNativeMongo, mongoCredentialFile } from './mongo-readiness.js';
@@ -647,11 +648,23 @@ async function migrationVerification(runId: string, verify: boolean) {
             const media = await openPrivateBlobVerifier(backupBlobs, { uid: owner.appUid, gid: owner.appGroup });
             try {
               const identity = { runId, installationId: run.installationId, generationId: run.generationId, fingerprint: run.fingerprint };
-              const { value: report } = await withMigrationSnapshot(input, migrationOwner, await migrationConfig('postgres'),
-                input.assetService !== undefined ? await migrationConfig('objects') : undefined, { expectedFingerprint: run.fingerprint.sha256 },
-                (snapshot) => collectMigrationVerification(db, writer, identity, snapshot, cursors, media, controller.signal));
+              const decode = createMediaDecoder(fileURLToPath(new URL('../../../../lib/decode-media.py', import.meta.url)),
+                '/usr/bin/python3', { uid: owner.appUid, gid: owner.appGroup });
+              const sourceConfig = await migrationConfig('postgres');
+              const objectConfig = input.assetService !== undefined ? await migrationConfig('objects') : undefined;
+              const { value: { report, verifying } } = await withNativeVerificationScratch(runId, (scratch) =>
+                withMigrationSnapshot(input, migrationOwner, sourceConfig, objectConfig, {
+                  expectedManifestSha256: run.manifestSha256, expectedFingerprint: run.fingerprint.sha256,
+                },
+                  async (snapshot) => {
+                    controller.signal.throwIfAborted();
+                    const verifying = await beginMigrationVerification(writer, db, run, snapshot, cursors);
+                    const report = await collectMigrationVerification(db, writer, identity, snapshot, cursors,
+                      { verifyBlob: media.verifyBlob, scratch, decode }, controller.signal);
+                    return { report, verifying };
+                  }));
               controller.signal.throwIfAborted();
-              return await persistMigrationVerification(writer, db, directory, migrationOwner, run, report);
+              return await persistMigrationVerification(writer, db, directory, migrationOwner, verifying, report);
             } finally { await media.close(); }
           });
         } catch (error) {

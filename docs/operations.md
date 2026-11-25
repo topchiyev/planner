@@ -125,11 +125,11 @@ sudo plannerctl migration verify --run "$run_id" --format json
 sudo plannerctl migration report --run "$run_id" --format json
 ```
 
-The report records source and destination counts, approval eligibility and the report digest. It lists absent originals separately from absent derivatives and preserves counts for quarantined inbox rows. A blocked report prevents activation. An interrupted or incomplete scan can be retried on the same frozen inputs. The previous application service state and generation routing are preserved during verification.
+The report records source and destination counts, approval eligibility and the report digest. It lists absent originals separately from absent derivatives and preserves counts for quarantined inbox rows. Verification confirms the final staging checkpoint before recording its start. It checks original and preview bytes, including preview digests rebuilt from the frozen source originals. A blocked report prevents activation. An interrupted scan can be retried on the same frozen inputs. Verification preserves the previous application service state and generation routing.
 
 For local reconciliation, add `--offset 0 --limit 100` to the report command and use the returned `nextOffset` for subsequent pages. Those pages include opaque source identifiers and reason codes. Share only aggregate counts and digests.
 
-When verification finds absent originals, the local approval file has `runId`, `snapshotSha256` and `missing` fields. Set `snapshotSha256` to the verified capture manifest SHA-256. Include each reported `uploaded_file` with reason `missing-original` once as `{ "type": "uploaded_file", "sourceId": "…", "reason": "missing-original" }`. Multiple file references to the same absent original require one approval entry. Keep the file in a root-owned mode-0700 directory with no permissions for other accounts. Keep the approved file and report digest for an exact retry.
+When verification finds absent originals, the local approval file has `runId`, `snapshotSha256` and `missing` fields. Set `snapshotSha256` to the verified capture manifest SHA-256. Include each reported `uploaded_file` with reason `missing-original` once as `{ "type": "uploaded_file", "sourceId": "…", "reason": "missing-original" }`. Multiple references to the same absent original require one entry. Different original keys for one upload ID block verification. Keep the approval file in a root-owned mode-0700 directory with no permissions for other accounts. Keep the approved file and report digest for an exact retry.
 
 ## Workspace storage schema
 
