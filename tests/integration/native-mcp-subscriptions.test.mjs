@@ -110,7 +110,7 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
             let reads = 0;
             const access = actor.listen;
             const controlled = { ...actor, listen: { ...access, async read(operation) {
-              await beforeProof?.(actor, ++reads);
+              await beforeProof?.(actor, ++reads, requested.resourceSubscriptions);
               return access.read(operation);
             } } };
             return boardSubscriptions.subscribe(controlled, requested, {
@@ -169,6 +169,21 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
     }
     const grantFor = async (id, issuedBefore) => (await f.db.collection('oauthConnections').find({ generationId: f.generationId, userId: id })
       .sort({ issuedAt: 1 }).toArray())[issuedBefore];
+    function holdNextUpdate(grantId, uri) {
+      const waiting = Promise.withResolvers();
+      const resume = Promise.withResolvers();
+      beforePublish = (actor, event) => {
+        if (actor.grantId !== grantId || event.uri !== uri) return;
+        beforePublish = undefined;
+        beforeProof = async (candidate, _read, uris) => {
+          if (candidate.grantId !== grantId || !uris.includes(uri)) return;
+          beforeProof = undefined;
+          waiting.resolve();
+          await resume.promise;
+        };
+      };
+      return { waiting: waiting.promise, resume: resume.resolve };
+    }
     try {
       const viewer = await signIn(f, call, origin, ids.viewer, 'viewer', time);
       const admin = await signIn(f, call, origin, ids.admin, 'admin', time);
@@ -302,22 +317,10 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
       assert.equal(await source.next(), null);
       assert.deepEqual(await other.next(true), { heartbeat: true });
 
-      const waiting = Promise.withResolvers();
-      const resume = Promise.withResolvers();
-      beforePublish = (actor) => {
-        if (actor.grantId === otherId) {
-          beforePublish = undefined;
-          beforeProof = async (candidate) => {
-            if (candidate.grantId !== otherId) return;
-            beforeProof = undefined;
-            waiting.resolve();
-            await resume.promise;
-          };
-        }
-      };
+      const removalRace = holdNextUpdate(otherId, boardUri);
       await browser('/api/v1/boards/' + ids.privateBoard, 'PATCH', { name: 'Queued for removed viewer' }, ownerCookie, 2);
       await dispatch();
-      await waiting.promise;
+      await removalRace.waiting;
       try {
         const member = await f.db.collection('boardMembers').findOne({ ...f.scope, boardId: ids.privateBoard, userId: ids.viewer });
         await f.gate.runCommand(async () => {
@@ -325,7 +328,7 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
           await f.streams.revalidateBoards(f.db, f.generationId, new Set([ids.privateBoard]));
         });
         await f.gate.runCommand(() => f.db.collection('boardMembers').insertOne(member));
-      } finally { resume.resolve(); }
+      } finally { removalRace.resume(); }
       assert.equal(await other.next(), null);
       const reconnected = await watch(otherToken, [boardUri]);
       assert.deepEqual(await reconnected.next(true), { heartbeat: true });
@@ -376,10 +379,45 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
       finally { finishHeartbeat.resolve(); }
 
       // The admitted id is large enough that its SDK ACK and twice-stamped final exceed 4 KiB.
+      const adminId = (await grantFor(ids.admin, 0)).id;
+      await f.gate.runCommand(() => f.insert('boardMembers', fixtureId(1900), {
+        boardId: ids.privateBoard, userId: ids.admin, role: 'viewer', canComment: false,
+      }));
+      const explicitAccess = await watch(adminToken, [boardUri]);
+      const peerRecord = { _id: workspaceKey(f.generationId, ids.createOnlyOwner) };
+      await f.gate.runCommand(() => accounts.updateOne(peerRecord, { $set: { role: 'admin' } }));
+      const peerCookie = cookieOf(await f.login(ids.createOnlyOwner));
+      const adminRecord = { _id: workspaceKey(f.generationId, ids.admin) };
+      async function requestRole(role) {
+        const { revision } = await accounts.findOne(adminRecord);
+        const requested = await call('/api/v1/admin/accounts/' + ids.admin, { method: 'PATCH',
+          body: { action: 'role', role, revision },
+          headers: { Cookie: peerCookie, Origin: origin, 'X-CSRF-Token': csrfToken(readSessionCookie(peerCookie)) } });
+        assert.equal(requested.status, 202, requested.text);
+        return requested.value.id;
+      }
+      const approval = await requestRole('boardUser');
+      const demotion = holdNextUpdate(adminId, destinationUri);
+      const projectManagerCookie = cookieOf(await f.login(ids.projectManager));
+      await browser('/api/v1/boards/' + ids.sharedBoard, 'PATCH', { name: 'Queued for the former administrator' }, projectManagerCookie);
+      await dispatch();
+      await demotion.waiting;
+      try {
+        const result = await f.confirmAccountApproval(approval);
+        assert.equal(result.outcome, 'applied');
+      } finally { demotion.resume(); }
+      assert.equal(await destination.next(), null);
+      assert.equal((await collectHttps(await listen(adminToken, notifications(destinationUri)))).status, 403);
+      assert.deepEqual(await explicitAccess.next(true), { heartbeat: true });
+      const remaining = await rpc(modern, 'resources/read', { uri: boardUri }, adminToken);
+      assert.equal(JSON.parse(remaining.value.result.contents[0].text).data.id, ids.privateBoard);
+      assert.equal((await f.confirmAccountApproval(await requestRole('admin'))).outcome, 'applied');
+      assert.deepEqual(await explicitAccess.next(true), { heartbeat: true });
+
       const activeInstallation = { _id: 'installation' };
       await f.gate.runCommand(() => f.db.collection('installation').updateOne(activeInstallation,
         { $set: { activeGenerationId: f.stagedGenerationId } }));
-      assert.equal(await destination.next(), null);
+      assert.equal(await explicitAccess.next(), null);
       await f.gate.runCommand(() => f.db.collection('installation').updateOne(activeInstallation,
         { $set: { activeGenerationId: f.generationId } }));
 
@@ -387,7 +425,6 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
       const long = await watch(adminToken, [destinationUri], longId);
       const held = Promise.withResolvers();
       const release = Promise.withResolvers();
-      const adminId = (await grantFor(ids.admin, 0)).id;
       beforeProof = async (actor) => {
         if (actor.grantId === adminId) {
           beforeProof = undefined;

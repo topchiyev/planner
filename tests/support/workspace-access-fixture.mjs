@@ -106,6 +106,7 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
   const streams = createBoardEventStreams(async () => db, installationId, gate, cursors, { now, heartbeatMs, mcp: mcpBoardSubscriptions });
   const media = await configureMedia?.({ db, directory, installationId, generationId, gate, now });
   const manage = mfaKey && createMfaManagement(db, installationId, gate, mfaKey, hasher, now);
+  const credentials = createAccountCredentials(db, installationId, gate, hasher, now, undefined, streams.revalidateActor);
   const mcp = await configureMcp?.({ db, installationId, gate, mfaKey, cursors, origin: publicOrigin });
   const app = buildApp({
     ...(browserOrigin && { frontendRoot: fileURLToPath(new URL('../../apps/frontend/dist/', import.meta.url)) }),
@@ -117,7 +118,7 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
         mfa: { verify: (input) => sessions.verifyMfa(input), manage },
         accountManagement: {
           ...createAccountDirectory(db, installationId, gate, hasher, now),
-          ...createAccountCredentials(db, installationId, gate, hasher, now),
+          ...credentials,
         },
       }),
       async revoke(token) {
@@ -150,6 +151,7 @@ export async function makeWorkspaceAccessFixture({ db, directory }, { beforeAdmi
         body: { identifier: account.email, password } });
     },
     closeMcp: app.closeMcp,
+    confirmAccountApproval: credentials.confirmApproval,
     close: async () => { streams.stop(); await closeProxy(); await app.close(); await gate.closeAndDrain(); },
   };
 }
