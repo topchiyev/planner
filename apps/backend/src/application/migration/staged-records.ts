@@ -8,9 +8,11 @@ import type { WorkspaceCollection } from '../../storage/catalog.js';
 import { legacyPublicId, workspaceKey } from '../../storage/identity.js';
 import { verifyStorageSchema } from '../../storage/schema.js';
 import { workspaceInsertFields, type WorkspaceFields } from '../../storage/scoped.js';
-import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecordName } from '../workspace/records.js';
+import { createWorkspaceAuthorization, WorkspaceAccessError } from '../workspace/authorization.js';
+import { canonicalRow, createWorkspaceRecords, directBoardRole, equal, type WorkspaceRecordName, type WorkspaceRow } from '../workspace/records.js';
 import type { ImportIdentity } from './checkpoint.js';
 import { MigrationError } from './manifest.js';
+import type { SourceDiscussion } from './discussion-stage.js';
 import { sourceKey, type SourceTable } from './source-projections.js';
 
 export type ImportedEntity = Exclude<SourceTable, 'internal_config' | 'storage_usage'>;
@@ -24,6 +26,7 @@ export type ImportProvenance = SourceTimes & {
   previousListSourceId?: string | null;
   creatorSourceId?: string | null;
   sourceCommentCount?: number;
+  observedCommentCount?: number;
   stopwatchStartedAt?: string | null;
   coverReference?: ImportOptionalReference;
   backgroundReference?: ImportOptionalReference;
@@ -31,6 +34,7 @@ export type ImportProvenance = SourceTimes & {
   backgroundGradient?: string | null;
   unrecognizedGradient?: true;
   unsupportedPreferences?: string[];
+  discussion?: SourceDiscussion;
   linkedTask?: { sourceCardId: string; name: string; completed: boolean; missingTarget: boolean };
 };
 
@@ -102,6 +106,33 @@ export async function openImportRecords(db: Db, lease: WriterLease, identity: Im
         $expr: { $and: [canonicalRow(generationId), equal('boardId', boardId), equal('userId', userId), directBoardRole] } });
     },
     resolve,
+    async reconcileCardCommentCount(sourceId: string) {
+      const card = await mapping('card', sourceId);
+      if (!card || !Number.isInteger(card.provenance.sourceCommentCount)) {
+        throw new MigrationError('target-write', 'The staged source card comment count is unavailable.');
+      }
+      const observed = await ids.countDocuments({ generationId, sourceInstanceId, entity: 'comment',
+        'provenance.discussion.cardSourceId': sourceId });
+      if (!Number.isSafeInteger(observed)) throw new MigrationError('target-write', 'The source card has too many comments.');
+      const previous = card.provenance.observedCommentCount;
+      if (previous === observed) return;
+      if (previous !== undefined) throw new MigrationError('target-write', 'The staged source comment count changed.');
+      lease.assertHeld();
+      const saved = await ids.updateOne({ ...key(card.id), sourceId, sourceInstanceId, entity: 'card',
+        'provenance.observedCommentCount': { $exists: false } }, { $set: { 'provenance.observedCommentCount': observed } }, durable);
+      if (saved.matchedCount !== 1) throw new MigrationError('target-write', 'The staged source comment count could not be recorded.');
+    },
+    async recipientCanReadCard(recipient: WorkspaceRow<'users'>, card: WorkspaceRow<'cards'>) {
+      lease.assertHeld();
+      if (recipient.generationId !== generationId || recipient.disabledAt !== null || card.generationId !== generationId) return false;
+      try {
+        await createWorkspaceAuthorization(db, generationId, { id: recipient.id, role: recipient.role }).requireCard(card.id, card.boardId);
+        return true;
+      } catch (error) {
+        if (!(error instanceof WorkspaceAccessError) || error.statusCode !== 404) throw error;
+        return false;
+      }
+    },
     async hasProjectManager(projectSourceId: string) {
       lease.assertHeld();
       const parent = sourceKey('project', projectSourceId);

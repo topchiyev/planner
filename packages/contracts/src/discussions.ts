@@ -41,14 +41,22 @@ export const discussionCommands = {
   },
 } as const;
 
-export function commentMentions(text: string) {
-  const pattern = /@\[((?:[^\[\]\\\r\n]|\\[\[\]\\])+)\]\(([^)\r\n]{36})\)/gu;
+export function mentionTokens(text: string) {
+  const pattern = /@\[((?:[^\[\]\\\r\n]|\\[\[\]\\])+)\]\(([^)\r\n]{1,36})\)/gu;
   return [...text.matchAll(pattern)].flatMap((match) => {
-    const id = publicIdSchema.safeParse(match[2]);
     const start = match.index;
     let escape = start;
     while (escape > 0 && text[escape - 1] === '\\') escape--;
-    if (!id.success || (start - escape) % 2 !== 0) return [];
-    return [{ id: id.data, start, end: start + match[0].length, label: match[1].replace(/\\([\[\]\\])/gu, '$1') }];
+    if ((start - escape) % 2 !== 0) return [];
+    const end = start + match[0].length;
+    return [{ identifier: match[2], identifierStart: end - match[2].length - 1,
+      start, end, label: match[1].replace(/\\([\[\]\\])/gu, '$1') }];
+  });
+}
+
+export function commentMentions(text: string) {
+  return mentionTokens(text).flatMap(({ identifier, start, end, label }) => {
+    const id = publicIdSchema.safeParse(identifier);
+    return id.success ? [{ id: id.data, start, end, label }] : [];
   });
 }

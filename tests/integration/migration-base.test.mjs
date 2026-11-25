@@ -1,17 +1,20 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createSecretKey, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { acquireWriterDirectory } from '../../apps/backend/dist/application/command-gate/writer-lease.js';
 import { getLocalAccount } from '../../apps/backend/dist/application/auth/accounts.js';
+import { createBoardEventCursors } from '../../apps/backend/dist/application/board-events/cursor.js';
 import { importRunKey, migrationCursors } from '../../apps/backend/dist/application/migration/checkpoint.js';
 import { MigrationError } from '../../apps/backend/dist/application/migration/manifest.js';
 import { inspectMigration, withMigrationSnapshot } from '../../apps/backend/dist/application/migration/preflight.js';
 import { sourceColumns } from '../../apps/backend/dist/application/migration/source-catalog.js';
 import { stageBaseWorkspace } from '../../apps/backend/dist/application/migration/stage-base.js';
 import { createWorkspaceAuthorization } from '../../apps/backend/dist/application/workspace/authorization.js';
+import { createWorkspaceReads } from '../../apps/backend/dist/application/workspace/reads.js';
+import { rewriteImportedMentions } from '../../apps/backend/dist/application/migration/historical-mentions.js';
 import { createChecklistReads } from '../../apps/backend/dist/application/workspace/checklist-reads.js';
 import { eligibleBoardPeople } from '../../apps/backend/dist/application/workspace/eligible-members.js';
 import { projectFieldGroup } from '../../apps/backend/dist/application/workspace/field-state.js';
@@ -129,7 +132,7 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
   for (const [name, expected] of Object.entries(counts)) assert.equal(await count(name), expected, name);
   const relationships = { labels: 1, cardLabels: 1, cardAssignees: 1, boardFollows: 1, cardFollows: 1,
     projectFavorites: 1, checklists: 1, tasks: 3, fieldGroups: 3, fieldDefinitions: 1, fieldValues: 2,
-    activities: 0, notifications: 0 };
+  };
   for (const [name, expected] of Object.entries(relationships)) assert.equal(await count(name), expected, name);
   const mappedCount = ['action', 'attachment', 'background_image', 'base_custom_field_group', 'board', 'board_membership',
     'board_subscription', 'card', 'card_label', 'card_membership', 'card_subscription', 'comment', 'custom_field', 'custom_field_group',
@@ -176,7 +179,7 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
   assert.equal(alignment.coverAttachmentId, id('attachment', '601'));
   assert.equal(drift.dueDate, null);
   assert.equal(drift.dueDateCompleted, null);
-  assert.equal(alignment.description, 'Ask @[Teal Fixture](104) and retain @[Past Observer](999).');
+  assert.equal(alignment.description, `Ask @[Teal Fixture](${id('user_account', '104')}) and retain @[Past Observer](999).`);
   const board = await get('boards', 'board', '301');
   assert.equal(board.historySequence.toString(), '5');
   assert.equal(board.rank.toString(), '1024');
@@ -259,7 +262,59 @@ async function assertGraph({ db, receipt, generationId, activeGenerationId }) {
     assert.deepEqual([value.cardId, value.fieldGroupId, value.fieldDefinitionId, value.value], [cardId, group.id, definitionId, text]);
   }
   assert.equal((await db.collection('installation').findOne({ _id: 'installation' })).activeGenerationId, activeGenerationId);
+  await assertDiscussionGraph(db, receipt, generationId, id);
   return alignment.id;
+}
+
+function readsFor(db, generationId, id, actor, role) {
+  const access = createWorkspaceAuthorization(db, generationId, { id: id('user_account', actor), role });
+  return createWorkspaceReads(db, access, createBoardEventCursors(createSecretKey(randomBytes(32))));
+}
+
+async function assertDiscussionGraph(db, receipt, generationId, id) {
+  const scope = { generationId };
+  const get = (name, entity, sourceId) => db.collection(name).findOne({ ...scope, id: id(entity, sourceId) });
+  assert.equal(await db.collection('comments').countDocuments(scope), 1);
+  assert.equal(await db.collection('activities').countDocuments(scope), 2);
+  assert.equal(await db.collection('notifications').countDocuments(scope), 1);
+  assert.equal(await db.collection('importQuarantine').countDocuments(scope), 1);
+  const comments = await readsFor(db, generationId, id, '103', 'boardUser').cardComments({
+    id: id('card', '9007199254740993'), boardId: id('board', '301'), limit: 25,
+  });
+  assert.equal(comments.data[0].id, id('comment', '701'));
+  assert.equal(comments.data[0].author.id, id('user_account', '103'));
+  assert.equal(comments.data[0].text, 'Measured twice.');
+  assert.equal(comments.data[0].createdAt, '2026-02-11T09:00:00.006Z');
+  assert.equal((await get('importIds', 'comment', '701')).provenance.createdAt, '2026-02-11T09:00:00.006789Z');
+  const counts = (await get('importIds', 'card', '9007199254740993')).provenance;
+  assert.deepEqual([counts.sourceCommentCount, counts.observedCommentCount], [1, 1]);
+  const owner = readsFor(db, generationId, id, '102', 'projectOwner');
+  const board = await owner.boardActivity({ id: id('board', '301'), limit: 25 });
+  const archive = board.data.find((entry) => entry.id === id('action', '711'));
+  const created = board.data.find((entry) => entry.id === id('action', '712'));
+  assert.equal(archive.kind, 'moveCard');
+  assert.equal(archive.actor, null);
+  assert.equal(archive.card.id, id('card', '9007199254740996'));
+  assert.equal(created.kind, 'createCard');
+  assert.equal(created.actor.id, id('user_account', '102'));
+  assert.equal(JSON.stringify(board).includes('Earlier batch'), false);
+  const historic = (await get('importIds', 'action', '711')).provenance.discussion;
+  assert.equal(historic.boardSourceId, null);
+  assert.equal(historic.decoded.snapshot.fromList.id, '499');
+  assert.equal(historic.decoded.snapshot.toList.id, '403');
+  const own = await owner.notificationsList({ unread: false, limit: 25 });
+  assert.equal(own.data.length, 1);
+  assert.equal(own.data[0].id, id('notification', '722'));
+  assert.equal(own.data[0].readAt, receipt.capture.capturedAt);
+  assert.equal(own.unreadCount, 0);
+  const quarantined = await get('importQuarantine', 'notification', '721');
+  assert.deepEqual(quarantined.reasons, ['missing-card', 'missing-activity']);
+  assert.equal(quarantined.sourceIsRead, false);
+  const orphan = (await get('importIds', 'notification', '721')).provenance.discussion;
+  assert.equal(orphan.cardSourceId, '9007199254740999');
+  assert.equal(orphan.actionSourceId, '799');
+  assert.deepEqual(await readsFor(db, generationId, id, '103', 'boardUser').notificationsList({ unread: false, limit: 25 }),
+    { data: [], page: { nextCursor: null }, unreadCount: 0 });
 }
 
 async function inspect(source) {
@@ -301,8 +356,8 @@ test('both verified Community captures stage the exact inactive core graph with 
     assert.equal(interruptedFields.checkpoint.table, 'custom_field_group');
     assert.equal(await db.collection('fieldValues').countDocuments({ generationId: firstRun.generationId }), 2);
     const complete = await runStage(first, firstRun, db, lease, cursors);
-    assert.equal(complete.pass, 'deferred');
-    assert.equal(complete.table, 'task_list');
+    assert.equal(complete.pass, 'projections');
+    assert.equal(complete.table, 'notification');
     assert.deepEqual(await runStage(first, firstRun, db, lease, cursors, 1), complete);
     const firstId = await assertGraph({ ...target, receipt: firstReceipt, generationId: firstRun.generationId });
     const staged = await openTrustedStagedWorkspace(db, installationId, firstRun.generationId);
@@ -548,5 +603,196 @@ test('staged relationship reconciliation preserves exact values and fails closed
     await assert.rejects(stage(occupied, 2), refuses('target-write'));
     assert.deepEqual(await fields.find({ generationId: occupied.generationId }).toArray(), [conflicting]);
     assert.equal((await db.collection('importRuns').findOne(importRunKey(occupied))).checkpoint.table, 'custom_field_group');
+  }));
+});
+
+test('legacy mention rewriting replaces only recognized text tokens while retaining escapes and literal contexts', async () => {
+  const known = '9007199254740993';
+  const current = randomUUID();
+  const lookups = [];
+  const store = { async resolve(entity, id) {
+    assert.equal(entity, 'user_account');
+    lookups.push(id);
+    return id === known ? current : null;
+  } };
+  const recognized = String.raw`@[T\[eal\] \\ member](${known})`;
+  const escaped = String.raw`\@[escaped](${known})`;
+  const code = '`@[inline](' + known + ')`';
+  const linkedText = '[@[link label](' + known + ')](https://fixture.invalid/)';
+  const rawUrl = 'https://fixture.invalid/@[slug](' + known + ')';
+  const twoFences = ['```fixture', '@[fenced](' + known + ')', '```', '~~~', '@[tilde](' + known + ')', '~~~'].join('\n');
+  const unresolved = '@[Past Observer](999)';
+  const invalid = '@[Invalid](09007199254740993)';
+  const indented = ['    @[four spaces](' + known + ')', '\t@[tab](' + known + ')'].join('\n');
+  const nested = ['> ```note', '> @[quote](' + known + ')', '> ```', '- ~~~', '  @[list](' + known + ')', '  ~~~'].join('\n');
+  const malformed = '@[missing end](' + known;
+  const text = [recognized + recognized, escaped, code, linkedText, rawUrl, twoFences, '', indented, '', nested,
+    recognized, unresolved, invalid, malformed].join('\n');
+  const expected = text.replaceAll(recognized, recognized.replace(known, current));
+  assert.equal(await rewriteImportedMentions(text, store), expected);
+  assert.deepEqual(lookups, [known, '999']);
+  const raw = JSON.stringify({ fixture: '@[json](' + known + ')' });
+  assert.equal(await rewriteImportedMentions(raw, store), raw);
+
+  const literalContexts = [
+    '- > ~~~\n  > ' + recognized + '\n  > ~~~',
+    '~~~\nx\n    ~~~\n' + recognized + '\n~~~',
+    '![' + recognized + '](https://fixture.invalid/image.png)',
+    'mailto:fixture/' + recognized,
+    '```\n' + recognized + '\n```\n@[Existing](00000000-0000-4000-8000-000000000000)',
+  ];
+  for (const literal of literalContexts) assert.equal(await rewriteImportedMentions(literal, store), literal);
+
+  const paragraphContexts = [
+    'This is a paragraph\r\n    ' + recognized,
+    '`foo\n\nbar ' + recognized + ' `',
+    '[guide](https://fixture.invalid/)—' + recognized,
+    '`https://fixture.invalid/`' + recognized,
+    '[contact](mailto:contact@example.invalid)' + recognized,
+  ];
+  for (const paragraph of paragraphContexts) {
+    assert.equal(await rewriteImportedMentions(paragraph, store), paragraph.replace(known, current));
+  }
+});
+
+test('staged discussions validate every kind, retain private snapshots and admit only scoped historical deliveries', async (t) => {
+  const root = await mkdtemp(join(homedir(), '.planner-base-'));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const postgres = await startFixturePostgres(t, root);
+  postgres.write('postgres', 'ALTER ROLE fixture_reader NOINHERIT');
+  await withFixtureMongo((fixture) => loadTarget(fixture, async (target) => {
+    const { db, installationId, lease, cursors } = target;
+    const source = await configureSource(root, postgres, '2.3.1');
+    source.update(`
+      INSERT INTO public.comment (id,card_id,user_id,text,created_at) VALUES
+      (702,9007199254740998,999,'Private remark only','2026-02-13 12:45:00.026789'),
+      (703,9007199254740993,NULL,repeat('λ',8101) || chr(10) || 'Exact @[Teal Fixture](104) and @[Past Observer](999).','2026-02-13 12:45:00.036789');
+      INSERT INTO public.action (id,board_id,card_id,user_id,type,data) VALUES
+      (713,301,9007199254740993,102,'addMemberToCard','{"card":{"name":"Old card heading"},"user":{"id":"103","name":"Assignment snapshot"}}'),
+      (714,301,9007199254740993,102,'removeMemberFromCard','{"card":{"name":"Old card heading"},"user":{"id":"104","name":"Former assignee"}}'),
+      (715,301,9007199254740993,102,'completeTask','{"card":{"name":"Old card heading"},"task":{"id":"551","name":"Completed detail"}}'),
+      (716,301,9007199254740993,999,'uncompleteTask','{"card":{"name":"Old card heading"},"task":{"id":"599","name":"Former task"}}'),
+      (717,301,9007199254740993,102,'inventedFixtureKind','{"ignore":"Unrecognized payload"}'),
+      (718,301,9007199254740993,102,'createCard','{"card":{"name":"Invalid payload","id":"9007199254740998"},"list":{"id":"401","type":"active","name":"Align"}}'),
+      (719,302,9007199254740993,102,'moveCard','{"fromList":{"id":"405","type":"active","name":"Private prior list"},"toList":{"id":"401","type":"active","name":"Align"}}'),
+      (720,NULL,9007199254740999,NULL,'moveCard','{"fromList":{"id":"499","type":"closed","name":"Private missing-card list"},"toList":{"id":"401","type":"active","name":"Align"}}');
+      INSERT INTO public.notification (id,user_id,creator_user_id,board_id,card_id,comment_id,action_id,type,data,is_read,updated_at) VALUES
+      (723,103,102,301,9007199254740993,NULL,713,'addMemberToCard','{"card":{"name":"Old card heading"},"user":{"id":"103","name":"Assignment snapshot"}}',false,NULL),
+      (724,104,102,301,9007199254740993,NULL,713,'addMemberToCard','{"card":{"name":"Old card heading"},"user":{"id":"103","name":"Assignment snapshot"}}',false,NULL),
+      (725,103,NULL,302,9007199254740998,702,NULL,'commentCard','{"card":{"name":"Private card"},"text":"Private remark only"}',true,NULL),
+      (726,104,103,301,9007199254740993,701,712,'commentCard','{"card":{"name":"Old card heading"},"text":"Old comment"}',false,NULL),
+      (727,103,102,301,9007199254740993,NULL,712,'moveCard','{"fromList":{"id":"402","type":"closed","name":"Measured"},"toList":{"id":"401","type":"active","name":"Align"}}',false,NULL),
+      (728,104,103,301,9007199254740994,701,NULL,'commentCard','{"card":{"name":"Wrong card"},"text":"Old comment"}',false,NULL),
+      (729,104,103,302,9007199254740993,701,NULL,'commentCard','{"card":{"name":"Wrong board"},"text":"Old comment"}',false,NULL),
+      (730,105,103,301,9007199254740993,701,NULL,'commentCard','{"card":{"name":"Disabled target"},"text":"Old comment"}',false,NULL),
+      (731,104,NULL,301,9007199254740993,703,NULL,'mentionInComment','{"card":{"name":"Old card heading"},"text":"Old plain text"}',true,'2026-02-20 12:00:00.999999'),
+      (732,103,102,301,9007199254740996,NULL,711,'moveCard','{"fromList":{"id":"499","type":"closed","name":"Earlier batch"},"toList":{"id":"403","type":"archive","name":null}}',true,NULL),
+      (733,104,101,301,9007199254740993,701,NULL,'commentCard','{"card":{"name":"Wrong actor"},"text":"Old comment"}',false,NULL),
+      (734,103,102,302,9007199254740993,NULL,719,'moveCard','{"fromList":{"id":"405","type":"active","name":"Old archived display"},"toList":{"id":"401","type":"active","name":"Different current display"}}',false,NULL),
+      (735,103,102,302,9007199254740993,NULL,719,'moveCard','{"fromList":{"id":"402","type":"closed","name":"Unrelated historic move"},"toList":{"id":"401","type":"active","name":"Align"}}',false,NULL);
+    `);
+    const receipt = await inspect(source);
+    const identity = await createRun(db, installationId, receipt);
+    const { generationId } = identity;
+    const id = publicIds(receipt.capture.source.instanceId);
+    const scope = { generationId };
+    const resumable = (driver = db, size = 1) => runStage(source, identity, driver, lease, cursors, size);
+    const normal = (collection, entity, sourceId) => db.collection(collection).findOne({ ...scope, id: id(entity, sourceId) });
+    await assert.rejects(resumable(interruptCheckpoint(db, 'projections', 'notification')), refuses('target-write'));
+    const checkpoint = (await db.collection('importRuns').findOne(importRunKey(identity))).checkpoint;
+    assert.equal(checkpoint.table, 'comment');
+    assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'notification' }), 1);
+    await resumable(db, 3);
+    const committed = await resumable(db, 2);
+    assert.equal(committed.lastSourceId, '735');
+    assert.equal(await db.collection('comments').countDocuments(scope), 3);
+    assert.equal(await db.collection('activities').countDocuments(scope), 7);
+    assert.equal(await db.collection('notifications').countDocuments(scope), 5);
+    assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'action' }), 3);
+    assert.equal(await db.collection('importQuarantine').countDocuments({ ...scope, entity: 'notification' }), 10);
+    for (const name of ['auditEntries', 'events', 'commands', 'commandEffectBatches']) {
+      assert.equal(await db.collection(name).countDocuments(scope), 0);
+    }
+
+    const accessible = readsFor(db, generationId, id, '103', 'boardUser');
+    const editor = readsFor(db, generationId, id, '102', 'projectOwner');
+    const importedCard = id('card', '9007199254740993');
+    const sourceBoard = id('board', '301');
+    const targetBoard = id('board', '302');
+    const matches = await accessible.cardComments({ id: importedCard, boardId: sourceBoard, limit: 25 });
+    assert.equal(matches.data.length, 2);
+    const retained = matches.data.find((entry) => entry.id === id('comment', '703'));
+    assert.equal(retained.author, null);
+    assert.equal(retained.text, 'λ'.repeat(8101) + `\nExact @[Teal Fixture](${id('user_account', '104')}) and @[Past Observer](999).`);
+    const counts = (await normal('importIds', 'card', '9007199254740993')).provenance;
+    assert.deepEqual([counts.sourceCommentCount, counts.observedCommentCount], [1, matches.data.length]);
+    const unknownAuthor = await normal('comments', 'comment', '702');
+    assert.equal(unknownAuthor.authorId, null);
+    assert.equal((await normal('importIds', 'comment', '702')).provenance.discussion.authorSourceId, '999');
+    await assert.rejects(accessible.cardComments({ id: id('card', '9007199254740998'), boardId: targetBoard, limit: 25 }), { code: 'NOT_FOUND' });
+
+    const feed = await accessible.boardActivity({ id: sourceBoard, limit: 25 });
+    assert.deepEqual([...new Set(feed.data.map(({ kind }) => kind))].sort(),
+      ['assignCard', 'completeTask', 'createCard', 'moveCard', 'unassignCard', 'uncompleteTask']);
+    assert.equal(feed.data.find(({ id: activityId }) => activityId === id('action', '719')).actor, null);
+    assert.equal(feed.data.find(({ id: activityId }) => activityId === id('action', '716')).actor, null);
+    for (const word of ['Private prior list', 'Former task', 'Former assignee', 'Assignment snapshot', 'Invalid payload']) {
+      assert.equal(JSON.stringify(feed).includes(word), false);
+    }
+    const oldAction = (await normal('importIds', 'action', '719')).provenance.discussion;
+    assert.equal(oldAction.boardSourceId, '302');
+    assert.equal(oldAction.decoded.snapshot.fromList.name, 'Private prior list');
+    assert.equal((await normal('importQuarantine', 'action', '717')).reason, 'unsupported-kind');
+    assert.equal((await normal('importQuarantine', 'action', '718')).reason, 'invalid-snapshot');
+    assert.equal((await normal('importQuarantine', 'action', '720')).reason, 'missing-card');
+
+    const own = await accessible.notificationsList({ unread: true, limit: 25 });
+    assert.equal(own.data.length, 2);
+    assert.equal(own.data.find((row) => row.id === id('notification', '723')).kind, 'assignCard');
+    const historicalDelivery = own.data.find((row) => row.id === id('notification', '734'));
+    assert.equal(historicalDelivery.kind, 'moveCard');
+    assert.equal(historicalDelivery.card.boardId, sourceBoard);
+    assert.equal(historicalDelivery.actor, null);
+    assert.equal(JSON.stringify(historicalDelivery).includes('Old archived display'), false);
+    assert.equal(own.unreadCount, 2);
+    const movement = (await accessible.notificationsList({ unread: false, limit: 25 })).data.find((row) => row.id === id('notification', '732'));
+    assert.equal(movement.kind, 'moveCard');
+    assert.equal(movement.actor, null);
+    const mention = await readsFor(db, generationId, id, '104', 'boardUser').notificationsList({ unread: false, limit: 25 });
+    assert.equal(mention.data.length, 1);
+    assert.equal(mention.data[0].readAt, '2026-02-20T12:00:00.999Z');
+    assert.equal(mention.data[0].actor, null);
+    assert.equal(mention.unreadCount, 0);
+    const reasons = [['724', 'assignment-recipient-mismatch'], ['725', 'recipient-cannot-read-card'], ['726', 'target-kind-mismatch'],
+      ['727', 'target-kind-mismatch'], ['728', 'target-scope-mismatch'], ['729', 'board-mismatch'], ['730', 'disabled-recipient'],
+      ['733', 'target-actor-mismatch'], ['735', 'target-snapshot-mismatch']];
+    for (const [sourceId, reason] of reasons) assert.ok((await normal('importQuarantine', 'notification', sourceId)).reasons.includes(reason));
+    assert.equal((await normal('importQuarantine', 'notification', '725')).sourceIsRead, true);
+    const staged = await openTrustedStagedWorkspace(db, installationId, generationId);
+    await assert.rejects(staged.read('importQuarantine', id('notification', '725')), /available to the workspace/u);
+
+    // Exercise current read scoping after placement and comment scope change, as in a committed board transfer.
+    await db.collection('cards').updateOne({ ...scope, id: importedCard }, { $set: { boardId: targetBoard, listId: id('list', '405') } });
+    await db.collection('comments').updateMany({ ...scope, cardId: importedCard }, { $set: { boardId: targetBoard } });
+    const revoked = await accessible.notificationsList({ unread: false, limit: 25 });
+    assert.deepEqual(revoked.data.map((row) => row.id), [id('notification', '732')]);
+    assert.equal(revoked.unreadCount, 0);
+    assert.equal((await accessible.boardActivity({ id: sourceBoard, limit: 25 })).data.some(({ card }) => card.id === importedCard), false);
+    const newScope = await editor.cardComments({ id: importedCard, boardId: targetBoard, limit: 25 });
+    assert.equal(newScope.data.length, 2);
+    const transferredNotice = await editor.notificationsList({ unread: false, limit: 25 });
+    assert.equal(transferredNotice.data[0].card.boardId, targetBoard);
+    assert.equal(transferredNotice.data[0].actor, null);
+    assert.equal(transferredNotice.unreadCount, 0);
+    assert.equal(source.query('SELECT count(*) FROM public.notification'), '15');
+
+    source.update("INSERT INTO public.comment (id,card_id,text) VALUES (799,9007199254740999,'No source parent')");
+    const missingParent = await createRun(db, installationId, await inspect(source));
+    await assert.rejects(runStage(source, missingParent, db, lease, cursors),
+      (error) => error?.fault === 'source-read' && /no owning card/u.test(error.message));
+    const failed = { generationId: missingParent.generationId };
+    assert.equal(await db.collection('comments').countDocuments({ ...failed, id: id('comment', '799') }), 0);
+    assert.equal(await db.collection('notifications').countDocuments(failed), 0);
+    assert.equal(await db.collection('events').countDocuments(failed), 0);
   }));
 });

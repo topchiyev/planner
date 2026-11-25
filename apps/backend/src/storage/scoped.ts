@@ -19,7 +19,7 @@ interface WorkspaceDocument {
 
 const indexedCollections = new Set<WorkspaceCollection>(workspaceCollections);
 const protectedCollections = new Set<WorkspaceCollection>([
-  'sessions', 'recoveryGrants', 'trustedDevices', 'oauthArtifacts', 'oauthConnections',
+  'sessions', 'recoveryGrants', 'trustedDevices', 'oauthArtifacts', 'oauthConnections', 'importQuarantine',
 ]);
 const identityFields = new Set(['_id', 'id', 'generationId', 'revision', 'commandEffectId']);
 const versionedCollections = new Set<WorkspaceCollection>([

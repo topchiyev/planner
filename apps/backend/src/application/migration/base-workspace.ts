@@ -4,6 +4,8 @@ import { nameBasedUuid } from '../../storage/identity.js';
 import { gradientPreset, importAccount, importAccountPreferences, importStopwatch, invalidBaseRow, nullableDate, targetTimes } from './base-fields.js';
 import type { ImportedEntity, ImportOptionalReference, ImportOrder, ImportProvenance, ImportRecords, ImportReference } from './staged-records.js';
 import type { SourceRow } from './source-projections.js';
+import { isDiscussionTable, reserveDiscussionRecord } from './discussion-stage.js';
+import { rewriteImportedMentions } from './historical-mentions.js';
 import { isWorkspaceRelationshipTable, reserveWorkspaceRelationship, type WorkspaceRelationship } from './workspace-relationships.js';
 
 export const baseWorkspaceTables = ['board', 'card', 'list', 'project', 'user_account'] as const;
@@ -19,6 +21,7 @@ type Reservation = { [K in ImportedEntity]: SourceReservation<K> }[ImportedEntit
 export async function reserveSourceRecord(store: ImportRecords, untyped: SourceReservation) {
   const { table, row } = untyped as Reservation;
   const provenance: ImportProvenance = { createdAt: row.created_at, updatedAt: row.updated_at };
+  if (isDiscussionTable(table)) return reserveDiscussionRecord(store, untyped as Parameters<typeof reserveDiscussionRecord>[1], provenance);
   if (isWorkspaceRelationshipTable(table)) return reserveWorkspaceRelationship(store, { table, row } as WorkspaceRelationship, provenance);
   let order: ImportOrder | undefined;
   let reference: ImportReference | undefined;
@@ -168,8 +171,9 @@ async function writeCard(store: ImportRecords, id: string, row: SourceRow<'card'
     && (previousReference.kind === 'active' || previousReference.kind === 'closed') ? previous.id : null;
   const creatorId = row.creator_user_id === null ? null : await store.resolve('user_account', row.creator_user_id);
   const cover = await scopedOptionalReference(store, 'attachment', row.cover_attachment_id, row.id, 'file');
+  await store.reconcileCardCommentCount(row.id);
   await store.write('cards', id, { ...fields, boardId, listId: list.id, kind, type: type.data, name: requiredName(row.name),
-    closed: row.is_closed, description: row.description, dueDate: nullableDate(row.due_date), dueDateCompleted: row.is_due_completed,
+    closed: row.is_closed, description: row.description === null ? null : await rewriteImportedMentions(row.description, store), dueDate: nullableDate(row.due_date), dueDateCompleted: row.is_due_completed,
     stopwatch: importStopwatch(row.stopwatch).value, listChangedAt: nullableDate(row.list_changed_at), previousListId, creatorId,
     coverAttachmentId: cover?.id ?? null, checklistOrderVersion: 1, fieldGroupOrderVersion: 1 });
 }
