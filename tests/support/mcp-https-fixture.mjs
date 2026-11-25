@@ -104,4 +104,3 @@ export async function consentReader(call, origin, cookies, offline = false) {
   assert.equal(!!token.value.refresh_token, offline);
   return token.value;
 }
-

@@ -331,6 +331,25 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
       assert.deepEqual(await reconnected.next(true), { heartbeat: true });
       reconnected.close();
 
+      const accounts = f.db.collection('users');
+      const viewerRecord = { _id: workspaceKey(f.generationId, ids.viewer) };
+      const saved = await accounts.findOne(viewerRecord);
+      for (const [path, invalid, original] of [
+        ['disabledAt', new Date(), null],
+        ['localAuth.credentialsVersion', saved.localAuth.credentialsVersion + 1, saved.localAuth.credentialsVersion],
+        ['localAuth.mfa', 'none', saved.localAuth.mfa],
+      ]) {
+        const current = await watch(otherToken, [boardUri]);
+        await f.gate.runCommand(async () => {
+          await accounts.updateOne(viewerRecord, { $set: { [path]: invalid } });
+          await f.streams.revalidateActor(f.db, ids.viewer);
+        });
+        assert.equal(await current.next(), null, path);
+        assert.equal((await collectHttps(await listen(otherToken, notifications(boardUri)))).status, 401, path);
+        assert.deepEqual(await destination.next(true), { heartbeat: true });
+        await f.gate.runCommand(() => accounts.updateOne(viewerRecord, { $set: { [path]: original } }));
+      }
+
       const limited = [];
       for (let i = 0; i < 4; i += 1) limited.push(await watch(otherToken, [boardUri]));
       assert.equal((await collectHttps(await listen(otherToken, notifications(boardUri)))).status, 429);
@@ -357,7 +376,13 @@ test('modern native TLS subscriptions scope, guard, invalidate and close indepen
       finally { finishHeartbeat.resolve(); }
 
       // The admitted id is large enough that its SDK ACK and twice-stamped final exceed 4 KiB.
-      destination.close();
+      const activeInstallation = { _id: 'installation' };
+      await f.gate.runCommand(() => f.db.collection('installation').updateOne(activeInstallation,
+        { $set: { activeGenerationId: f.stagedGenerationId } }));
+      assert.equal(await destination.next(), null);
+      await f.gate.runCommand(() => f.db.collection('installation').updateOne(activeInstallation,
+        { $set: { activeGenerationId: f.generationId } }));
+
       const longId = 'x'.repeat(4094);
       const long = await watch(adminToken, [destinationUri], longId);
       const held = Promise.withResolvers();
