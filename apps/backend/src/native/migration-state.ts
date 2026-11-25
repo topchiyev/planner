@@ -7,8 +7,10 @@ import { migrationDigestSchema } from '@planner/contracts';
 import { publicIdSchema, generationIdSchema, utcInstantSchema } from '@planner/contracts/storage';
 import type { Db } from 'mongodb';
 import { anchoredDirectory, childPath, fdPath, fileChunks, type Owner } from '../application/backup/archive.js';
+import { readActivatedRestore } from '../application/backup/restore.js';
 import type { WriterLease } from '../application/command-gate/writer-lease.js';
 import { durable } from '../application/command-journal/records.js';
+import { enableMigrationWrites } from '../application/migration/cutover.js';
 import { importRunKey, migrationCursors, type ImportRun } from '../application/migration/checkpoint.js';
 import { activationExpectation, bindMissingOriginals, canonicalMissingOriginals, parseMigrationApproval } from '../application/migration/approval.js';
 import { MigrationError, sha256 } from '../application/migration/manifest.js';
@@ -21,6 +23,7 @@ import type { MigrationMediaTarget } from '../application/migration/media-stage.
 import type { MigrationVerification } from '../application/migration/verification.js';
 import { createPrivateMediaStore, type PrivateMediaStore } from '../storage/blobs/private-store.js';
 import { readInstallation, verifyStorageSchema } from '../storage/schema.js';
+import type { RestoreIntent } from './backup-state.js';
 
 const root = { uid: 0, gid: 0 };
 const stateDirectory = '/var/lib/planner/migration';
@@ -56,6 +59,19 @@ export async function checkMigrationCapacity(estimate: Estimate) {
     volume('/var/lib/planner/mongodb'), volume('/var/lib/planner/blobs'), volume('/var/lib/planner/staging'),
   ]);
   return assertMigrationCapacity(estimate, { mongo, blobs, staging });
+}
+
+export async function enableRestoredMigrationWrites(db: Db, writer: WriterLease, installationId: string, runId: string,
+  restore: Pick<RestoreIntent, 'fingerprint' | 'proof' | 'generationId'>, keyDigest: string) {
+  writer.assertHeld();
+  const conflict = () => new MigrationError('activation-conflict', 'The protected Planner restore receipt does not match the published generation.');
+  try {
+    const active = await readActivatedRestore(db, installationId, restore.fingerprint, restore.proof, (digest) => {
+      if (digest !== keyDigest) throw conflict();
+    });
+    if (active.generationId !== restore.generationId) throw conflict();
+  } catch { throw conflict(); }
+  return enableMigrationWrites(db, writer, installationId, runId);
 }
 
 export async function assertMigrationTarget(db: Db, installationId: string) {

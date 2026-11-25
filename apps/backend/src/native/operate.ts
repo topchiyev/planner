@@ -37,7 +37,7 @@ import { backupBlobs, backupCreateEndpoint, backupRoot, backupStaging, checkRest
   parseRestoreOptions, readRestoreIntent, type RestoreIntent } from './backup-state.js';
 import { nativeMigrationMediaPublisher } from './migration-media.js';
 import { assertMigrationTarget, beginMigrationVerification, checkMigrationCapacity, clearMigrationServiceResume,
-  dismissNativeMigrationServiceResume, hasMigrationServiceResume, migrationVerificationPage, openNativeMigrationDirectory,
+  dismissNativeMigrationServiceResume, enableRestoredMigrationWrites, hasMigrationServiceResume, migrationVerificationPage, openNativeMigrationDirectory,
   persistMigrationVerification, prepareMigrationCutover, publicMigrationStatus, publicMigrationVerification, publishMigrationPreflight, readMigrationVerification,
   readProtectedMigrationRun, recordMigrationServiceResume, stageProtectedMigrationRun, withNativeVerificationScratch } from './migration-state.js';
 import { assertNativeMfaKey, ensureNativeMfaKey, installRestoredMfaKey, readNativeMfaKey } from './mfa-key.js';
@@ -755,7 +755,9 @@ async function changeMigrationRoute(request: CutoverRequest) {
     const config = readInstallationConfig(owner.appGroup);
     const restore = readRestoreIntent(owner.receipt);
     verifySetupFiles(config, readSetupIntent(owner.receipt), restore);
-    if (!config || config.mode !== 'import' || restore) throw new MigrationError('target-setup', 'Select a protected import installation.');
+    if (!config || config.mode !== 'import' || (restore && request.action !== 'enable')) {
+      throw new MigrationError('target-setup', 'Select a protected import installation with the required activation history.');
+    }
     const client = await connectOwnedDatabase(config, owner.appGroup);
     try {
       const directory = await openNativeMigrationDirectory();
@@ -768,6 +770,9 @@ async function changeMigrationRoute(request: CutoverRequest) {
           const installed = await verifyStorageSchema(db, installationId);
           const mfaKey = readNativeMfaKey(installationId, owner.appGroup);
           await assertNativeMfaKey(db, installationId, mfaKey);
+          if (restore && request.action === 'enable') {
+            return enableRestoredMigrationWrites(db, writer, installationId, request.input.runId, restore, mfaKey.digest);
+          }
           const cutover = await inspectMigrationCutover(db, installed);
           if (request.action === 'rollback' && (!cutover || cutover.binding.verification.generationId !== request.input.generationId))
             throw new MigrationError('activation-conflict', 'Select the current or already rolled back imported generation.');

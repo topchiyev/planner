@@ -11,11 +11,13 @@ import { Binary, Double, Int32, Long } from 'mongodb';
 import { archiveRows, digestRawRows } from '../../apps/backend/dist/application/backup/records.js';
 import { createBackup } from '../../apps/backend/dist/application/backup/capture.js';
 import { inspectBackup, stageRestore, activateRestore } from '../../apps/backend/dist/application/backup/restore.js';
+import { enableRestoredMigrationWrites } from '../../apps/backend/dist/native/migration-state.js';
 import { openRestoreMedia } from '../../apps/backend/dist/application/backup/restore-media.js';
 import { createTotpSecret } from '../../apps/backend/dist/application/auth/mfa-crypto.js';
 import { createPasswordHasher } from '../../apps/backend/dist/application/auth/password.js';
 import { readSessionCookie } from '../../apps/backend/dist/application/auth/credentials.js';
 import { createBrowserSessions } from '../../apps/backend/dist/application/auth/sessions.js';
+import { CommandJournal } from '../../apps/backend/dist/application/command-journal/journal.js';
 import { commandUuid } from '../../apps/backend/dist/application/command-journal/operation.js';
 import { activateVerifiedMigration } from '../../apps/backend/dist/application/migration/activation.js';
 import { bindMissingOriginals } from '../../apps/backend/dist/application/migration/approval.js';
@@ -315,14 +317,39 @@ test('restores a migrated workspace with its exact read-only gate or first-write
             try {
               await stageRestore(db, lease, media, backup);
               assert.equal((await readInstallation(db, installationId)).activeGenerationId, null);
+              const restored = { fingerprint: receipt.manifestSha256, proof: backup.proof, generationId };
+              const enable = (run = runId, intent = restored) => enableRestoredMigrationWrites(db, lease, installationId,
+                run, intent, binding.mfaKeyDigest);
+              await assert.rejects(enable(), { fault: 'activation-conflict' });
               await activateRestore(db, lease, media, installationId, receipt.manifestSha256, backup.proof,
                 (keyDigest) => assert.equal(keyDigest, binding.mfaKeyDigest));
               const cutover = await inspectMigrationCutover(db, await readInstallation(db, installationId));
               assert.equal(cutover.state, writable ? 'writable' : 'activeReadOnly');
-              if (!writable) return await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), { code: 'WORKSPACE_READ_ONLY' });
-              assert.equal((await assertWorkspaceWritable(db, installationId, generationId)).fence.commandId, commandId);
-              await db.collection('commands').deleteOne({ _id: workspaceKey(generationId, commandId) });
-              await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), /first-write fence/);
+              if (writable) {
+                assert.equal((await enable()).fence.commandId, commandId);
+                await db.collection('commands').deleteOne({ _id: workspaceKey(generationId, commandId) });
+                await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), /first-write fence/);
+                return;
+              }
+              await assert.rejects(enable(randomUUID()), { fault: 'activation-conflict' });
+              await assert.rejects(enable(runId, { ...restored, proof: digestText(9) }), { fault: 'activation-conflict' });
+              await assert.rejects(enable(runId, { ...restored, generationId: randomUUID() }), { fault: 'activation-conflict' });
+              await assert.rejects(assertWorkspaceWritable(db, installationId, generationId), { code: 'WORKSPACE_READ_ONLY' });
+              assert.equal((await enable()).state, 'writable');
+              const gate = new CommandGate(lease);
+              try {
+                const operationId = 'restore.first-write';
+                const journal = new CommandJournal(gate, db, installationId, { operations: {
+                  [operationId]: {
+                    normalize: () => null, authorize: () => {},
+                    plan: () => ({ effects: [], result: null, audit: { resourceId: ids.admin, resourceType: 'account', action: operationId } }),
+                  },
+                } });
+                await journal.recover();
+                await journal.execute({ operationId, actorId: ids.admin, idempotencyKey: randomUUID(), input: null });
+                const command = await db.collection('commands').findOne({ generationId, operationId, status: 'committed' });
+                assert.equal((await enable()).fence.commandId, command.id);
+              } finally { await gate.closeAndDrain(); }
             } finally { await media.close(); lease.release(); }
           });
         } finally { await backup.close(); }

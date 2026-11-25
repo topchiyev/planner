@@ -188,7 +188,7 @@ Before the first write fence, an operator can restore the prior route and confir
 sudo plannerctl migration rollback --expect-generation "$imported_generation_id" --format json
 ```
 
-The first accepted workspace command records its durable fence before it can apply changes. A rollback refusal after that point can mean a command was interrupted before any effect became visible. Keep the current Planner database and media intact, export a protected Planner recovery backup, and inventory and reconcile the edits against the retained source backup before any routing decision. Never overwrite either workspace automatically. For a recovery restore, keep the same archive and its independently recorded manifest digest. The restored archive retains the exact cutover write state.
+The first accepted workspace command records its durable fence before it can apply changes. A rollback refusal after that point can mean a command was interrupted before any effect became visible. Keep the current Planner database and media intact, export a protected Planner recovery backup, and inventory and reconcile the edits against the retained source backup before any routing decision. Never overwrite either workspace automatically. For a recovery restore, keep the same archive and its independently recorded manifest digest. The restored archive retains the exact cutover write state. For a restored read-only archive, check the published generation and sample access as above, then run `plannerctl migration enable-writes --run ID` with that archive’s original run ID. The protected restore receipt determines the exact archive and generation. Source staging, activation and migration rollback remain unavailable on the restored installation.
 
 ## Workspace storage schema
 
