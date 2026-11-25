@@ -5,6 +5,7 @@ import { MediaRejection, reserveSlots } from './errors.js';
 
 export const imageTypes = { JPEG: 'image/jpeg', PNG: 'image/png', GIF: 'image/gif', WEBP: 'image/webp' } as const;
 type ImageFormat = keyof typeof imageTypes;
+type DecoderFormat = ImageFormat | 'migration-jpeg';
 export type MediaVariants = Readonly<{ small: BlobIdentity; large: BlobIdentity }>;
 export const maximumDerivativeBytes = 8 * 1024 * 1024;
 
@@ -19,7 +20,7 @@ export function detectImage(header: Buffer): ImageFormat | undefined {
 
 type DecodeIdentity = { uid: number; gid: number };
 
-function decode(executable: string, script: string, format: ImageFormat, handles: FileHandle[], signal: AbortSignal, identity?: DecodeIdentity) {
+function decode(executable: string, script: string, format: DecoderFormat, handles: FileHandle[], signal: AbortSignal, identity?: DecodeIdentity) {
   signal.throwIfAborted();
   return new Promise<void>((resolve, reject) => {
     const child = spawn(executable, ['-I', '-B', script, format], {
@@ -46,14 +47,14 @@ function decode(executable: string, script: string, format: ImageFormat, handles
 
 export function createMediaDecoder(script: string, executable = '/usr/bin/python3', identity?: DecodeIdentity) {
   const reserve = reserveSlots(2);
-  return async (stage: PrivateMediaStage, format: ImageFormat, signal: AbortSignal): Promise<MediaVariants> => {
+  return async (stage: PrivateMediaStage, format: ImageFormat, signal: AbortSignal, mode?: 'migration'): Promise<MediaVariants> => {
     const release = reserve();
     const handles: FileHandle[] = [];
     try {
       handles.push(await stage.openPart('original'));
       handles.push(await stage.createPart('small'));
       handles.push(await stage.createPart('large'));
-      await decode(executable, script, format, handles, signal, identity);
+      await decode(executable, script, format === 'JPEG' && mode === 'migration' ? 'migration-jpeg' : format, handles, signal, identity);
       const small = await stage.seal('small', handles[1], maximumDerivativeBytes);
       const large = await stage.seal('large', handles[2], maximumDerivativeBytes);
       if (!small.byteLength || !large.byteLength) throw new MediaStorageError();
