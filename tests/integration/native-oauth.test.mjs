@@ -381,10 +381,15 @@ test('native OAuth binds protected discovery, browser MFA and consent to one res
 
       const closingFamily = await token(await approve(await interaction(persistent), false, true));
       assert.equal(closingFamily.status, 200);
-      const refreshedBeforeDeadline = await refresh(closingFamily.json.refresh_token);
-      assert.equal(refreshedBeforeDeadline.status, 200);
       const latest = await connections.findOne({ generationId, userId: actorId, clientId, offline: true, revokedAt: null },
         { sort: { issuedAt: -1 } });
+      const accessTokens = db.collection('oauthArtifacts');
+      const shortLived = await accessTokens.findOne({ generationId, kind: 'AccessToken', providerGrantId: latest.providerGrantId });
+      await accessTokens.updateOne({ _id: shortLived._id }, { $set: { expiresAt: new Date(0) } });
+      assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + closingFamily.json.access_token } })).status, 401);
+      const refreshedBeforeDeadline = await refresh(closingFamily.json.refresh_token);
+      assert.equal(refreshedBeforeDeadline.status, 200);
+      assert.equal((await call('/mcp', { headers: { Authorization: 'Bearer ' + refreshedBeforeDeadline.json.access_token } })).status, 501);
       const familyRows = await db.collection('oauthArtifacts').find({ generationId, kind: 'RefreshToken', providerGrantId: latest.providerGrantId }).toArray();
       assert.equal(familyRows.length, 2);
       assert.ok(familyRows.every((row) => row.expiresAt.getTime() <= latest.expiresAt.getTime()));
